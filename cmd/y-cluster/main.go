@@ -22,7 +22,14 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := rootCmd().ExecuteContext(ctx); err != nil {
+	cmd := rootCmd()
+
+	// When invoked as kubectl-yconverge, act as the yconverge subcommand directly
+	if strings.HasPrefix(filepath.Base(os.Args[0]), "kubectl-yconverge") {
+		cmd = yconvergePluginCmd()
+	}
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
 }
@@ -45,6 +52,20 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(yconvergeCmd())
 
 	return root
+}
+
+func yconvergePluginCmd() *cobra.Command {
+	cmd := yconvergeCmd()
+	cmd.Use = "kubectl-yconverge"
+	cmd.Short = "kubectl plugin: apply a kustomize base with dependency resolution and checks"
+	// Add persistent flags that rootCmd normally provides
+	var verbose bool
+	cmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "debug logging")
+	cmd.PersistentPreRun = func(c *cobra.Command, args []string) {
+		logger := newLogger(verbose)
+		c.SetContext(withLogger(c.Context(), logger))
+	}
+	return cmd
 }
 
 func yconvergeCmd() *cobra.Command {
