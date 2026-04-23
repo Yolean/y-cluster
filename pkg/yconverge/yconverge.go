@@ -154,6 +154,7 @@ func kubectlApply(ctx context.Context, opts Options, logger *zap.Logger) error {
 		"--context=" + opts.Context,
 		"apply",
 		"--server-side=true",
+		"--force-conflicts",
 		"-k", opts.KustomizeDir,
 	}
 	if opts.DryRun != "" {
