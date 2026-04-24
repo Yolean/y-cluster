@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://github.com/turbokube/contain/raw/refs/heads/main/jsonschema/config.json
+# Image spec for ghcr.io/yolean/y-cluster. Built and pushed by
+# .github/workflows/image.yaml using turbokube/contain.
+#
+# Shape matches ystack's y-kustomize image: distroless static nonroot
+# base, single amd64 Go binary layered on top at /usr/local/bin.
+# pkg/serve refuses to run as UID 0, so the :nonroot base (UID 65532)
+# is what we want.
+base: gcr.io/distroless/static:nonroot@sha256:e3f945647ffb95b5839c07038d64f9811adf17308b9121d8a2b87b6a22a80a39
+layers:
+- localFile:
+    path: target/linux/amd64/y-cluster
+    containerPath: /usr/local/bin/y-cluster
+  layerAttributes:
+    uid: 65532
+    gid: 65534
+    mode: 0755
+entrypoint:
+- /usr/local/bin/y-cluster

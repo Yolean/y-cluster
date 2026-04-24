@@ -1,0 +1,68 @@
+name: Image
+
+# Builds and pushes ghcr.io/yolean/y-cluster using turbokube/contain,
+# modeled after Yolean/ystack's y-kustomize image workflow
+# (ystack@81c49c8). On every push to main and every tag push, the image
+# is tagged with the commit SHA; tag pushes also publish the tag name.
+#
+# GitHub Actions is not enabled under YoleanAgents; the `if:` guard
+# below is belt-and-braces so the workflow is a no-op even if it is
+# ever enabled there. The human maintainer mirrors from
+# YoleanAgents/y-cluster to Yolean/y-cluster when ready to publish.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  image:
+    if: github.repository_owner == 'Yolean'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install turbokube/contain
+        # Pinned to the upstream default branch; update to a released
+        # tag when turbokube/contain cuts one that covers our feature set.
+        run: go install github.com/turbokube/contain/cmd/contain@main
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build y-cluster binary (linux/amd64)
+        working-directory: cmd/y-cluster
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o target/linux/amd64/y-cluster .
+
+      - name: Build and push image (SHA tag)
+        working-directory: cmd/y-cluster
+        env:
+          IMAGE: ghcr.io/yolean/y-cluster:${{ github.sha }}
+        run: contain build --push
+
+      - name: Build and push image (release tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: cmd/y-cluster
+        env:
+          IMAGE: ghcr.io/yolean/y-cluster:${{ github.ref_name }}
+        run: contain build --push
