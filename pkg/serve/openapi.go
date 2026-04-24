@@ -31,17 +31,17 @@ func (s openAPISpec) Render() []byte {
 	var b bytes.Buffer
 	b.WriteString("openapi: 3.1.0\n")
 	b.WriteString("info:\n")
-	b.WriteString(fmt.Sprintf("  title: %s\n", yamlEscape(s.Title)))
-	b.WriteString(fmt.Sprintf("  x-type: %s\n", string(s.Type)))
-	b.WriteString(fmt.Sprintf("  version: %s\n", yamlEscape(s.Version)))
+	fmt.Fprintf(&b, "  title: %s\n", yamlEscape(s.Title))
+	fmt.Fprintf(&b, "  x-type: %s\n", string(s.Type))
+	fmt.Fprintf(&b, "  version: %s\n", yamlEscape(s.Version))
 	b.WriteString("paths:\n")
 	for _, r := range s.Routes {
-		b.WriteString(fmt.Sprintf("  %s:\n", yamlEscape(r.Path)))
+		fmt.Fprintf(&b, "  %s:\n", yamlEscape(r.Path))
 		b.WriteString("    get:\n")
 		b.WriteString("      responses:\n")
 		b.WriteString("        \"200\":\n")
 		b.WriteString("          content:\n")
-		b.WriteString(fmt.Sprintf("            %s: {}\n", yamlEscape(r.ContentType)))
+		fmt.Fprintf(&b, "            %s: {}\n", yamlEscape(r.ContentType))
 	}
 	return b.Bytes()
 }
