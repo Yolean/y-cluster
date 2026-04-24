@@ -1,10 +1,38 @@
 # y-cluster
 
+## Usage
+
+Use subcommand --help for details.
+
+```
+# Apply a base with checks
+y-cluster yconverge --context=local -k path/to/base/
+
+# Check only (no apply)
+y-cluster yconverge --context=local --checks-only -k path/to/base/
+
+# Print dependency order
+y-cluster yconverge --context=local --print-deps -k path/to/base/
+
+# Dry run (validate against API server, no mutation)
+y-cluster yconverge --context=local --dry-run=server -k path/to/base/
+
+# Image management
+y-cluster images list -k path/to/base/
+y-cluster images cache -k path/to/base/
+y-cluster images load -k path/to/base/
+
+# Cluster provisioning
+y-cluster provision --provider=qemu
+y-cluster teardown
+```
+
+## yconverge
+
 Idempotent Kubernetes convergence with dependency ordering and checks.
 
-## Core concept
-
-y-cluster has one fundamental operation:
+Symlink y-cluster to `kubectl-yconverge` to add a plugin that can
+be used instead of `apply -k`.
 
 ```
 y-cluster yconverge -k path/to/base/
@@ -12,6 +40,10 @@ y-cluster yconverge -k path/to/base/
 
 This applies a kustomize base to the cluster and runs checks defined
 in `yconverge.cue` files found in the base's directory tree.
+
+It also supports `yolean.se/converge-mode` labels on
+resources in the base, that modify behavior so bases
+can be applied with for example a new version of a Job.
 
 Two separate mechanisms control **what gets converged first** and
 **what gets checked**. Understanding the difference is essential.
@@ -122,31 +154,6 @@ y-cluster yconverge -k converge-default/
 This replaces a comma-separated list of targets with a declarative
 dependency graph. The tool resolves the imports, converges each base
 in topological order, and exits.
-
-## Usage
-
-```
-# Apply a base with checks
-y-cluster yconverge --context=local -k path/to/base/
-
-# Check only (no apply)
-y-cluster yconverge --context=local --checks-only -k path/to/base/
-
-# Print dependency order
-y-cluster yconverge --context=local --print-deps -k path/to/base/
-
-# Dry run (validate against API server, no mutation)
-y-cluster yconverge --context=local --dry-run=server -k path/to/base/
-
-# Image management
-y-cluster images list -k path/to/base/
-y-cluster images cache -k path/to/base/
-y-cluster images load -k path/to/base/
-
-# Cluster provisioning
-y-cluster provision --provider=qemu
-y-cluster teardown
-```
 
 ## Check types
 
