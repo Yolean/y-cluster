@@ -70,6 +70,15 @@ resources should customize a single base — not aggregate independent
 modules into one apply. If two modules need ordered convergence, they
 are separate yconverge targets connected by CUE imports.
 
+### Caution: namespaces
+
+Namespace resources require special care. A converge-mode like
+`replace` could delete a namespace and all its contents. y-cluster
+may add special handling for namespaces in the future (e.g.
+refusing to delete them, or requiring explicit confirmation).
+Do not use namespace creation as an example base or as a test for
+convergence behavior.
+
 ### Super bases
 
 A convergence target can have an empty `kustomization.yaml` (no

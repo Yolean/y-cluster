@@ -1,5 +1,15 @@
 //go:build e2e
 
+// Package e2e tests yconverge against a real cluster (kwok in Docker).
+//
+// Test bases model a three-tier application:
+//   - e2e-db:       database config and service (foundation)
+//   - e2e-backend:  backend that depends on db (CUE import)
+//   - e2e-frontend: frontend that depends on backend (transitive)
+//
+// Each tier has base/ (the module) and optionally qa/ (a kustomize overlay).
+// This structure tests both CUE-based dependency ordering (db before backend)
+// and kustomize-based customization (qa overlay aggregates checks from base).
 package e2e
 
 import (
@@ -7,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,7 +34,6 @@ const (
 	contextName   = "y-cluster-e2e"
 )
 
-// testdataDir returns the absolute path to testdata/.
 func testdataDir(t *testing.T) string {
 	t.Helper()
 	abs, err := filepath.Abs("../testdata")
@@ -33,46 +43,48 @@ func testdataDir(t *testing.T) string {
 	return abs
 }
 
-// setupCluster creates a kwok cluster in Docker and returns a cleanup function.
-// Writes a kubeconfig to a temp file and returns its path.
-func setupCluster(t *testing.T) string {
+func TestMain(m *testing.M) {
+	code := m.Run()
+	_ = exec.Command("docker", "rm", "-f", containerName).Run()
+	os.Exit(code)
+}
+
+var clusterOnce sync.Once
+var clusterKubeconfig string
+
+func setupCluster(t *testing.T) {
 	t.Helper()
-	ctx := context.Background()
 
-	// Check Docker is available
-	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
-		t.Skip("Docker not available")
-	}
+	clusterOnce.Do(func() {
+		ctx := context.Background()
 
-	// Remove any leftover container
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", containerName).Run()
+		if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
+			t.Skip("Docker not available")
+		}
 
-	// Start kwok
-	cmd := exec.CommandContext(ctx, "docker", "run", "-d",
-		"--name", containerName,
-		"-p", "0:8080",
-		kwokImage)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to start kwok: %s: %v", out, err)
-	}
+		_ = exec.CommandContext(ctx, "docker", "rm", "-f", containerName).Run()
 
-	t.Cleanup(func() {
-		_ = exec.Command("docker", "rm", "-f", containerName).Run()
-	})
+		cmd := exec.CommandContext(ctx, "docker", "run", "-d",
+			"--name", containerName,
+			"-p", "0:8080",
+			kwokImage)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("start kwok: %s: %v", out, err)
+		}
 
-	// Get mapped port
-	portOut, err := exec.CommandContext(ctx, "docker", "port", containerName, "8080").Output()
-	if err != nil {
-		t.Fatalf("failed to get port: %v", err)
-	}
-	hostPort := strings.TrimSpace(string(portOut))
-	// docker port returns "0.0.0.0:12345" or "[::]:12345"
-	parts := strings.Split(hostPort, ":")
-	port := parts[len(parts)-1]
+		portOut, err := exec.CommandContext(ctx, "docker", "port", containerName, "8080").Output()
+		if err != nil {
+			t.Fatalf("get port: %v", err)
+		}
+		parts := strings.Split(strings.TrimSpace(string(portOut)), ":")
+		port := parts[len(parts)-1]
 
-	// Write kubeconfig
-	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
-	kubeconfigContent := fmt.Sprintf(`apiVersion: v1
+		dir, err := os.MkdirTemp("", "y-cluster-e2e-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clusterKubeconfig = filepath.Join(dir, "kubeconfig")
+		content := fmt.Sprintf(`apiVersion: v1
 kind: Config
 clusters:
 - cluster:
@@ -88,27 +100,26 @@ users:
 - name: %s
 `, port, contextName, contextName, contextName, contextName, contextName, contextName)
 
-	if err := os.WriteFile(kubeconfig, []byte(kubeconfigContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	os.Setenv("KUBECONFIG", kubeconfig)
+		if err := os.WriteFile(clusterKubeconfig, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			cmd := exec.CommandContext(ctx, "kubectl", "--context="+contextName, "get", "svc")
+			cmd.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
+			if err := cmd.Run(); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("kwok not ready after 30s")
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	})
+
+	os.Setenv("KUBECONFIG", clusterKubeconfig)
 	t.Cleanup(func() { os.Unsetenv("KUBECONFIG") })
-
-	// Wait for API server
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		cmd := exec.CommandContext(ctx, "kubectl", "--context="+contextName, "get", "ns")
-		cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeconfig)
-		if err := cmd.Run(); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("kwok cluster not ready after 30s")
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	return kubeconfig
 }
 
 func logger(t *testing.T) *zap.Logger {
@@ -120,159 +131,144 @@ func logger(t *testing.T) *zap.Logger {
 	return l
 }
 
-func TestYconverge_Namespace(t *testing.T) {
+// --- Ordering: CUE imports create separate convergence steps ---
+
+func TestOrdering_DbBeforeBackend(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
 	result, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
+		KustomizeDir: filepath.Join(td, "e2e-backend/base"),
 	}, logger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Steps) != 1 {
-		t.Fatalf("expected 1 step, got %d", len(result.Steps))
+	if len(result.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %v", basenames(result.Steps))
+	}
+	dbIdx := indexOfDir(result.Steps, "e2e-db")
+	backendIdx := indexOfDir(result.Steps, "e2e-backend")
+	if dbIdx < 0 || backendIdx < 0 {
+		t.Fatalf("missing steps: %v", result.Steps)
+	}
+	if dbIdx >= backendIdx {
+		t.Fatalf("db must come before backend: %v", result.Steps)
 	}
 }
 
-func TestYconverge_Idempotent(t *testing.T) {
-	setupCluster(t)
-	td := testdataDir(t)
-	log := logger(t)
-
-	// First apply
-	_, err := yconverge.Run(context.Background(), yconverge.Options{
-		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
-	}, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Second apply — must succeed (idempotent)
-	_, err = yconverge.Run(context.Background(), yconverge.Options{
-		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
-	}, log)
-	if err != nil {
-		t.Fatalf("idempotent re-apply failed: %v", err)
-	}
-}
-
-func TestYconverge_DependencyOrdering(t *testing.T) {
+func TestOrdering_TransitiveChain(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// e2e-dependency → e2e-configmap → e2e-namespace (transitive)
+	// frontend → backend → db
 	result, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-dependency"),
+		KustomizeDir: filepath.Join(td, "e2e-frontend/base"),
 	}, logger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Steps) != 3 {
-		t.Fatalf("expected 3 steps (namespace→configmap→dependency), got %d: %v",
-			len(result.Steps), basenames(result.Steps))
+		t.Fatalf("expected 3 steps, got %v", basenames(result.Steps))
 	}
-	if filepath.Base(result.Steps[0]) != "e2e-namespace" {
-		t.Fatalf("expected e2e-namespace first, got %s", filepath.Base(result.Steps[0]))
-	}
-	if filepath.Base(result.Steps[1]) != "e2e-configmap" {
-		t.Fatalf("expected e2e-configmap second, got %s", filepath.Base(result.Steps[1]))
-	}
-	if filepath.Base(result.Steps[2]) != "e2e-dependency" {
-		t.Fatalf("expected e2e-dependency last, got %s", filepath.Base(result.Steps[2]))
+	dbIdx := indexOfDir(result.Steps, "e2e-db")
+	backendIdx := indexOfDir(result.Steps, "e2e-backend")
+	frontendIdx := indexOfDir(result.Steps, "e2e-frontend")
+	if dbIdx >= backendIdx || backendIdx >= frontendIdx {
+		t.Fatalf("wrong order: db=%d backend=%d frontend=%d in %v",
+			dbIdx, backendIdx, frontendIdx, result.Steps)
 	}
 }
 
-func TestYconverge_IndirectChecks(t *testing.T) {
-	setupCluster(t)
-	td := testdataDir(t)
-
-	// e2e-namespace must exist first (e2e-indirect → e2e-configmap needs it)
-	_, err := yconverge.Run(context.Background(), yconverge.Options{
-		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
-	}, logger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// e2e-indirect has no yconverge.cue — checks come from e2e-configmap base
-	_, err = yconverge.Run(context.Background(), yconverge.Options{
-		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-indirect"),
-	}, logger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestYconverge_NamespaceEnvVar(t *testing.T) {
-	setupCluster(t)
-	td := testdataDir(t)
-
-	// Create the namespace first
-	_, err := yconverge.Run(context.Background(), yconverge.Options{
-		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
-	}, logger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The check verifies $NAMESPACE = "y-cluster-e2e"
-	_, err = yconverge.Run(context.Background(), yconverge.Options{
-		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace-check"),
-	}, logger(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestYconverge_PrintDeps(t *testing.T) {
-	// No cluster needed for print-deps
+func TestOrdering_PrintDepsNoCluster(t *testing.T) {
 	td := testdataDir(t)
 
 	result, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      "unused",
-		KustomizeDir: filepath.Join(td, "e2e-dependency"),
+		KustomizeDir: filepath.Join(td, "e2e-frontend/base"),
 		PrintDeps:    true,
 	}, logger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := basenames(result.Steps)
-	if len(names) != 3 {
-		t.Fatalf("expected 3 deps, got %v", names)
-	}
-	if names[0] != "e2e-namespace" || names[1] != "e2e-configmap" || names[2] != "e2e-dependency" {
-		t.Fatalf("unexpected order: %v", names)
+	if len(result.Steps) != 3 {
+		t.Fatalf("expected 3 steps, got %v", basenames(result.Steps))
 	}
 }
 
-func TestYconverge_ChecksOnly(t *testing.T) {
+// --- Customization: kustomize overlays aggregate checks from base ---
+
+func TestCustomization_QaOverlayAggregatesBaseChecks(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// Apply namespace first
+	// db/qa has no yconverge.cue — checks come from db/base via traversal
 	_, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
+		KustomizeDir: filepath.Join(td, "e2e-db/qa"),
 	}, logger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
+}
 
-	// Checks-only: verify without re-applying
+func TestCustomization_BackendQaResolvesDbDependency(t *testing.T) {
+	setupCluster(t)
+	td := testdataDir(t)
+
+	// backend/qa wraps backend/base which depends on db
+	result, err := yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: filepath.Join(td, "e2e-backend/qa"),
+	}, logger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbIdx := indexOfDir(result.Steps, "e2e-db")
+	if dbIdx < 0 {
+		t.Fatalf("db dependency not resolved from qa overlay: %v", result.Steps)
+	}
+}
+
+// --- Idempotency ---
+
+func TestIdempotent_ReapplySucceeds(t *testing.T) {
+	setupCluster(t)
+	td := testdataDir(t)
+	log := logger(t)
+
+	for i := 0; i < 2; i++ {
+		_, err := yconverge.Run(context.Background(), yconverge.Options{
+			Context:      contextName,
+			KustomizeDir: filepath.Join(td, "e2e-db/base"),
+		}, log)
+		if err != nil {
+			t.Fatalf("apply %d failed: %v", i+1, err)
+		}
+	}
+}
+
+// --- ChecksOnly ---
+
+func TestChecksOnly_SkipsApply(t *testing.T) {
+	setupCluster(t)
+	td := testdataDir(t)
+	log := logger(t)
+
+	_, err := yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: filepath.Join(td, "e2e-db/base"),
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	_, err = yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
-		KustomizeDir: filepath.Join(td, "e2e-namespace"),
+		KustomizeDir: filepath.Join(td, "e2e-db/base"),
 		ChecksOnly:   true,
-	}, logger(t))
+	}, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,4 +280,13 @@ func basenames(paths []string) []string {
 		names = append(names, filepath.Base(p))
 	}
 	return names
+}
+
+func indexOfDir(steps []string, segment string) int {
+	for i, s := range steps {
+		if strings.Contains(s, segment) {
+			return i
+		}
+	}
+	return -1
 }

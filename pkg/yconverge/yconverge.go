@@ -45,12 +45,33 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 	// Find the CUE module root for resolving import paths
 	cueRoot := FindCueModuleRoot(absDir)
 
-	// Resolve dependency order
+	// Resolve dependency order from all CUE files in the kustomize tree.
+	// An overlay (e.g. backend/qa) inherits dependencies from its base
+	// (e.g. backend/base/yconverge.cue imports db).
 	var steps []string
 	if cueRoot != "" {
-		steps, err = ResolveDeps(cueRoot, absDir)
-		if err != nil {
-			return nil, fmt.Errorf("resolve deps: %w", err)
+		// Walk the kustomize tree to find all dirs with yconverge.cue
+		tResult, walkErr := traverse.Walk(absDir, nil)
+		if walkErr == nil {
+			cueDirs := FindCueFiles(tResult.Dirs)
+			// Resolve deps from each CUE file, collecting all unique steps
+			visited := make(map[string]bool)
+			for _, cueDir := range cueDirs {
+				depSteps, depErr := ResolveDeps(cueRoot, cueDir)
+				if depErr != nil {
+					return nil, fmt.Errorf("resolve deps from %s: %w", cueDir, depErr)
+				}
+				for _, s := range depSteps {
+					if !visited[s] {
+						visited[s] = true
+						steps = append(steps, s)
+					}
+				}
+			}
+		}
+		// Always include the target itself as the final step
+		if !contains(steps, absDir) {
+			steps = append(steps, absDir)
 		}
 	} else {
 		steps = []string{absDir}

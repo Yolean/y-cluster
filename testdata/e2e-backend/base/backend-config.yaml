@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+data:
+  db-host: db.default.svc.cluster.local
+  listen-port: "8080"
