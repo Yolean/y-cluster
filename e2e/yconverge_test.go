@@ -197,6 +197,31 @@ func TestOrdering_PrintDepsNoCluster(t *testing.T) {
 	}
 }
 
+func TestOrdering_ChecksGateNextApply(t *testing.T) {
+	setupCluster(t)
+	td := testdataDir(t)
+
+	// Delete the marker to ensure a clean slate
+	exec.Command("kubectl", "--context="+contextName, "delete", "configmap", "db-check-marker", "--ignore-not-found").Run()
+
+	// backend depends on db. The db check creates a marker ConfigMap.
+	// The backend check verifies the marker exists, proving:
+	//   1. db was applied
+	//   2. db checks ran (creating the marker)
+	//   3. THEN backend was applied
+	//   4. backend checks ran (reading the marker)
+	//
+	// If both were bundled into one atomic apply, the marker would
+	// not exist when backend's check runs.
+	_, err := yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: filepath.Join(td, "e2e-backend/base"),
+	}, logger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- Customization: kustomize overlays aggregate checks from base ---
 
 func TestCustomization_QaOverlayAggregatesBaseChecks(t *testing.T) {
