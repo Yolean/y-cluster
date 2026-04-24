@@ -117,9 +117,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    env:
-      CONTAIN_VERSION: "0.9.0"
-      CONTAIN_SHA256_LINUX_AMD64: "e8c2bbaeb1ff3ddb4adb8a9a87c9a0f1f5b90e2a5899528980e03398c199450b"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -135,14 +132,9 @@ jobs:
           name: y-cluster-linux-arm64
           path: cmd/y-cluster/target/linux/arm64
 
-      - name: Install turbokube/contain
-        run: |
-          set -euo pipefail
-          url="https://github.com/turbokube/contain/releases/download/v${CONTAIN_VERSION}/contain-v${CONTAIN_VERSION}-linux-amd64"
-          curl -fsSL -o /usr/local/bin/contain "$url"
-          echo "${CONTAIN_SHA256_LINUX_AMD64}  /usr/local/bin/contain" | sha256sum --check -
-          chmod +x /usr/local/bin/contain
-          contain --version
+      - uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
+        with:
+          version: v0.9.0
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
