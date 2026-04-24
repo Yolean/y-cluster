@@ -1,0 +1,59 @@
+name: e2e Release
+
+# Validates that an actually-published y-cluster release archive works
+# end-to-end on the platforms we support. Runs on tag publication and
+# can be re-run manually against any published tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test"
+        required: true
+
+jobs:
+  serve:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: y-cluster-linux-amd64.tar.gz
+          - os: macos-latest
+            asset: y-cluster-darwin-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.tag.outputs.tag }}'
+          gh release download "$tag" \
+            --repo Yolean/y-cluster \
+            --pattern '${{ matrix.asset }}' \
+            --dir .
+          tar -xzf '${{ matrix.asset }}'
+          test -x y-cluster
+          ./y-cluster --version
+
+      - name: Run serve e2e against the release binary
+        shell: bash
+        env:
+          Y_CLUSTER_BIN: ./y-cluster
+        run: ./scripts/e2e-serve-against-binary.sh

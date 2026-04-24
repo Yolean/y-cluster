@@ -1,6 +1,6 @@
 version: 2
 
-project_name: kustomize-traverse
+project_name: y-cluster
 
 before:
   hooks:
@@ -21,14 +21,41 @@ builds:
     ldflags:
       - -s -w
 
+  - id: y-cluster
+    main: ./cmd/y-cluster
+    binary: y-cluster
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
 archives:
-  - id: default
-    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+  - id: kustomize-traverse
+    ids: [kustomize-traverse]
+    name_template: "kustomize-traverse-{{ .Os }}-{{ .Arch }}"
     formats: [tar.gz]
     files:
       - LICENSE*
       - README*
       - SPEC*
+
+  - id: y-cluster
+    ids: [y-cluster]
+    name_template: "y-cluster-{{ .Os }}-{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE*
+      - README*
+      - SPEC*
+      - SERVE_FEATURE*
+      - src: pkg/serve/schema/y-cluster-serve.schema.json
+        dst: schema
 
 checksum:
   name_template: "checksums-sha256.txt"
@@ -49,4 +76,4 @@ changelog:
 release:
   github:
     owner: Yolean
-    name: kustomize-traverse
+    name: y-cluster
