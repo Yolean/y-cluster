@@ -55,6 +55,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(teardownCmd())
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
+	root.AddCommand(serveCmd())
 
 	return root
 }
