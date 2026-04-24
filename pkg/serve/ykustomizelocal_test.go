@@ -231,3 +231,66 @@ func TestYK_NoSources(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+func TestYK_RenameSyntaxRejected(t *testing.T) {
+	src := t.TempDir()
+	seedYKBases(t, src, map[string]string{
+		"y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml": "kind: Job\n",
+	})
+	// Write a kustomization.yaml with rename syntax
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: y-kustomize.kafka.setup-topic-job
+  files:
+  - base-for-annotations.yaml=y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml
+`
+	os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644)
+
+	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err == nil {
+		t.Fatal("want error for rename syntax")
+	}
+	if !strings.Contains(err.Error(), "rename syntax") {
+		t.Fatalf("error should mention rename syntax: %v", err)
+	}
+}
+
+func TestYK_NoRenameAllowed(t *testing.T) {
+	src := t.TempDir()
+	seedYKBases(t, src, map[string]string{
+		"y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml": "kind: Job\n",
+	})
+	// Write a kustomization.yaml without rename syntax
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: y-kustomize.blobs.setup-bucket-job
+  files:
+  - y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml
+`
+	os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644)
+
+	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(b.Routes()) != 1 {
+		t.Fatalf("routes: %v", b.Routes())
+	}
+}
+
+func TestYK_NoKustomizationIsOK(t *testing.T) {
+	src := t.TempDir()
+	seedYKBases(t, src, map[string]string{
+		"y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml": "kind: Job\n",
+	})
+	// No kustomization.yaml — should still work
+	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(b.Routes()) != 1 {
+		t.Fatalf("routes: %v", b.Routes())
+	}
+}

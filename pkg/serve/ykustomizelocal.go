@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 )
 
 // yKustomizeBasesDir is the conventional subdirectory in a source.
@@ -59,6 +61,10 @@ func newYKustomizeLocalBackend(cfg *Config) (*ykBackend, error) {
 			return nil, fmt.Errorf("source %s: %s is not a directory", src, yKustomizeBasesDir)
 		}
 
+		if err := checkForFileRenames(src); err != nil {
+			return nil, err
+		}
+
 		scanned, err := scanYKustomizeBases(basesDir)
 		if err != nil {
 			return nil, fmt.Errorf("scan %s: %w", basesDir, err)
@@ -79,6 +85,41 @@ func newYKustomizeLocalBackend(cfg *Config) (*ykBackend, error) {
 	sort.Strings(order)
 
 	return &ykBackend{cfg: cfg, routes: routes, order: order}, nil
+}
+
+// kustomizationFile is the subset of kustomization.yaml we need for rename detection.
+type kustomizationFile struct {
+	SecretGenerator []struct {
+		Files []string `yaml:"files"`
+	} `yaml:"secretGenerator"`
+}
+
+// checkForFileRenames reads the kustomization.yaml in a source dir and
+// fails if any secretGenerator files entry uses the key=path rename
+// syntax. The local serve maps routes by on-disk filename; renames would
+// cause the served path to silently differ from the in-cluster path.
+func checkForFileRenames(sourceDir string) error {
+	kpath := filepath.Join(sourceDir, "kustomization.yaml")
+	data, err := os.ReadFile(kpath)
+	if err != nil {
+		// No kustomization.yaml is fine — the source just has raw bases.
+		return nil
+	}
+	var k kustomizationFile
+	if err := yaml.Unmarshal(data, &k); err != nil {
+		return fmt.Errorf("%s: %w", kpath, err)
+	}
+	for _, sg := range k.SecretGenerator {
+		for _, f := range sg.Files {
+			if strings.Contains(f, "=") {
+				return fmt.Errorf(
+					"%s: secretGenerator files entry %q uses rename syntax (key=path); "+
+						"rename the source file to match the key so local serve and in-cluster serve produce the same routes",
+					kpath, f)
+			}
+		}
+	}
+	return nil
 }
 
 // scanYKustomizeBases walks {basesDir}/{group}/{name}/{file} and returns
