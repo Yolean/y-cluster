@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
 
@@ -50,6 +51,10 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "debug logging")
 
 	root.AddCommand(yconvergeCmd())
+	root.AddCommand(provisionCmd())
+	root.AddCommand(teardownCmd())
+	root.AddCommand(exportCmd())
+	root.AddCommand(importCmd())
 
 	return root
 }
@@ -147,4 +152,89 @@ func loggerFromContext(ctx context.Context) *zap.Logger {
 		return l
 	}
 	return zap.NewNop()
+}
+
+func provisionCmd() *cobra.Command {
+	cfg := qemu.DefaultConfig()
+
+	cmd := &cobra.Command{
+		Use:   "provision",
+		Short: "Create a local Kubernetes cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger := loggerFromContext(cmd.Context())
+			if err := qemu.CheckPrerequisites(); err != nil {
+				return err
+			}
+			cluster, err := qemu.Provision(cmd.Context(), cfg, logger)
+			if err != nil {
+				return err
+			}
+			logger.Info("cluster ready",
+				zap.String("ssh", fmt.Sprintf("ssh -p %s -i %s ystack@localhost",
+					cfg.SSHPort, filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"))),
+			)
+			_ = cluster // cluster is running, caller can now converge
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&cfg.Name, "name", cfg.Name, "VM name")
+	cmd.Flags().StringVar(&cfg.DiskSize, "disk-size", cfg.DiskSize, "disk size")
+	cmd.Flags().StringVar(&cfg.Memory, "memory", cfg.Memory, "memory in MB")
+	cmd.Flags().StringVar(&cfg.CPUs, "cpus", cfg.CPUs, "CPU count")
+	cmd.Flags().StringVar(&cfg.SSHPort, "ssh-port", cfg.SSHPort, "host SSH port")
+	cmd.Flags().StringVar(&cfg.Context, "context", cfg.Context, "kubeconfig context name")
+	return cmd
+}
+
+func teardownCmd() *cobra.Command {
+	cfg := qemu.DefaultConfig()
+	var keepDisk bool
+
+	cmd := &cobra.Command{
+		Use:   "teardown",
+		Short: "Stop and remove the local cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger := loggerFromContext(cmd.Context())
+			return qemu.TeardownConfig(cfg, keepDisk, logger)
+		},
+	}
+
+	cmd.Flags().StringVar(&cfg.Name, "name", cfg.Name, "VM name")
+	cmd.Flags().BoolVar(&keepDisk, "keep-disk", false, "preserve disk image for faster re-provision")
+	return cmd
+}
+
+func exportCmd() *cobra.Command {
+	var diskPath string
+
+	cmd := &cobra.Command{
+		Use:   "export <output.vmdk>",
+		Short: "Export the cluster disk as a VMware appliance",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if diskPath == "" {
+				cfg := qemu.DefaultConfig()
+				diskPath = filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
+			}
+			return qemu.ExportVMDK(diskPath, args[0])
+		},
+	}
+
+	cmd.Flags().StringVar(&diskPath, "disk", "", "path to qcow2 disk (default: auto-detect from config)")
+	return cmd
+}
+
+func importCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "import <input.vmdk>",
+		Short: "Import a VMware appliance as the cluster disk",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := qemu.DefaultConfig()
+			diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
+			return qemu.ImportVMDK(args[0], diskPath)
+		},
+	}
+	return cmd
 }
