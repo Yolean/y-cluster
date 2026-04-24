@@ -53,7 +53,7 @@ func (m *Manager) CleanupStale() {
 	} {
 		cmd := exec.Command("kubectl", args...)
 		cmd.Env = append(os.Environ(), "KUBECONFIG="+m.Path)
-		cmd.Run() // ignore errors — entries may not exist
+		_ = cmd.Run() // ignore errors -- entries may not exist
 	}
 }
 
@@ -130,6 +130,9 @@ func (m *Manager) fixNullLists() {
 		}
 	}
 	if changed {
-		os.WriteFile(m.Path, []byte(content), 0o600)
+		// Best-effort rewrite; if it fails the original file is still
+		// valid YAML (kubectl accepts `contexts: null`), just noisy
+		// for kubie. Return without raising.
+		_ = os.WriteFile(m.Path, []byte(content), 0o600)
 	}
 }

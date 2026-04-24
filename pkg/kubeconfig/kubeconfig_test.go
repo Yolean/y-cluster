@@ -44,7 +44,9 @@ contexts: null
 kind: Config
 users: null
 `
-	os.WriteFile(path, []byte(content), 0o600)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	m := &Manager{Path: path}
 	m.fixNullLists()
@@ -78,7 +80,9 @@ contexts: []
 kind: Config
 users: []
 `
-	os.WriteFile(path, []byte(content), 0o600)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	m := &Manager{Path: path}
 	m.fixNullLists()
@@ -164,7 +168,9 @@ users:
 - name: prod
   user: {}
 `
-	os.WriteFile(path, []byte(existing), 0o600)
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	os.Setenv("KUBECONFIG", path)
 	defer os.Unsetenv("KUBECONFIG")
@@ -210,7 +216,9 @@ users:
 func TestCleanupStale_NoError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kubeconfig")
-	os.WriteFile(path, []byte("apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n"), 0o600)
+	if err := os.WriteFile(path, []byte("apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	os.Setenv("KUBECONFIG", path)
 	defer os.Unsetenv("KUBECONFIG")

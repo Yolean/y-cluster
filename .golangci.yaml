@@ -8,3 +8,21 @@ linters:
     - govet
     - staticcheck
     - unused
+  settings:
+    errcheck:
+      # Functions whose returned error is idiomatically ignored.
+      # Real write/exec operations are not excluded -- failures there
+      # hide bugs. This list is restricted to noise-only patterns.
+      exclude-functions:
+        # Writing to stdout/stderr rarely errors meaningfully.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Deferred Close() on files, HTTP response bodies, pipes.
+        - (io.Closer).Close
+        - (*os.File).Close
+        # Test env helpers and best-effort cleanup.
+        - os.Setenv
+        - os.Unsetenv
+        - os.Remove
+        - os.RemoveAll

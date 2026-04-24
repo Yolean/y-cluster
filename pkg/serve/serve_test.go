@@ -335,8 +335,12 @@ func TestLogs_Follow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.WriteString("second\n")
-	f.Close()
+	if _, err := f.WriteString("second\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := <-done; err != nil {
 		t.Fatal(err)

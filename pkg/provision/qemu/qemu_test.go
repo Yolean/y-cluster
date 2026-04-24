@@ -39,7 +39,9 @@ func TestIsRunning_StalePidFile(t *testing.T) {
 	cfg.CacheDir = t.TempDir()
 	// Write a pid file with a non-existent PID
 	pidFile := filepath.Join(cfg.CacheDir, cfg.Name+".pid")
-	os.WriteFile(pidFile, []byte("999999999\n"), 0o644)
+	if err := os.WriteFile(pidFile, []byte("999999999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	running, _ := cfg.IsRunning()
 	if running {
 		t.Fatal("expected not running for stale pid")
@@ -75,7 +77,9 @@ func TestTeardownConfig_KeepDisk(t *testing.T) {
 	cfg.CacheDir = t.TempDir()
 	cfg.Kubeconfig = ""
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
-	os.WriteFile(diskPath, []byte("fake"), 0o644)
+	if err := os.WriteFile(diskPath, []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := TeardownConfig(cfg, true, nil); err != nil {
 		t.Fatal(err)
@@ -91,7 +95,9 @@ func TestTeardownConfig_DeleteDisk(t *testing.T) {
 	cfg.CacheDir = t.TempDir()
 	cfg.Kubeconfig = ""
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
-	os.WriteFile(diskPath, []byte("fake"), 0o644)
+	if err := os.WriteFile(diskPath, []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := TeardownConfig(cfg, false, nil); err != nil {
 		t.Fatal(err)

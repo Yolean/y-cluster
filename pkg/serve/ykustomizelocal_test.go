@@ -101,7 +101,9 @@ func TestYK_MissingBasesDir(t *testing.T) {
 
 func TestYK_SourceIsFile(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "file")
-	os.WriteFile(f, []byte("x"), 0o644)
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := newYKustomizeLocalBackend(cfgWithSources(t, f))
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("want not-a-directory error, got %v", err)
@@ -110,7 +112,9 @@ func TestYK_SourceIsFile(t *testing.T) {
 
 func TestYK_BasesIsFile(t *testing.T) {
 	src := t.TempDir()
-	os.WriteFile(filepath.Join(src, "y-kustomize-bases"), []byte("x"), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "y-kustomize-bases"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("want not-a-directory error, got %v", err)
@@ -245,7 +249,9 @@ secretGenerator:
   files:
   - base-for-annotations.yaml=y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml
 `
-	os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err == nil {
@@ -269,7 +275,9 @@ secretGenerator:
   files:
   - y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml
 `
-	os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err != nil {
@@ -307,7 +315,9 @@ configMapGenerator:
   files:
   - base-for-annotations.yaml=y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml
 `
-	os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err == nil || !strings.Contains(err.Error(), "rename syntax") {
@@ -324,8 +334,10 @@ func TestYK_MalformedKustomizationRejected(t *testing.T) {
 		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "k\n",
 	})
 	// Unclosed list → yaml parse error
-	os.WriteFile(filepath.Join(src, "kustomization.yaml"),
-		[]byte("secretGenerator:\n- name: x\n  files: [unclosed\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"),
+		[]byte("secretGenerator:\n- name: x\n  files: [unclosed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err == nil {
@@ -350,7 +362,9 @@ secretGenerator:
   files:
   - renamed.yaml=y-kustomize-bases/kafka/setup-topic-job/x.yaml
 `
-			os.WriteFile(filepath.Join(src, name), []byte(kust), 0o644)
+			if err := os.WriteFile(filepath.Join(src, name), []byte(kust), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
 			_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 			if err == nil || !strings.Contains(err.Error(), "rename syntax") {
