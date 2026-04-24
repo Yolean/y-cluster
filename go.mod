@@ -1,4 +1,4 @@
-module github.com/Yolean/kustomize-traverse
+module github.com/Yolean/y-cluster
 
 go 1.26.1
 
