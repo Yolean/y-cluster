@@ -294,3 +294,68 @@ func TestYK_NoKustomizationIsOK(t *testing.T) {
 		t.Fatalf("routes: %v", b.Routes())
 	}
 }
+
+func TestYK_RenameSyntaxRejected_ConfigMapGenerator(t *testing.T) {
+	src := t.TempDir()
+	seedYKBases(t, src, map[string]string{
+		"y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml": "kind: Job\n",
+	})
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+- name: y-kustomize.kafka.setup-topic-job
+  files:
+  - base-for-annotations.yaml=y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml
+`
+	os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644)
+
+	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err == nil || !strings.Contains(err.Error(), "rename syntax") {
+		t.Fatalf("want rename-syntax error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "configMapGenerator") {
+		t.Fatalf("error should identify configMapGenerator: %v", err)
+	}
+}
+
+func TestYK_MalformedKustomizationRejected(t *testing.T) {
+	src := t.TempDir()
+	seedYKBases(t, src, map[string]string{
+		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "k\n",
+	})
+	// Unclosed list → yaml parse error
+	os.WriteFile(filepath.Join(src, "kustomization.yaml"),
+		[]byte("secretGenerator:\n- name: x\n  files: [unclosed\n"), 0o644)
+
+	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err == nil {
+		t.Fatal("want parse error")
+	}
+	if !strings.Contains(err.Error(), "kustomization.yaml") {
+		t.Fatalf("parse error should name the file: %v", err)
+	}
+}
+
+func TestYK_AlternateKustomizationFilenames(t *testing.T) {
+	for _, name := range []string{"kustomization.yml", "Kustomization"} {
+		t.Run(name, func(t *testing.T) {
+			src := t.TempDir()
+			seedYKBases(t, src, map[string]string{
+				"y-kustomize-bases/kafka/setup-topic-job/x.yaml": "k\n",
+			})
+			kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: y-kustomize.kafka.setup-topic-job
+  files:
+  - renamed.yaml=y-kustomize-bases/kafka/setup-topic-job/x.yaml
+`
+			os.WriteFile(filepath.Join(src, name), []byte(kust), 0o644)
+
+			_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+			if err == nil || !strings.Contains(err.Error(), "rename syntax") {
+				t.Fatalf("rename check should run for %s: %v", name, err)
+			}
+		})
+	}
+}

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"sigs.k8s.io/yaml"
+	"github.com/Yolean/y-cluster/pkg/kustomize/traverse"
 )
 
 // yKustomizeBasesDir is the conventional subdirectory in a source.
@@ -87,39 +87,42 @@ func newYKustomizeLocalBackend(cfg *Config) (*ykBackend, error) {
 	return &ykBackend{cfg: cfg, routes: routes, order: order}, nil
 }
 
-// kustomizationFile is the subset of kustomization.yaml we need for rename detection.
-type kustomizationFile struct {
-	SecretGenerator []struct {
-		Files []string `yaml:"files"`
-	} `yaml:"secretGenerator"`
-}
-
-// checkForFileRenames reads the kustomization.yaml in a source dir and
-// fails if any secretGenerator files entry uses the key=path rename
-// syntax. The local serve maps routes by on-disk filename; renames would
-// cause the served path to silently differ from the in-cluster path.
+// checkForFileRenames reads the kustomization file (yaml/yml/Kustomization)
+// in a source dir and fails if any secretGenerator or configMapGenerator
+// files entry uses the [key=]path rename syntax. The local serve maps
+// routes by on-disk filename; renames would cause the served path to
+// silently differ from the in-cluster path.
 func checkForFileRenames(sourceDir string) error {
-	kpath := filepath.Join(sourceDir, "kustomization.yaml")
-	data, err := os.ReadFile(kpath)
+	k, kpath, err := traverse.LoadKustomization(sourceDir)
 	if err != nil {
-		// No kustomization.yaml is fine — the source just has raw bases.
-		return nil
-	}
-	var k kustomizationFile
-	if err := yaml.Unmarshal(data, &k); err != nil {
 		return fmt.Errorf("%s: %w", kpath, err)
 	}
+	if k == nil {
+		// No kustomization file is fine — the source just has raw bases.
+		return nil
+	}
 	for _, sg := range k.SecretGenerator {
-		for _, f := range sg.Files {
+		for _, f := range sg.FileSources {
 			if strings.Contains(f, "=") {
-				return fmt.Errorf(
-					"%s: secretGenerator files entry %q uses rename syntax (key=path); "+
-						"rename the source file to match the key so local serve and in-cluster serve produce the same routes",
-					kpath, f)
+				return renameSyntaxError(kpath, "secretGenerator", f)
+			}
+		}
+	}
+	for _, cg := range k.ConfigMapGenerator {
+		for _, f := range cg.FileSources {
+			if strings.Contains(f, "=") {
+				return renameSyntaxError(kpath, "configMapGenerator", f)
 			}
 		}
 	}
 	return nil
+}
+
+func renameSyntaxError(kpath, generator, entry string) error {
+	return fmt.Errorf(
+		"%s: %s files entry %q uses rename syntax (key=path); "+
+			"rename the source file to match the key so local serve and in-cluster serve produce the same routes",
+		kpath, generator, entry)
 }
 
 // scanYKustomizeBases walks {basesDir}/{group}/{name}/{file} and returns
