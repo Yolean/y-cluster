@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 )
 
 // PortForward maps a host port to a guest port.
@@ -59,10 +61,11 @@ func DefaultConfig() Config {
 
 // Cluster represents a running QEMU-based k3s cluster.
 type Cluster struct {
-	cfg     Config
-	sshKey  string
-	pidFile string
-	logger  *zap.Logger
+	cfg        Config
+	sshKey     string
+	pidFile    string
+	logger     *zap.Logger
+	Kubeconfig *kubeconfig.Manager
 }
 
 // CheckPrerequisites verifies that required binaries and /dev/kvm exist.
@@ -97,23 +100,29 @@ func (c Config) IsRunning() (bool, int) {
 
 // Provision creates and starts a QEMU VM with k3s installed.
 func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, error) {
-	if cfg.Kubeconfig == "" {
-		return nil, fmt.Errorf("KUBECONFIG must be set")
+	// Initialize kubeconfig manager early — validates KUBECONFIG env
+	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	if err != nil {
+		return nil, err
 	}
 
 	if running, pid := cfg.IsRunning(); running {
 		return nil, fmt.Errorf("VM already running (pid %d). Teardown first", pid)
 	}
 
+	// Clean up stale entries from previous provisions
+	kubecfg.CleanupStale()
+
 	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
 	c := &Cluster{
-		cfg:     cfg,
-		sshKey:  filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"),
-		pidFile: filepath.Join(cfg.CacheDir, cfg.Name+".pid"),
-		logger:  logger,
+		cfg:        cfg,
+		sshKey:     filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"),
+		pidFile:    filepath.Join(cfg.CacheDir, cfg.Name+".pid"),
+		logger:     logger,
+		Kubeconfig: kubecfg,
 	}
 
 	// Download cloud image
@@ -168,6 +177,8 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+
+	// Stop the VM process
 	pidFile := filepath.Join(cfg.CacheDir, cfg.Name+".pid")
 	data, err := os.ReadFile(pidFile)
 	if err == nil {
@@ -178,7 +189,6 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 				if err := exec.Command("kill", fmt.Sprintf("%d", pid)).Run(); err != nil {
 					return fmt.Errorf("kill VM pid %d: %w", pid, err)
 				}
-				// Wait for process to exit and ports to be released
 				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
 					if exec.Command("kill", "-0", fmt.Sprintf("%d", pid)).Run() != nil {
@@ -191,11 +201,13 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		os.Remove(pidFile)
 	}
 
-	// Clean kubeconfig context
-	if cfg.Kubeconfig != "" {
-		exec.Command("kubectl", "config", "delete-context", cfg.Context).Run()
+	// Clean kubeconfig — remove context and fix null→[] for kubie
+	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	if err == nil {
+		kubecfg.CleanupTeardown()
 	}
 
+	// Handle disk
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if keepDisk {
 		logger.Info("teardown complete, disk preserved", zap.String("disk", diskPath))
@@ -253,6 +265,12 @@ func ImportVMDK(vmdkPath, diskPath string) error {
 // --- internal helpers ---
 
 const ubuntuVersion = "noble"
+
+// clusterName derives the kubeconfig cluster entry name from the VM name.
+// e.g. "ystack-qemu" → "ystack-qemu"
+func clusterName(vmName string) string {
+	return vmName
+}
 
 func diskExisted(path string) bool {
 	_, err := os.Stat(path)
