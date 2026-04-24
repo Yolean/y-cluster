@@ -1,0 +1,14 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: setup-topic-job
+  annotations:
+    y-kustomize/base: kafka/setup-topic-job
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: setup
+        image: busybox
+        command: ["true"]

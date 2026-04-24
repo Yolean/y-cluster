@@ -1,0 +1,14 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: setup-bucket-job
+  annotations:
+    y-kustomize/base: blobs/setup-bucket-job
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: setup
+        image: busybox
+        command: ["true"]
