@@ -7,9 +7,14 @@
 # pkg/serve refuses to run as UID 0, so the :nonroot base (UID 65532)
 # is what we want.
 base: gcr.io/distroless/static:nonroot@sha256:e3f945647ffb95b5839c07038d64f9811adf17308b9121d8a2b87b6a22a80a39
+platforms:
+- linux/amd64
+- linux/arm64/v8
 layers:
 - localFile:
-    path: target/linux/amd64/y-cluster
+    pathPerPlatform:
+      linux/amd64: target/linux/amd64/y-cluster
+      linux/arm64/v8: target/linux/arm64/y-cluster
     containerPath: /usr/local/bin/y-cluster
   layerAttributes:
     uid: 65532

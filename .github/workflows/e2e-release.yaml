@@ -1,8 +1,10 @@
 name: e2e Release
 
-# Validates that an actually-published y-cluster release archive works
-# end-to-end on the platforms we support. Runs on tag publication and
-# can be re-run manually against any published tag.
+# Validates that an actually-published y-cluster release asset works
+# end-to-end on the platforms we support. Runs on release publication
+# and can be re-run manually against any published tag. The asset shape
+# is the raw-binary convention from ci.yaml:
+# y-cluster_<tag>_<os>_<arch> plus y-cluster_<tag>_checksums.txt.
 
 on:
   release:
@@ -20,9 +22,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            asset: y-cluster-linux-amd64.tar.gz
+            os_slug: linux
+            arch: amd64
           - os: macos-latest
-            asset: y-cluster-darwin-arm64.tar.gz
+            os_slug: darwin
+            arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -37,19 +41,23 @@ jobs:
             echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download release asset
+      - name: Download release asset and verify checksum
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag='${{ steps.tag.outputs.tag }}'
+          asset="y-cluster_${tag}_${{ matrix.os_slug }}_${{ matrix.arch }}"
+          sums="y-cluster_${tag}_checksums.txt"
           gh release download "$tag" \
             --repo Yolean/y-cluster \
-            --pattern '${{ matrix.asset }}' \
+            --pattern "$asset" \
+            --pattern "$sums" \
             --dir .
-          tar -xzf '${{ matrix.asset }}'
-          test -x y-cluster
+          grep " $asset\$" "$sums" | sha256sum --check -
+          chmod +x "$asset"
+          mv "$asset" y-cluster
           ./y-cluster --version
 
       - name: Run serve e2e against the release binary
