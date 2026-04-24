@@ -71,12 +71,12 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// prepareFixture copies testdata/serve-ykustomize-local/ into a temp dir
-// and substitutes __PORT__ in y-cluster-serve.yaml. Returns the absolute
+// prepareFixture copies a testdata/<name>/ tree into a temp dir and
+// substitutes __PORT__ in y-cluster-serve.yaml. Returns the absolute
 // path of the prepared config directory.
-func prepareFixture(t *testing.T, port int) string {
+func prepareFixture(t *testing.T, name string, port int) string {
 	t.Helper()
-	src, err := filepath.Abs("../testdata/serve-ykustomize-local")
+	src, err := filepath.Abs(filepath.Join("../testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func runServe(t *testing.T, bin, stateDir string, args ...string) ([]byte, error
 func TestServe_EnsureRoundtrip(t *testing.T) {
 	bin := buildServeBinary(t)
 	port := freePort(t)
-	cfgDir := prepareFixture(t, port)
+	cfgDir := prepareFixture(t, "serve-ykustomize-local", port)
 	stateDir := t.TempDir()
 
 	// 1. ensure → daemon starts, /health 200 on the configured port
@@ -225,7 +225,7 @@ func TestServe_EnsureRoundtrip(t *testing.T) {
 func TestServe_LogsSubcommand(t *testing.T) {
 	bin := buildServeBinary(t)
 	port := freePort(t)
-	cfgDir := prepareFixture(t, port)
+	cfgDir := prepareFixture(t, "serve-ykustomize-local", port)
 	stateDir := t.TempDir()
 
 	if out, err := runServe(t, bin, stateDir, "serve", "ensure", "-c", cfgDir); err != nil {
@@ -310,4 +310,256 @@ func retryGET(url string) (*http.Response, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return nil, last
+}
+
+// TestServe_InCluster covers the y-kustomize-in-cluster backend
+// against a real kwok cluster. The test plays out the workflow that
+// will replace ystack's y-kustomize deployment: apply a Secret with
+// the y-kustomize convention, serve it, mutate it, verify the watch
+// propagates, then delete it and verify the route disappears.
+//
+// The fixture files also serve as documentation for ystack migration;
+// see docs/ystack-migration.md on the spec branch.
+func TestServe_InCluster(t *testing.T) {
+	setupCluster(t)
+	bin := buildServeBinary(t)
+	port := freePort(t)
+
+	// Prepare the fixture with kubeconfig + port substituted.
+	src, err := filepath.Abs("../testdata/serve-ykustomize-incluster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dst, "config", "y-cluster-serve.yaml")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := strings.ReplaceAll(string(data), "__PORT__", fmt.Sprintf("%d", port))
+	rendered = strings.ReplaceAll(rendered, "__KUBECONFIG__", clusterKubeconfig)
+	if err := os.WriteFile(cfgPath, []byte(rendered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(dst, "config")
+
+	// Clean slate: remove the Secret if a previous run left it behind.
+	secretName := "y-kustomize.blobs.setup-bucket-job"
+	_ = exec.Command("kubectl", "--context="+contextName, "delete", "secret", secretName,
+		"--ignore-not-found=true", "--namespace=default").Run()
+
+	// Apply the initial Secret. This is the same manifest a
+	// ystack-style module would ship.
+	secretPath := filepath.Join(dst, "secrets", "blobs.yaml")
+	apply := exec.Command("kubectl", "--context="+contextName, "apply", "-f", secretPath)
+	apply.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
+	if out, err := apply.CombinedOutput(); err != nil {
+		t.Fatalf("apply initial secret: %s: %v", out, err)
+	}
+	t.Cleanup(func() {
+		cleanup := exec.Command("kubectl", "--context="+contextName, "delete", "secret", secretName,
+			"--ignore-not-found=true", "--namespace=default")
+		cleanup.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
+		_ = cleanup.Run()
+	})
+
+	stateDir := t.TempDir()
+	if out, err := runServe(t, bin, stateDir, "serve", "ensure", "-c", cfgDir); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		_, _ = runServe(t, bin, stateDir, "serve", "stop", "--state-dir", stateDir)
+	})
+
+	// /health reports the namespace and selector + current route count.
+	body, _, err := httpGet(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	var h map[string]any
+	if err := json.Unmarshal(body, &h); err != nil {
+		t.Fatalf("health JSON: %v", err)
+	}
+	if h["namespace"] != "default" {
+		t.Fatalf("health.namespace: %v", h["namespace"])
+	}
+	if h["routes"].(float64) < 1 {
+		t.Fatalf("health.routes: %v", h["routes"])
+	}
+
+	// Known route from the applied Secret. Wait up to a few seconds:
+	// the y-cluster daemon started before kubectl apply took effect
+	// for the watch.
+	routeURL := fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/base-for-annotations.yaml", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := http.Get(routeURL)
+		if err == nil && resp.StatusCode == 200 {
+			resp.Body.Close()
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("route never appeared: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	body, hdr, err := httpGet(routeURL)
+	if err != nil {
+		t.Fatalf("GET route: %v", err)
+	}
+	if !strings.Contains(string(body), "setup-bucket-job") {
+		t.Fatalf("body missing marker: %q", body)
+	}
+	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "application/yaml") {
+		t.Fatalf("content-type: got %q, want application/yaml", ct)
+	}
+
+	// The second data key in the Secret is served as its own route.
+	valuesURL := fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/values.yaml", port)
+	body, _, err = httpGet(valuesURL)
+	if err != nil {
+		t.Fatalf("GET values.yaml: %v", err)
+	}
+	if !strings.Contains(string(body), "bucket: builds") {
+		t.Fatalf("values body: %q", body)
+	}
+
+	// openapi reflects the current watch state (SERVE_FEATURE.md says
+	// the spec adapts to the watch -- rendered on every request).
+	oa, _, err := httpGet(fmt.Sprintf("http://127.0.0.1:%d/openapi.yaml", port))
+	if err != nil {
+		t.Fatalf("openapi: %v", err)
+	}
+	if !strings.Contains(string(oa), "/v1/blobs/setup-bucket-job/base-for-annotations.yaml") {
+		t.Fatalf("openapi missing route: %s", oa)
+	}
+
+	// Mutate the Secret's values.yaml; watch should propagate.
+	patch := `{"stringData":{"values.yaml":"bucket: builds-v2\n"}}`
+	p := exec.Command("kubectl", "--context="+contextName, "patch", "secret", secretName,
+		"--namespace=default", "--type=merge", "-p", patch)
+	p.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
+	if out, err := p.CombinedOutput(); err != nil {
+		t.Fatalf("patch: %s: %v", out, err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		body, _, err := httpGet(valuesURL)
+		if err == nil && strings.Contains(string(body), "builds-v2") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("patched body never propagated: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Delete the Secret; route should 404 shortly.
+	d := exec.Command("kubectl", "--context="+contextName, "delete", "secret", secretName,
+		"--namespace=default")
+	d.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
+	if out, err := d.CombinedOutput(); err != nil {
+		t.Fatalf("delete: %s: %v", out, err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		resp, err := http.Get(routeURL)
+		if err == nil && resp.StatusCode == 404 {
+			resp.Body.Close()
+			return
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("route never removed after delete")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestServe_Static covers the static backend end to end: yamlToJson
+// transform, dirTrailingSlash=redirect, and openapi snapshot. Uses
+// testdata/serve-static/ as the worked example.
+func TestServe_Static(t *testing.T) {
+	bin := buildServeBinary(t)
+	port := freePort(t)
+	cfgDir := prepareFixture(t, "serve-static", port)
+	stateDir := t.TempDir()
+
+	if out, err := runServe(t, bin, stateDir, "serve", "ensure", "-c", cfgDir); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		_, _ = runServe(t, bin, stateDir, "serve", "stop", "--state-dir", stateDir)
+	})
+
+	if err := httpGetStatus(fmt.Sprintf("http://127.0.0.1:%d/health", port)); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+
+	// yamlToJson path: hello.yaml is served transformed.
+	body, hdr, err := httpGet(fmt.Sprintf("http://127.0.0.1:%d/assets/greetings/hello.yaml", port))
+	if err != nil {
+		t.Fatalf("GET hello.yaml: %v", err)
+	}
+	if ct := hdr.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type: got %q, want application/json", ct)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("transformed body is not json: %v: %s", err, body)
+	}
+	if strings.Contains(string(body), "  ") {
+		t.Fatalf("expected minified json, got %q", body)
+	}
+
+	// Non-yaml passes through unchanged.
+	body, hdr, err = httpGet(fmt.Sprintf("http://127.0.0.1:%d/assets/README.txt", port))
+	if err != nil {
+		t.Fatalf("GET README.txt: %v", err)
+	}
+	if !strings.HasPrefix(hdr.Get("Content-Type"), "text/plain") {
+		t.Fatalf("txt content-type: %s", hdr.Get("Content-Type"))
+	}
+	if !strings.Contains(string(body), "served by y-cluster serve") {
+		t.Fatalf("text body: %q", body)
+	}
+
+	// dirTrailingSlash=redirect: hitting a directory without the
+	// trailing slash redirects, query string preserved.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/assets/greetings?pick=latest", port))
+	if err != nil {
+		t.Fatalf("GET dir: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("dir redirect: got %d, want 302", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/assets/greetings/?pick=latest" {
+		t.Fatalf("Location: %q", loc)
+	}
+
+	// openapi lists routes, with content-type reflecting the transform
+	// (hello.yaml shows application/json, README.txt shows text/plain).
+	oa, _, err := httpGet(fmt.Sprintf("http://127.0.0.1:%d/openapi.yaml", port))
+	if err != nil {
+		t.Fatalf("openapi: %v", err)
+	}
+	if !strings.Contains(string(oa), "/assets/greetings/hello.yaml") {
+		t.Fatalf("openapi missing hello.yaml: %s", oa)
+	}
+	if !strings.Contains(string(oa), "application/json") {
+		t.Fatalf("openapi should advertise json for transformed yaml: %s", oa)
+	}
 }

@@ -350,19 +350,22 @@ func TestLogs_Follow(t *testing.T) {
 	}
 }
 
-func TestBuildServers_StaticNotImplemented(t *testing.T) {
-	c := &Config{Port: 1, Type: TypeStatic, Static: &StaticConfig{Dir: "/x"}, Dir: t.TempDir()}
+func TestBuildServers_StaticMissingDir(t *testing.T) {
+	// A typo in static.dir used to be masked by the "not implemented"
+	// stub. Now that static is wired up, verify the error surfaces at
+	// buildServers time so the user notices during `serve ensure`.
+	c := &Config{Port: 1, Type: TypeStatic, Static: &StaticConfig{Dir: "/does/not/exist"}, Dir: t.TempDir()}
 	logger := newConsoleLogger()
-	_, _, err := buildServers([]*Config{c}, logger)
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("want not-implemented, got %v", err)
+	_, _, err := buildServers(context.Background(), []*Config{c}, logger)
+	if err == nil {
+		t.Fatal("want error for missing static dir")
 	}
 }
 
 func TestBuildServers_UnknownType(t *testing.T) {
 	c := &Config{Port: 1, Type: BackendType("weird"), Dir: t.TempDir()}
 	logger := newConsoleLogger()
-	_, _, err := buildServers([]*Config{c}, logger)
+	_, _, err := buildServers(context.Background(), []*Config{c}, logger)
 	if err == nil || !strings.Contains(err.Error(), "unknown type") {
 		t.Fatalf("want unknown-type, got %v", err)
 	}

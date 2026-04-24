@@ -22,8 +22,9 @@ const ConfigFilename = "y-cluster-serve.yaml"
 type BackendType string
 
 const (
-	TypeYKustomizeLocal BackendType = "y-kustomize-local"
-	TypeStatic          BackendType = "static"
+	TypeYKustomizeLocal     BackendType = "y-kustomize-local"
+	TypeYKustomizeInCluster BackendType = "y-kustomize-in-cluster"
+	TypeStatic              BackendType = "static"
 )
 
 // Config is the parsed y-cluster-serve.yaml plus the directory it came from.
@@ -32,10 +33,11 @@ type Config struct {
 	// declared relative in YAML resolve against this.
 	Dir string `json:"dir"`
 
-	Port    int                     `json:"port" yaml:"port"`
-	Type    BackendType             `json:"type" yaml:"type"`
-	Static  *StaticConfig           `json:"static,omitempty" yaml:"static,omitempty"`
-	Sources []YKustomizeLocalSource `json:"sources,omitempty" yaml:"sources,omitempty"`
+	Port      int                        `json:"port" yaml:"port"`
+	Type      BackendType                `json:"type" yaml:"type"`
+	Static    *StaticConfig              `json:"static,omitempty" yaml:"static,omitempty"`
+	Sources   []YKustomizeLocalSource    `json:"sources,omitempty" yaml:"sources,omitempty"`
+	InCluster *YKustomizeInClusterConfig `json:"inCluster,omitempty" yaml:"inCluster,omitempty"`
 }
 
 // StaticConfig is declared so the schema round-trips, but the runtime
@@ -50,6 +52,31 @@ type StaticConfig struct {
 // YKustomizeLocalSource is one entry in `sources:` for type y-kustomize-local.
 type YKustomizeLocalSource struct {
 	Dir string `json:"dir" yaml:"dir"`
+}
+
+// YKustomizeInClusterConfig configures type y-kustomize-in-cluster: a
+// backend that serves y-kustomize bases by watching Kubernetes
+// Secrets named `y-kustomize.{group}.{name}` and mapping their data
+// keys to `/v1/{group}/{name}/{file}` URLs. This replaces the
+// y-kustomize service in ystack.
+type YKustomizeInClusterConfig struct {
+	// Namespace to watch. If empty: the pod's namespace when running
+	// in-cluster, else the kubeconfig current-context namespace, else
+	// "default".
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+
+	// LabelSelector filters Secrets. Defaults to the ystack
+	// convention `yolean.se/module-part=y-kustomize`.
+	LabelSelector string `json:"labelSelector,omitempty" yaml:"labelSelector,omitempty"`
+
+	// Kubeconfig is an optional explicit kubeconfig path. Empty uses
+	// the default loader (in-cluster, then KUBECONFIG, then
+	// ~/.kube/config).
+	Kubeconfig string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty"`
+
+	// Context is an optional kubeconfig context to override the
+	// current-context. Empty uses the current-context.
+	Context string `json:"context,omitempty" yaml:"context,omitempty"`
 }
 
 // LoadConfigDir reads `{dir}/y-cluster-serve.yaml`, validates it, and
@@ -162,6 +189,23 @@ func (c *Config) validate() error {
 		if c.Static != nil {
 			return fmt.Errorf("static config not allowed for type %s", c.Type)
 		}
+		if c.InCluster != nil {
+			return fmt.Errorf("inCluster config not allowed for type %s", c.Type)
+		}
+	case TypeYKustomizeInCluster:
+		if len(c.Sources) != 0 {
+			return fmt.Errorf("sources not allowed for type %s", c.Type)
+		}
+		if c.Static != nil {
+			return fmt.Errorf("static config not allowed for type %s", c.Type)
+		}
+		// InCluster is optional -- nil means "take every default",
+		// which is what a pod mount of an almost-empty config should
+		// do. Normalize to an empty struct so backends see a non-nil
+		// pointer.
+		if c.InCluster == nil {
+			c.InCluster = &YKustomizeInClusterConfig{}
+		}
 	case TypeStatic:
 		if c.Static == nil {
 			return fmt.Errorf("type %s requires static block", c.Type)
@@ -171,6 +215,9 @@ func (c *Config) validate() error {
 		}
 		if len(c.Sources) != 0 {
 			return fmt.Errorf("sources not allowed for type %s", c.Type)
+		}
+		if c.InCluster != nil {
+			return fmt.Errorf("inCluster config not allowed for type %s", c.Type)
 		}
 		switch c.Static.DirTrailingSlash {
 		case "", "redirect":

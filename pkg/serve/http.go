@@ -44,15 +44,22 @@ func ComputeETag(body []byte) string {
 }
 
 // WriteAsset renders body with y-cluster-serve's standard headers:
-// ETag, Cache-Control forcing revalidation, and the detected content type.
-// Honors If-None-Match → 304 and supports HEAD by discarding the body
-// while preserving Content-Length.
+// ETag, Cache-Control forcing revalidation, and the content type
+// detected from `filename`. Honors If-None-Match -> 304 and supports
+// HEAD by discarding the body while preserving Content-Length.
 func WriteAsset(w http.ResponseWriter, r *http.Request, filename string, body []byte) {
+	WriteAssetAs(w, r, body, DetectContentType(filename))
+}
+
+// WriteAssetAs is the same as WriteAsset but takes an explicit
+// content type, for callers that transform the body (e.g. yamlToJson)
+// and cannot rely on filename-based detection.
+func WriteAssetAs(w http.ResponseWriter, r *http.Request, body []byte, contentType string) {
 	etag := ComputeETag(body)
 	h := w.Header()
 	h.Set("ETag", etag)
 	h.Set("Cache-Control", "no-cache, must-revalidate")
-	h.Set("Content-Type", DetectContentType(filename))
+	h.Set("Content-Type", contentType)
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 
 	if matchesETag(r.Header.Get("If-None-Match"), etag) {

@@ -66,14 +66,22 @@ func yamlEscape(s string) string {
 	return `"` + esc + `"`
 }
 
-// OpenAPIHandler serves a pre-rendered spec. The spec is snapshotted at
-// backend construction per SERVE_FEATURE.md §"Scope limitation".
+// OpenAPIHandler serves a pre-rendered spec. The spec is snapshotted
+// at backend construction for backends where routes are fixed after
+// start (static, y-kustomize-local).
 func OpenAPIHandler(spec []byte) http.HandlerFunc {
+	return OpenAPIHandlerFunc(func() []byte { return spec })
+}
+
+// OpenAPIHandlerFunc renders the spec on each request. Used by the
+// in-cluster backend, where routes come from a live watch; the spec
+// adapts to the watch per SERVE_FEATURE.md.
+func OpenAPIHandlerFunc(render func() []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 			return
 		}
-		WriteAsset(w, r, "openapi.yaml", spec)
+		WriteAsset(w, r, "openapi.yaml", render())
 	}
 }

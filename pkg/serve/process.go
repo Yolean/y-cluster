@@ -30,29 +30,23 @@ type server struct {
 }
 
 // buildServers constructs the per-port handlers. Returns a startable
-// slice and the list of health URLs Ensure probes after start.
-func buildServers(cfgs []*Config, logger *zap.Logger) ([]*server, []string, error) {
+// slice and the list of health URLs Ensure probes after start. ctx
+// is the daemon lifetime: backends that spawn goroutines (in-cluster
+// informers) tie them to this context so SIGTERM shuts them down.
+func buildServers(ctx context.Context, cfgs []*Config, logger *zap.Logger) ([]*server, []string, error) {
 	out := make([]*server, 0, len(cfgs))
 	healthURLs := make([]string, 0, len(cfgs))
 	for _, c := range cfgs {
 		mux := http.NewServeMux()
+		title := fmt.Sprintf("y-cluster serve :%d", c.Port)
 		switch c.Type {
 		case TypeYKustomizeLocal:
 			b, err := newYKustomizeLocalBackend(c)
 			if err != nil {
 				return nil, nil, fmt.Errorf("port %d: %w", c.Port, err)
 			}
-			routes := make([]specRoute, 0, len(b.Routes()))
-			for _, p := range b.Routes() {
-				routes = append(routes, specRoute{Path: p, ContentType: b.RouteContentType(p)})
-			}
-			spec := newOpenAPISpec(
-				fmt.Sprintf("y-cluster serve :%d", c.Port),
-				TypeYKustomizeLocal,
-				"dev",
-				routes,
-			).Render()
-
+			snap := buildYKRoutesSpec(b.Routes(), b.RouteContentType)
+			spec := newOpenAPISpec(title, TypeYKustomizeLocal, "dev", snap).Render()
 			mux.Handle("/health", HealthHandler(TypeYKustomizeLocal, map[string]any{"routes": len(b.Routes())}))
 			mux.Handle("/openapi.yaml", OpenAPIHandler(spec))
 			mux.Handle("/v1/", b)
@@ -61,8 +55,35 @@ func buildServers(cfgs []*Config, logger *zap.Logger) ([]*server, []string, erro
 				zap.String("type", string(c.Type)),
 				zap.Int("routes", len(b.Routes())),
 			)
+
+		case TypeYKustomizeInCluster:
+			b, err := newYKustomizeInClusterBackend(ctx, c, logger)
+			if err != nil {
+				return nil, nil, fmt.Errorf("port %d: %w", c.Port, err)
+			}
+			mux.Handle("/health", HealthHandlerFunc(TypeYKustomizeInCluster, b.Health))
+			mux.Handle("/openapi.yaml", OpenAPIHandlerFunc(func() []byte {
+				snap := buildYKRoutesSpec(b.Routes(), b.RouteContentType)
+				return newOpenAPISpec(title, TypeYKustomizeInCluster, "dev", snap).Render()
+			}))
+			mux.Handle("/v1/", b)
+
 		case TypeStatic:
-			return nil, nil, fmt.Errorf("port %d: type %s is declared in the schema but not implemented in this release", c.Port, c.Type)
+			b, err := newStaticBackend(c, logger)
+			if err != nil {
+				return nil, nil, fmt.Errorf("port %d: %w", c.Port, err)
+			}
+			snap := b.specRoutes()
+			spec := newOpenAPISpec(title, TypeStatic, "dev", snap).Render()
+			mux.Handle("/health", HealthHandler(TypeStatic, map[string]any{"routes": len(snap)}))
+			mux.Handle("/openapi.yaml", OpenAPIHandler(spec))
+			mux.Handle("/", b)
+			logger.Info("backend ready",
+				zap.Int("port", c.Port),
+				zap.String("type", string(c.Type)),
+				zap.Int("routes", len(snap)),
+			)
+
 		default:
 			return nil, nil, fmt.Errorf("port %d: unknown type %s", c.Port, c.Type)
 		}
@@ -79,6 +100,17 @@ func buildServers(cfgs []*Config, logger *zap.Logger) ([]*server, []string, erro
 		healthURLs = append(healthURLs, fmt.Sprintf("http://127.0.0.1:%d/health", c.Port))
 	}
 	return out, healthURLs, nil
+}
+
+// buildYKRoutesSpec turns a backend's route list into the []specRoute
+// shape the openapi renderer wants. Shared by the two y-kustomize
+// backends and any future backend that exposes Routes()/RouteContentType().
+func buildYKRoutesSpec(paths []string, ct func(string) string) []specRoute {
+	out := make([]specRoute, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, specRoute{Path: p, ContentType: ct(p)})
+	}
+	return out
 }
 
 // runDaemon blocks running every server until ctx is done or a server

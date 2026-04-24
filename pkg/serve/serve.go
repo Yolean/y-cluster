@@ -221,7 +221,7 @@ func runForeground(parent context.Context, cfgs []*Config, paths StatePaths) err
 	defer func() { _ = logger.Sync() }()
 	ctx, cancel := withSignals(parent)
 	defer cancel()
-	servers, _, err := buildServers(cfgs, logger)
+	servers, _, err := buildServers(ctx, cfgs, logger)
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,7 @@ func runAsDaemon(parent context.Context, cfgs []*Config, paths StatePaths) (retE
 
 	ctx, cancel := withSignals(parent)
 	defer cancel()
-	servers, _, err := buildServers(cfgs, logger)
+	servers, _, err := buildServers(ctx, cfgs, logger)
 	if err != nil {
 		logger.Error("build servers", zap.Error(err))
 		return err
