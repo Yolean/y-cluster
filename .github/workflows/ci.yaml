@@ -1,19 +1,203 @@
 name: CI
 
+# Consolidated pipeline per RELEASE_PIPELINE_PLAN.md.
+#
+# One workflow, one `build` matrix, one source of truth for binaries.
+# Every consumer (e2e-serve, image, release-assets) pulls from the
+# uploaded artifacts so a tag run ships the same bytes everywhere.
+#
+# Triggers:
+#   push main         → lint, test, build, e2e-serve, image(sha)
+#   push tag v*       → all of the above + image(tag) + release-assets
+#   pull_request      → lint, test, build, e2e-serve only
+#   workflow_dispatch → same as push main
+#
+# Image is only published under Yolean (not YoleanAgents) — the `if:`
+# on the image/release-assets jobs is belt-and-braces; the human owner
+# mirrors manually when ready to open-source.
+
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
-    branches: [main]
-  workflow_call:
+  workflow_dispatch:
 
 jobs:
-  test:
+  # --- PR and main checks ---
+
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          version: v2.11.4
+          args: --timeout=5m
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -count=1 ./...
+      - run: go vet ./...
+
+  # --- Single source of truth for y-cluster binaries ---
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build y-cluster
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p cmd/y-cluster/target/${GOOS}/${GOARCH}
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o cmd/y-cluster/target/${GOOS}/${GOARCH}/y-cluster \
+            ./cmd/y-cluster
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: y-cluster-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: cmd/y-cluster/target/${{ matrix.goos }}/${{ matrix.goarch }}/y-cluster
+          retention-days: 7
+          if-no-files-found: error
+
+  # --- E2e against the freshly-built linux/amd64 binary ---
+
+  e2e-serve:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: y-cluster-linux-amd64
+          path: bin
+      - name: Run serve e2e against the built binary
+        env:
+          Y_CLUSTER_BIN: ${{ github.workspace }}/bin/y-cluster
+        run: |
+          chmod +x "$Y_CLUSTER_BIN"
+          ./scripts/e2e-serve-against-binary.sh
+
+  # --- Multi-arch image via contain, blocked on all prior jobs ---
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [lint, test, build, e2e-serve]
+    if: github.repository_owner == 'Yolean' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: y-cluster-linux-amd64
+          path: cmd/y-cluster/target/linux/amd64
+
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: y-cluster-linux-arm64
+          path: cmd/y-cluster/target/linux/arm64
+
+      - uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
+        with:
+          version: v0.9.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image (SHA tag)
+        working-directory: cmd/y-cluster
+        env:
+          IMAGE: ghcr.io/yolean/y-cluster:${{ github.sha }}
+        run: contain build
+
+      - name: Build and push image (release tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: cmd/y-cluster
+        env:
+          IMAGE: ghcr.io/yolean/y-cluster:${{ github.ref_name }}
+        run: contain build
+
+  # --- Release assets on tag push: raw binaries, no compression ---
+
+  release-assets:
+    runs-on: ubuntu-latest
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository_owner == 'Yolean'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: y-cluster-*
+          path: downloaded
+
+      - name: Rename binaries (goreleaser naming) and checksum
+        id: assets
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p release
+          for d in downloaded/y-cluster-*; do
+            # Each artifact dir contains a single `y-cluster` binary.
+            base=$(basename "$d")                    # y-cluster-linux-amd64
+            suffix=${base#y-cluster-}                # linux-amd64
+            os=${suffix%-*}                          # linux
+            arch=${suffix#*-}                        # amd64
+            cp "$d/y-cluster" "release/y-cluster_${tag}_${os}_${arch}"
+            chmod +x "release/y-cluster_${tag}_${os}_${arch}"
+          done
+          (cd release && sha256sum y-cluster_${tag}_* > "y-cluster_${tag}_checksums.txt")
+          ls -l release/
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Idempotent: create the release if it does not yet exist,
+          # then upload (or re-upload) all assets.
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          gh release upload "$tag" release/y-cluster_${tag}_* --clobber

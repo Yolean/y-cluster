@@ -1,0 +1,67 @@
+name: e2e Release
+
+# Validates that an actually-published y-cluster release asset works
+# end-to-end on the platforms we support. Runs on release publication
+# and can be re-run manually against any published tag. The asset shape
+# is the raw-binary convention from ci.yaml:
+# y-cluster_<tag>_<os>_<arch> plus y-cluster_<tag>_checksums.txt.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test"
+        required: true
+
+jobs:
+  serve:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os_slug: linux
+            arch: amd64
+          - os: macos-latest
+            os_slug: darwin
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download release asset and verify checksum
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.tag.outputs.tag }}'
+          asset="y-cluster_${tag}_${{ matrix.os_slug }}_${{ matrix.arch }}"
+          sums="y-cluster_${tag}_checksums.txt"
+          gh release download "$tag" \
+            --repo Yolean/y-cluster \
+            --pattern "$asset" \
+            --pattern "$sums" \
+            --dir .
+          grep " $asset\$" "$sums" | sha256sum --check -
+          chmod +x "$asset"
+          mv "$asset" y-cluster
+          ./y-cluster --version
+
+      - name: Run serve e2e against the release binary
+        shell: bash
+        env:
+          Y_CLUSTER_BIN: ./y-cluster
+        run: ./scripts/e2e-serve-against-binary.sh

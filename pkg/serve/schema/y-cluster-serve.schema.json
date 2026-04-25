@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Yolean/y-cluster/HEAD/pkg/serve/schema/y-cluster-serve.schema.json",
+  "title": "y-cluster-serve.yaml",
+  "description": "Configuration for `y-cluster serve`. One file per `-c` directory.",
+  "type": "object",
+  "required": ["port", "type"],
+  "additionalProperties": false,
+  "properties": {
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "TCP port this server binds. Each `-c` config gets its own port; name-based vhosting is not supported."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["static", "y-kustomize-local", "y-kustomize-in-cluster"],
+      "description": "Backend selector."
+    },
+    "static": {
+      "type": "object",
+      "description": "Parameters for type=static.",
+      "required": ["dir"],
+      "additionalProperties": false,
+      "properties": {
+        "dir": {"type": "string", "description": "Directory to serve."},
+        "root": {"type": "string", "description": "Path prefix under which the dir appears in HTTP. Empty means served at /."},
+        "yamlToJson": {"type": "boolean", "default": false, "description": "Transform application/yaml responses to application/json. Off by default."},
+        "dirTrailingSlash": {"type": "string", "enum": ["", "redirect"], "description": "Behavior when a dir path is requested without trailing slash."}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "description": "Parameters for type=y-kustomize-local. Each source contributes files under y-kustomize-bases/ which map to /v1/{group}/{name}/{file}.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["dir"],
+        "additionalProperties": false,
+        "properties": {
+          "dir": {"type": "string"}
+        }
+      }
+    },
+    "inCluster": {
+      "type": "object",
+      "description": "Parameters for type=y-kustomize-in-cluster. Watches Kubernetes Secrets named `y-kustomize.{group}.{name}` and serves their data keys at `/v1/{group}/{name}/{key}`.",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {"type": "string", "description": "Namespace to watch. Empty: pod namespace when in-cluster, else kubeconfig context namespace, else 'default'."},
+        "labelSelector": {"type": "string", "description": "Label selector for Secret filtering. Default: yolean.se/module-part=y-kustomize."},
+        "kubeconfig": {"type": "string", "description": "Optional explicit kubeconfig path."},
+        "context": {"type": "string", "description": "Optional kubeconfig context override."}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "y-kustomize-local"}}},
+      "then": {"required": ["sources"]}
+    },
+    {
+      "if": {"properties": {"type": {"const": "static"}}},
+      "then": {"required": ["static"]}
+    }
+  ]
+}

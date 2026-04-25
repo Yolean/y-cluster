@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=../../../pkg/serve/schema/y-cluster-serve.schema.json
+#
+# Config for the in-cluster e2e test. The test substitutes placeholders
+# before running y-cluster serve. For a real pod deployment (see
+# docs/ystack-migration.md) both placeholders can be omitted: the
+# kubeconfig is inferred from the pod's service account, and namespace
+# comes from the pod's namespace file.
+port: __PORT__
+type: y-kustomize-in-cluster
+inCluster:
+  kubeconfig: __KUBECONFIG__
+  namespace: default
+  labelSelector: yolean.se/module-part=y-kustomize
