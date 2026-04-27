@@ -1,0 +1,341 @@
+// schemagen generates JSON Schema files into pkg/provision/schema/:
+// one per provisioner config struct, plus a portable common.schema.json
+// reflected from CommonConfig alone.
+//
+// Each per-provider schema has its `provider` property post-processed
+// from the inherited enum into a single-value `const` so the file
+// only validates configs intended for that provider. The common
+// schema keeps the enum so portable configs validate against any
+// supported provider value.
+//
+// schemagen also runs a collision check: it walks each provider
+// struct's *own* (non-embedded) yaml field names and fails if the
+// same name appears in more than one provider. CommonConfig fields
+// are exempt — they're shared by design. The check stops a future
+// per-provider field from accidentally shadowing or colliding with
+// a name that should have been promoted to common.
+//
+// Run via `go generate ./pkg/provision/...`. CI runs the same
+// command and fails if the working tree differs afterwards (drift
+// gate), so the generator output and the source struct tags can't
+// disagree.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+
+	"github.com/invopop/jsonschema"
+	"sigs.k8s.io/yaml"
+
+	"github.com/Yolean/y-cluster/pkg/provision/config"
+)
+
+type pinFile struct {
+	Version string `yaml:"version"`
+	Mirror  struct {
+		Upstream string `yaml:"upstream"`
+		Target   string `yaml:"target"`
+	} `yaml:"mirror"`
+}
+
+// providerTarget is one provider's schema generation job. The
+// `provider` value drives the const-narrowing of the schema's
+// `provider` property after invopop reflects it.
+type providerTarget struct {
+	filename string
+	provider string
+	sample   any
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	root, err := repoRoot()
+	if err != nil {
+		return fmt.Errorf("locate repo root: %w", err)
+	}
+
+	pinPath := filepath.Join(root, "pkg", "provision", "config", "k3s.yaml")
+	pin, err := readPin(pinPath)
+	if err != nil {
+		return fmt.Errorf("read pin %s: %w", pinPath, err)
+	}
+
+	schemaDir := filepath.Join(root, "pkg", "provision", "schema")
+	if err := os.MkdirAll(schemaDir, 0o755); err != nil {
+		return err
+	}
+
+	providers := []providerTarget{
+		{"qemu.schema.json", config.ProviderQEMU, &config.QEMUConfig{}},
+		{"docker.schema.json", config.ProviderDocker, &config.DockerConfig{}},
+	}
+
+	if err := checkCollisions(providers); err != nil {
+		return fmt.Errorf("provider field collision: %w", err)
+	}
+
+	for _, t := range providers {
+		out := filepath.Join(schemaDir, t.filename)
+		if err := writeProviderSchema(out, t, pin); err != nil {
+			return fmt.Errorf("generate %s: %w", t.filename, err)
+		}
+		fmt.Printf("wrote %s\n", out)
+	}
+
+	commonOut := filepath.Join(schemaDir, "common.schema.json")
+	if err := writeCommonSchema(commonOut, pin); err != nil {
+		return fmt.Errorf("generate common.schema.json: %w", err)
+	}
+	fmt.Printf("wrote %s\n", commonOut)
+
+	return nil
+}
+
+// checkCollisions ensures no two providers declare the same own
+// (non-embedded) yaml field name. CommonConfig fields are skipped:
+// they're shared by design and surface in every provider via
+// `yaml:",inline"`.
+func checkCollisions(providers []providerTarget) error {
+	seen := map[string]string{} // yaml name → first provider that declared it
+	for _, p := range providers {
+		for _, name := range ownYAMLNames(reflect.TypeOf(p.sample).Elem()) {
+			if prev, ok := seen[name]; ok {
+				return fmt.Errorf(
+					"yaml key %q is declared by both %q and %q; "+
+						"if it's a portable concept move it to CommonConfig, "+
+						"otherwise rename one to disambiguate",
+					name, prev, p.provider,
+				)
+			}
+			seen[name] = p.provider
+		}
+	}
+	return nil
+}
+
+// ownYAMLNames returns the yaml tag names of fields declared
+// directly on t, skipping anonymous (embedded) fields, fields
+// marked `yaml:"-"`, and the runtime-only Dir field.
+func ownYAMLNames(t reflect.Type) []string {
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Anonymous {
+			continue
+		}
+		name := yamlName(f)
+		if name == "" || name == "-" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func yamlName(f reflect.StructField) string {
+	tag := f.Tag.Get("yaml")
+	if tag == "" {
+		return strings.ToLower(f.Name)
+	}
+	return strings.SplitN(tag, ",", 2)[0]
+}
+
+func writeProviderSchema(outPath string, t providerTarget, pin pinFile) error {
+	data, err := reflectSchema(t.sample, pin)
+	if err != nil {
+		return err
+	}
+	data, err = narrowProviderToConst(data, t.provider)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+}
+
+func writeCommonSchema(outPath string, pin pinFile) error {
+	data, err := reflectSchema(&config.CommonConfig{}, pin)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+}
+
+// reflectSchema runs invopop on the sample, applies pin
+// substitutions, and returns the JSON-marshalled bytes.
+func reflectSchema(sample any, pin pinFile) ([]byte, error) {
+	r := &jsonschema.Reflector{
+		// Strict mode: reject unknown fields. Mirrors the strict
+		// YAML decode at runtime so editor hints and runtime
+		// behavior agree.
+		AllowAdditionalProperties: false,
+		// Inline child types into $defs so each schema is
+		// self-contained.
+		DoNotReference: false,
+		// Use struct field's `yaml:` tag for property names where
+		// present, falling back to `json:` and field name.
+		FieldNameTag: "yaml",
+		// Render fields whose tags include `,omitempty` as
+		// non-required. Without this, optional fields would be
+		// listed in `required:` and tooling would flag missing
+		// defaults as schema errors.
+		RequiredFromJSONSchemaTags: false,
+	}
+
+	schema := r.Reflect(sample)
+	data, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	// Pin substitution. The placeholder matches the literal text
+	// invopop wrote from the struct tag (`"default": "__K3S_TAG__"`).
+	// `__K3S_TAG__` is the GitHub-release form of the version (with
+	// `+k3sN` build-metadata separator). The container image is no
+	// longer a config field — the docker provisioner derives it
+	// from the version at runtime — so no `__K3S_IMAGE__`
+	// substitution here.
+	data = bytes.ReplaceAll(data, []byte(`"__K3S_TAG__"`), []byte(jsonString(pin.Version)))
+
+	// Inject the provider enum into the embedded CommonConfig's
+	// schema. invopop has no idea what values are legal — that
+	// list lives in config.AllProviders — so we add the enum here
+	// instead of hand-writing it in a struct tag we'd then have to
+	// keep in sync.
+	data, err = injectProviderEnum(data, config.AllProviders)
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+// injectProviderEnum walks the JSON schema tree and adds an `enum`
+// constraint to every `provider` property whose surrounding object
+// also declares `"type": "string"`. The reflector emits the
+// property without an enum because the tag deliberately omits
+// `enum=...` literals — schemagen owns the value list via
+// config.AllProviders so the source of truth is one place.
+func injectProviderEnum(data []byte, providers []string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	var walk func(any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			if props, ok := n["properties"].(map[string]any); ok {
+				if prov, ok := props["provider"].(map[string]any); ok {
+					if _, hasConst := prov["const"]; !hasConst {
+						prov["enum"] = stringSliceToAny(providers)
+					}
+				}
+			}
+			for _, v := range n {
+				walk(v)
+			}
+		case []any:
+			for _, v := range n {
+				walk(v)
+			}
+		}
+	}
+	walk(doc)
+	return json.MarshalIndent(doc, "", "  ")
+}
+
+func stringSliceToAny(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+// narrowProviderToConst replaces the `enum` on every `provider`
+// property with `const: <value>` and drops the enum, so a
+// per-provider schema only validates configs for that provider.
+func narrowProviderToConst(data []byte, value string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	var walk func(any)
+	walk = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			if props, ok := n["properties"].(map[string]any); ok {
+				if prov, ok := props["provider"].(map[string]any); ok {
+					prov["const"] = value
+					delete(prov, "enum")
+				}
+			}
+			for _, v := range n {
+				walk(v)
+			}
+		case []any:
+			for _, v := range n {
+				walk(v)
+			}
+		}
+	}
+	walk(doc)
+	return json.MarshalIndent(doc, "", "  ")
+}
+
+// jsonString returns a JSON-quoted string literal. We use
+// json.Marshal rather than fmt.Sprintf("%q", s) so embedded special
+// characters get JSON-correct escaping.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func readPin(path string) (pinFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return pinFile{}, err
+	}
+	var p pinFile
+	if err := yaml.Unmarshal(data, &p); err != nil {
+		return pinFile{}, err
+	}
+	if p.Version == "" || p.Mirror.Target == "" {
+		return pinFile{}, fmt.Errorf("pin file missing version or mirror.target")
+	}
+	return p, nil
+}
+
+// repoRoot walks up from the current working directory looking for
+// go.mod. The generator is invoked via `go generate` so cwd may be
+// the package dir, not the repo root.
+func repoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("go.mod not found above %s", dir)
+		}
+		dir = parent
+	}
+}

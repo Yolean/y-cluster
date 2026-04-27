@@ -1,0 +1,192 @@
+{
+  "$defs": {
+    "DockerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "default": "local",
+          "description": "kubeconfig context name to write.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": "4",
+          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
+          "type": "string"
+        },
+        "k3s": {
+          "$ref": "#/$defs/K3sConfig",
+          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
+        },
+        "memory": {
+          "default": "8192",
+          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
+          "type": "string"
+        },
+        "name": {
+          "default": "y-cluster",
+          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
+          "type": "string"
+        },
+        "portForwards": {
+          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
+          "items": {
+            "$ref": "#/$defs/PortForward"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "const": "docker",
+          "description": "Provisioner to use. Per-provider schemas narrow this to a single literal.",
+          "type": "string"
+        },
+        "registries": {
+          "$ref": "#/$defs/Registries",
+          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "K3sConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "install": {
+          "default": "airgap",
+          "description": "Install strategy. airgap pre-loads images on the node; script downloads via get.k3s.io. qemu only.",
+          "enum": [
+            "airgap",
+            "script"
+          ],
+          "type": "string"
+        },
+        "version": {
+          "default": "v1.35.4-rc3+k3s1",
+          "description": "k3s release version e.g. vX.Y.Z+k3sN.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PortForward": {
+      "additionalProperties": false,
+      "properties": {
+        "guest": {
+          "description": "Guest port to forward to.",
+          "type": "string"
+        },
+        "host": {
+          "description": "Host port. Empty string lets the provider pick (qemu: SLIRP-assigned; docker: docker-assigned).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "guest"
+      ],
+      "type": "object"
+    },
+    "Registries": {
+      "additionalProperties": false,
+      "properties": {
+        "configs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RegistryConfig"
+          },
+          "description": "Per-host TLS and auth settings. Keys match the registry hostname (the original host or a mirror endpoint host).",
+          "type": "object"
+        },
+        "mirrors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RegistryMirror"
+          },
+          "description": "Per-host mirror redirects. Keys are the original registry hostname requested by containerd.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryAuth": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "description": "Pre-encoded Authorization header; ${VAR} supported.",
+          "type": "string"
+        },
+        "identitytoken": {
+          "description": "Bearer identity token; ${VAR} supported.",
+          "type": "string"
+        },
+        "password": {
+          "description": "Basic auth password; ${VAR} supported. Common pattern: oauth2accesstoken with ${GCP_ACCESS_TOKEN}.",
+          "type": "string"
+        },
+        "username": {
+          "description": "Basic auth username; ${VAR} supported.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/RegistryAuth",
+          "description": "Username/password or token credentials for this host."
+        },
+        "tls": {
+          "$ref": "#/$defs/RegistryTLS",
+          "description": "Client TLS settings for this host."
+        }
+      },
+      "type": "object"
+    },
+    "RegistryMirror": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "description": "Mirror endpoints to try in order. ${VAR} substitution supported.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rewrite": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Regex rewrite rules applied to the request path before forwarding to the mirror.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryTLS": {
+      "additionalProperties": false,
+      "properties": {
+        "ca_file": {
+          "description": "Path to CA file on the node.",
+          "type": "string"
+        },
+        "cert_file": {
+          "description": "Path to client cert file on the node.",
+          "type": "string"
+        },
+        "insecure_skip_verify": {
+          "description": "Disable TLS verification for this host. Off by default.",
+          "type": "boolean"
+        },
+        "key_file": {
+          "description": "Path to client key file on the node.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/docker-config",
+  "$ref": "#/$defs/DockerConfig",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

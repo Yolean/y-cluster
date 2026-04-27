@@ -1,0 +1,37 @@
+# Single source of truth for the k3s release version y-cluster uses.
+#
+# Edit `version:` to bump. Consumers:
+#   - .github/workflows/mirror-k3s.yaml mirrors
+#     <mirror.upstream>:<docker-tag form of version>
+#     to <mirror.target>:<docker-tag form of version>.
+#   - cmd/internal/schemagen substitutes the version into the
+#     generated provisioner schemas as the K3s default.
+#   - pkg/provision/config/defaults.go (K3sDefaultVersion,
+#     MirrorImage, UpstreamImage, DockerTag) provides the same
+#     defaults and image references to the runtime so editor hints,
+#     runtime defaults, and the mirror workflow can't drift.
+#   - pkg/provision/docker.ResolveImage probes the mirror at
+#     provision time and falls back to the upstream rancher/k3s
+#     image (with a warning) when the mirror has no manifest yet,
+#     letting fresh k3s versions be tested before the mirror runs.
+#
+# Format note: k3s GitHub releases use `+k3sN` as the build-metadata
+# separator (e.g. v1.35.4-rc3+k3s1). Docker tag syntax forbids `+`,
+# so the mirrored image's tag substitutes `+` with `-`. We pin the
+# GitHub-release form here because that's what the install script
+# and binary download URL need; the workflow and the DockerTag
+# helper convert at the point of building the image reference.
+#
+# Bumping flow:
+#   1. Edit `version:`.
+#   2. Push the change.
+#   3. mirror-k3s.yaml runs on the path change and copies the new
+#      tag to <mirror.target>:<docker-tag>.
+#   4. CI's generate-drift job re-runs schemagen and fails until the
+#      regenerated schemas are committed alongside the bump.
+
+version: v1.35.4-rc3+k3s1
+
+mirror:
+  upstream: docker.io/rancher/k3s
+  target:   ghcr.io/yolean/k3s
