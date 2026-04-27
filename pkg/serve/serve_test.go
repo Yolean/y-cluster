@@ -15,16 +15,33 @@ import (
 	"time"
 )
 
-// seedYKCfg writes a minimal y-kustomize-local config and a single
-// source dir. Returns the absolute config dir path.
+// seedYKCfg writes a minimal y-kustomize-local config plus a
+// kustomize source dir that emits one Secret with one data key.
+// Returns the absolute config dir path.
 func seedYKCfg(t *testing.T, port int) string {
 	t.Helper()
 	root := t.TempDir()
 	cfgDir := filepath.Join(root, "config")
 	srcDir := filepath.Join(root, "src")
-	seedYKBases(t, srcDir, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "bucket: builds\n",
-	})
+	if err := os.MkdirAll(filepath.Join(srcDir, "blobs-setup-bucket-job"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "blobs-setup-bucket-job/values.yaml"),
+		[]byte("bucket: builds\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: y-kustomize.blobs.setup-bucket-job
+  options:
+    disableNameSuffixHash: true
+  files:
+  - blobs-setup-bucket-job/values.yaml
+`
+	if err := os.WriteFile(filepath.Join(srcDir, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +219,7 @@ func TestEnsure_FirstStartAndNoop(t *testing.T) {
 	cfgDir := seedYKCfg(t, port)
 	stateDir := t.TempDir()
 
-	started, err := Ensure(context.Background(), Options{
+	res, err := Ensure(context.Background(), Options{
 		ConfigDirs: []string{cfgDir},
 		StateDir:   stateDir,
 		ExecPath:   "/usr/bin/true",
@@ -210,12 +227,14 @@ func TestEnsure_FirstStartAndNoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !started {
-		t.Fatal("first ensure should start the daemon")
+	if res.Action != EnsureStarted {
+		t.Fatalf("first ensure: action=%s want started", res.Action)
+	}
+	if len(res.Ports) != 1 || res.Ports[0] != port {
+		t.Fatalf("ports=%v want [%d]", res.Ports, port)
 	}
 
-	// Second ensure with unchanged config → no-op
-	started2, err := Ensure(context.Background(), Options{
+	res2, err := Ensure(context.Background(), Options{
 		ConfigDirs: []string{cfgDir},
 		StateDir:   stateDir,
 		ExecPath:   "/usr/bin/true",
@@ -223,8 +242,8 @@ func TestEnsure_FirstStartAndNoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if started2 {
-		t.Fatal("second ensure with same config should be no-op")
+	if res2.Action != EnsureNoop {
+		t.Fatalf("second ensure: action=%s want noop", res2.Action)
 	}
 }
 
@@ -248,7 +267,7 @@ func TestEnsure_RestartWhenStaleStatePresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	started, err := Ensure(context.Background(), Options{
+	res, err := Ensure(context.Background(), Options{
 		ConfigDirs: []string{cfgDir},
 		StateDir:   stateDir,
 		ExecPath:   "/usr/bin/true",
@@ -256,8 +275,8 @@ func TestEnsure_RestartWhenStaleStatePresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !started {
-		t.Fatal("ensure should restart when pidfile is stale")
+	if res.Action != EnsureRestarted {
+		t.Fatalf("ensure with stale pidfile: action=%s want restarted", res.Action)
 	}
 }
 

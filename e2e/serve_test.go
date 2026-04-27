@@ -312,6 +312,65 @@ func retryGET(url string) (*http.Response, error) {
 	return nil, last
 }
 
+// waitForHealth polls /health and runs predicate on the decoded body
+// until it returns true or timeout elapses. Use this for any check
+// that depends on the in-cluster watch having seen a particular
+// state — apply/patch/delete propagation, route count, etc. Polling
+// /health (rather than a specific route URL) keeps each iteration
+// cheap and decoupled from whatever the test is actually verifying.
+func waitForHealth(t *testing.T, url string, predicate func(map[string]any) bool, timeout time.Duration, what string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last map[string]any
+	var lastErr error
+	for {
+		body, _, err := httpGet(url)
+		if err == nil {
+			var h map[string]any
+			if err := json.Unmarshal(body, &h); err == nil {
+				last = h
+				if predicate(h) {
+					return h
+				}
+			} else {
+				lastErr = fmt.Errorf("decode: %w", err)
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForHealth %q after %s: last health=%v lastErr=%v", what, timeout, last, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// waitForStatus polls a URL until it returns the expected status or
+// timeout. Useful when the test cares specifically about a route's
+// presence/absence — e.g. after deleting a Secret, we expect 404.
+func waitForStatus(t *testing.T, url string, want int, timeout time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last int
+	var lastErr error
+	for {
+		resp, err := http.Get(url)
+		if err == nil {
+			last = resp.StatusCode
+			resp.Body.Close()
+			if resp.StatusCode == want {
+				return
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForStatus %q after %s: want %d, last=%d lastErr=%v", what, timeout, want, last, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // TestServe_InCluster covers the y-kustomize-in-cluster backend
 // against a real kwok cluster. The test plays out the workflow that
 // will replace ystack's y-kustomize deployment: apply a Secret with
@@ -346,10 +405,15 @@ func TestServe_InCluster(t *testing.T) {
 	}
 	cfgDir := filepath.Join(dst, "config")
 
-	// Clean slate: remove the Secret if a previous run left it behind.
+	// Clean slate: remove the Secret if a previous run left it
+	// behind. KUBECONFIG must be explicit — relying on the env set
+	// by setupCluster races other tests that may have unset it via
+	// their own t.Cleanup.
 	secretName := "y-kustomize.blobs.setup-bucket-job"
-	_ = exec.Command("kubectl", "--context="+contextName, "delete", "secret", secretName,
-		"--ignore-not-found=true", "--namespace=default").Run()
+	clean := exec.Command("kubectl", "--context="+contextName, "delete", "secret", secretName,
+		"--ignore-not-found=true", "--namespace=default")
+	clean.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
+	_ = clean.Run()
 
 	// Apply the initial Secret. This is the same manifest a
 	// ystack-style module would ship.
@@ -374,40 +438,24 @@ func TestServe_InCluster(t *testing.T) {
 		_, _ = runServe(t, bin, stateDir, "serve", "stop", "--state-dir", stateDir)
 	})
 
-	// /health reports the namespace and selector + current route count.
-	body, _, err := httpGet(fmt.Sprintf("http://127.0.0.1:%d/health", port))
-	if err != nil {
-		t.Fatalf("health: %v", err)
-	}
-	var h map[string]any
-	if err := json.Unmarshal(body, &h); err != nil {
-		t.Fatalf("health JSON: %v", err)
-	}
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	routeURL := fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/base-for-annotations.yaml", port)
+	valuesURL := fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/values.yaml", port)
+
+	// First-run readiness: kwok's apiserver and our informer both
+	// need a moment after `serve ensure` returns. WaitForCacheSync
+	// is supposed to gate the daemon's listener, but on a freshly
+	// started kwok container the LIST occasionally lands before the
+	// just-applied Secret is visible. Wait on /health.routes
+	// instead of polling the route URL — /health is the cheap
+	// canonical status, the route URL is the test's actual subject.
+	const propagation = 30 * time.Second
+	h := waitForHealth(t, healthURL, func(h map[string]any) bool {
+		r, ok := h["routes"].(float64)
+		return ok && int(r) >= 1
+	}, propagation, "initial routes >= 1")
 	if h["namespace"] != "default" {
 		t.Fatalf("health.namespace: %v", h["namespace"])
-	}
-	if h["routes"].(float64) < 1 {
-		t.Fatalf("health.routes: %v", h["routes"])
-	}
-
-	// Known route from the applied Secret. Wait up to a few seconds:
-	// the y-cluster daemon started before kubectl apply took effect
-	// for the watch.
-	routeURL := fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/base-for-annotations.yaml", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		resp, err := http.Get(routeURL)
-		if err == nil && resp.StatusCode == 200 {
-			resp.Body.Close()
-			break
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("route never appeared: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	body, hdr, err := httpGet(routeURL)
@@ -422,7 +470,6 @@ func TestServe_InCluster(t *testing.T) {
 	}
 
 	// The second data key in the Secret is served as its own route.
-	valuesURL := fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/values.yaml", port)
 	body, _, err = httpGet(valuesURL)
 	if err != nil {
 		t.Fatalf("GET values.yaml: %v", err)
@@ -450,14 +497,14 @@ func TestServe_InCluster(t *testing.T) {
 		t.Fatalf("patch: %s: %v", out, err)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
+	patchedDeadline := time.Now().Add(propagation)
 	for {
 		body, _, err := httpGet(valuesURL)
 		if err == nil && strings.Contains(string(body), "builds-v2") {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("patched body never propagated: %v", err)
+		if time.Now().After(patchedDeadline) {
+			t.Fatalf("patched body never propagated within %s: %v", propagation, err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -470,21 +517,7 @@ func TestServe_InCluster(t *testing.T) {
 		t.Fatalf("delete: %s: %v", out, err)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		resp, err := http.Get(routeURL)
-		if err == nil && resp.StatusCode == 404 {
-			resp.Body.Close()
-			return
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("route never removed after delete")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	waitForStatus(t, routeURL, http.StatusNotFound, propagation, "route 404 after delete")
 }
 
 // TestServe_Static covers the static backend end to end: yamlToJson

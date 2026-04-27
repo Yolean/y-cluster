@@ -15,7 +15,7 @@
     },
     "type": {
       "type": "string",
-      "enum": ["static", "y-kustomize-local", "y-kustomize-in-cluster"],
+      "enum": ["static", "y-kustomize-local", "y-kustomize-incluster"],
       "description": "Backend selector."
     },
     "static": {
@@ -45,7 +45,7 @@
     },
     "inCluster": {
       "type": "object",
-      "description": "Parameters for type=y-kustomize-in-cluster. Watches Kubernetes Secrets named `y-kustomize.{group}.{name}` and serves their data keys at `/v1/{group}/{name}/{key}`.",
+      "description": "Parameters for type=y-kustomize-incluster. Watches Kubernetes Secrets named `y-kustomize.{group}.{name}` and serves their data keys at `/v1/{group}/{name}/{key}`.",
       "additionalProperties": false,
       "properties": {
         "namespace": {"type": "string", "description": "Namespace to watch. Empty: pod namespace when in-cluster, else kubeconfig context namespace, else 'default'."},

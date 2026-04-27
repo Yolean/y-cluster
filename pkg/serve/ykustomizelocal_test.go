@@ -10,17 +10,33 @@ import (
 	"testing"
 )
 
-func seedYKBases(t *testing.T, root string, files map[string]string) {
+// writeBase writes a tiny kustomize source dir that emits a
+// single Secret named `y-kustomize.{group}.{name}` with the
+// given data files. files maps basename -> body. Returns the
+// source dir path.
+func writeBase(t *testing.T, group, name string, files map[string]string) string {
 	t.Helper()
-	for rel, body := range files {
-		abs := filepath.Join(root, rel)
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(abs, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	dir := t.TempDir()
+	subdir := group + "-" + name
+	if err := os.MkdirAll(filepath.Join(dir, subdir), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	var fileLines []string
+	for fname, body := range files {
+		full := filepath.Join(dir, subdir, fname)
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fileLines = append(fileLines, "  - "+subdir+"/"+fname)
+	}
+	kust := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nsecretGenerator:\n" +
+		"- name: y-kustomize." + group + "." + name + "\n" +
+		"  options:\n    disableNameSuffixHash: true\n" +
+		"  files:\n" + strings.Join(fileLines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func cfgWithSources(t *testing.T, sources ...string) *Config {
@@ -36,11 +52,10 @@ func cfgWithSources(t *testing.T, sources ...string) *Config {
 	return out
 }
 
-func TestYK_SingleSource(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml": "kind: Job\n",
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml":               "bucket: builds\n",
+func TestYK_SingleSource_RoutesFromSecretDataKeys(t *testing.T) {
+	src := writeBase(t, "blobs", "setup-bucket-job", map[string]string{
+		"base-for-annotations.yaml": "kind: Job\n",
+		"values.yaml":               "bucket: builds\n",
 	})
 	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err != nil {
@@ -57,14 +72,8 @@ func TestYK_SingleSource(t *testing.T) {
 }
 
 func TestYK_TwoSourcesMerge(t *testing.T) {
-	a := t.TempDir()
-	b := t.TempDir()
-	seedYKBases(t, a, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml": "A\n",
-	})
-	seedYKBases(t, b, map[string]string{
-		"y-kustomize-bases/kafka/setup-topic-job/base-for-annotations.yaml": "B\n",
-	})
+	a := writeBase(t, "blobs", "setup-bucket-job", map[string]string{"x.yaml": "A\n"})
+	b := writeBase(t, "kafka", "setup-topic-job", map[string]string{"x.yaml": "B\n"})
 	back, err := newYKustomizeLocalBackend(cfgWithSources(t, a, b))
 	if err != nil {
 		t.Fatal(err)
@@ -74,14 +83,9 @@ func TestYK_TwoSourcesMerge(t *testing.T) {
 	}
 }
 
-func TestYK_DuplicateAcrossSources(t *testing.T) {
-	a := t.TempDir()
-	b := t.TempDir()
-	for _, d := range []string{a, b} {
-		seedYKBases(t, d, map[string]string{
-			"y-kustomize-bases/blobs/setup-bucket-job/x.yaml": "k\n",
-		})
-	}
+func TestYK_DuplicateRouteAcrossSourcesErrors(t *testing.T) {
+	a := writeBase(t, "blobs", "setup-bucket-job", map[string]string{"x.yaml": "A\n"})
+	b := writeBase(t, "blobs", "setup-bucket-job", map[string]string{"x.yaml": "B\n"})
 	_, err := newYKustomizeLocalBackend(cfgWithSources(t, a, b))
 	if err == nil || !strings.Contains(err.Error(), "duplicate route") {
 		t.Fatalf("want duplicate error, got %v", err)
@@ -91,57 +95,111 @@ func TestYK_DuplicateAcrossSources(t *testing.T) {
 	}
 }
 
-func TestYK_MissingBasesDir(t *testing.T) {
-	src := t.TempDir() // no y-kustomize-bases/
-	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err == nil || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("want missing error, got %v", err)
-	}
-}
-
-func TestYK_SourceIsFile(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := newYKustomizeLocalBackend(cfgWithSources(t, f))
-	if err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("want not-a-directory error, got %v", err)
-	}
-}
-
-func TestYK_BasesIsFile(t *testing.T) {
-	src := t.TempDir()
-	if err := os.WriteFile(filepath.Join(src, "y-kustomize-bases"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("want not-a-directory error, got %v", err)
-	}
-}
-
-func TestYK_NonFileLeavesIgnored(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml":       "k\n",
-		"y-kustomize-bases/blobs/setup-bucket-job/subdir/ignored.yaml": "k\n",
+// TestYK_RejectsKustomizationYAMLDataKey covers the Y_CLUSTER_SERVE
+// change-request rule: a data key named exactly "kustomization.yaml"
+// must fail-fast with a clear message naming the offending key,
+// because consumers might assume http://serve/v1/.../kustomization.yaml
+// is itself a kustomize base (it isn't -- HTTP kustomize resources
+// can't be a directory or another kustomization).
+func TestYK_RejectsKustomizationYAMLDataKey(t *testing.T) {
+	src := writeBase(t, "blobs", "setup-bucket-job", map[string]string{
+		"kustomization.yaml": "resources: []\n",
 	})
-	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err == nil {
+		t.Fatal("expected fail-fast error for kustomization.yaml data key")
+	}
+	if !strings.Contains(err.Error(), "kustomization.yaml") {
+		t.Fatalf("error should name the offending key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("error should explain why: %v", err)
+	}
+}
+
+func TestYK_NonSecretResourcesIgnored(t *testing.T) {
+	// A Kustomization that emits a Secret AND a regular ConfigMap
+	// resource. The ConfigMap must not produce routes.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "x.yaml"), []byte("k\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cm.yaml"), []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unrelated
+data:
+  foo: bar
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- cm.yaml
+secretGenerator:
+- name: y-kustomize.blobs.setup-bucket-job
+  options:
+    disableNameSuffixHash: true
+  files:
+  - src/x.yaml
+`
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := newYKustomizeLocalBackend(cfgWithSources(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range b.Routes() {
-		if strings.Contains(p, "/subdir/") {
-			t.Fatalf("subdir leaked into route: %s", p)
-		}
+	want := []string{"/v1/blobs/setup-bucket-job/x.yaml"}
+	if got := strings.Join(b.Routes(), ","); got != strings.Join(want, ",") {
+		t.Fatalf("got %v want %v", b.Routes(), want)
+	}
+}
+
+func TestYK_SecretsWithNonPrefixedNamesIgnored(t *testing.T) {
+	// A Secret without the y-kustomize. prefix must be ignored
+	// (the prefix is the contract; arbitrary Secrets that
+	// happen to be in the build output are not turned into URLs).
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "y.yaml"), []byte("k\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: random-secret
+  options:
+    disableNameSuffixHash: true
+  files:
+  - src/y.yaml
+- name: y-kustomize.blobs.x
+  options:
+    disableNameSuffixHash: true
+  files:
+  - src/y.yaml
+`
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := newYKustomizeLocalBackend(cfgWithSources(t, dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Routes()) != 1 || b.Routes()[0] != "/v1/blobs/x/y.yaml" {
+		t.Fatalf("got %v", b.Routes())
 	}
 }
 
 func TestYK_ServeHTTP_200And304(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "bucket: builds\n",
+	src := writeBase(t, "blobs", "setup-bucket-job", map[string]string{
+		"values.yaml": "bucket: builds\n",
 	})
 	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	if err != nil {
@@ -163,6 +221,9 @@ func TestYK_ServeHTTP_200And304(t *testing.T) {
 		t.Fatalf("content-type: %s", resp.Header.Get("Content-Type"))
 	}
 	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("missing ETag")
+	}
 
 	req, _ := http.NewRequest(http.MethodGet, s.URL+"/v1/blobs/setup-bucket-job/values.yaml", nil)
 	req.Header.Set("If-None-Match", etag)
@@ -177,27 +238,23 @@ func TestYK_ServeHTTP_200And304(t *testing.T) {
 }
 
 func TestYK_ServeHTTP_404AndMethod(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "k\n",
+	src := writeBase(t, "blobs", "setup-bucket-job", map[string]string{
+		"values.yaml": "k\n",
 	})
 	b, _ := newYKustomizeLocalBackend(cfgWithSources(t, src))
 	s := httptest.NewServer(b)
 	defer s.Close()
 
-	// Unknown path
 	resp, _ := http.Get(s.URL + "/v1/nope")
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("want 404, got %d", resp.StatusCode)
 	}
-	// Outside /v1/
 	resp, _ = http.Get(s.URL + "/somethingelse")
 	resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Fatalf("outside /v1/: want 404, got %d", resp.StatusCode)
 	}
-	// POST
 	resp, _ = http.Post(s.URL+"/v1/blobs/setup-bucket-job/values.yaml", "text/plain", strings.NewReader("x"))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
@@ -205,20 +262,14 @@ func TestYK_ServeHTTP_404AndMethod(t *testing.T) {
 	}
 }
 
-func TestYK_ReadFileError(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "k\n",
-	})
-	b, _ := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	// Remove the file after scan
-	os.Remove(filepath.Join(src, "y-kustomize-bases/blobs/setup-bucket-job/values.yaml"))
-	s := httptest.NewServer(b)
-	defer s.Close()
-	resp, _ := http.Get(s.URL + "/v1/blobs/setup-bucket-job/values.yaml")
-	resp.Body.Close()
-	if resp.StatusCode != 500 {
-		t.Fatalf("want 500, got %d", resp.StatusCode)
+func TestYK_KustomizeBuildErrorPropagates(t *testing.T) {
+	src := t.TempDir() // no kustomization.yaml
+	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
+	if err == nil {
+		t.Fatal("expected kustomize build error")
+	}
+	if !strings.Contains(err.Error(), "kustomize build") {
+		t.Fatalf("error should be wrapped: %v", err)
 	}
 }
 
@@ -233,143 +284,5 @@ func TestYK_NoSources(t *testing.T) {
 	c := &Config{Port: 1, Type: TypeYKustomizeLocal, Dir: t.TempDir()}
 	if _, err := newYKustomizeLocalBackend(c); err == nil {
 		t.Fatal("want error")
-	}
-}
-
-func TestYK_RenameSyntaxRejected(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml": "kind: Job\n",
-	})
-	// Write a kustomization.yaml with rename syntax
-	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-secretGenerator:
-- name: y-kustomize.kafka.setup-topic-job
-  files:
-  - base-for-annotations.yaml=y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml
-`
-	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err == nil {
-		t.Fatal("want error for rename syntax")
-	}
-	if !strings.Contains(err.Error(), "rename syntax") {
-		t.Fatalf("error should mention rename syntax: %v", err)
-	}
-}
-
-func TestYK_NoRenameAllowed(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml": "kind: Job\n",
-	})
-	// Write a kustomization.yaml without rename syntax
-	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-secretGenerator:
-- name: y-kustomize.blobs.setup-bucket-job
-  files:
-  - y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml
-`
-	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(b.Routes()) != 1 {
-		t.Fatalf("routes: %v", b.Routes())
-	}
-}
-
-func TestYK_NoKustomizationIsOK(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml": "kind: Job\n",
-	})
-	// No kustomization.yaml — should still work
-	b, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(b.Routes()) != 1 {
-		t.Fatalf("routes: %v", b.Routes())
-	}
-}
-
-func TestYK_RenameSyntaxRejected_ConfigMapGenerator(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml": "kind: Job\n",
-	})
-	kust := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-configMapGenerator:
-- name: y-kustomize.kafka.setup-topic-job
-  files:
-  - base-for-annotations.yaml=y-kustomize-bases/kafka/setup-topic-job/setup-topic-job.yaml
-`
-	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"), []byte(kust), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err == nil || !strings.Contains(err.Error(), "rename syntax") {
-		t.Fatalf("want rename-syntax error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "configMapGenerator") {
-		t.Fatalf("error should identify configMapGenerator: %v", err)
-	}
-}
-
-func TestYK_MalformedKustomizationRejected(t *testing.T) {
-	src := t.TempDir()
-	seedYKBases(t, src, map[string]string{
-		"y-kustomize-bases/blobs/setup-bucket-job/values.yaml": "k\n",
-	})
-	// Unclosed list → yaml parse error
-	if err := os.WriteFile(filepath.Join(src, "kustomization.yaml"),
-		[]byte("secretGenerator:\n- name: x\n  files: [unclosed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-	if err == nil {
-		t.Fatal("want parse error")
-	}
-	if !strings.Contains(err.Error(), "kustomization.yaml") {
-		t.Fatalf("parse error should name the file: %v", err)
-	}
-}
-
-func TestYK_AlternateKustomizationFilenames(t *testing.T) {
-	for _, name := range []string{"kustomization.yml", "Kustomization"} {
-		t.Run(name, func(t *testing.T) {
-			src := t.TempDir()
-			seedYKBases(t, src, map[string]string{
-				"y-kustomize-bases/kafka/setup-topic-job/x.yaml": "k\n",
-			})
-			kust := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-secretGenerator:
-- name: y-kustomize.kafka.setup-topic-job
-  files:
-  - renamed.yaml=y-kustomize-bases/kafka/setup-topic-job/x.yaml
-`
-			if err := os.WriteFile(filepath.Join(src, name), []byte(kust), 0o644); err != nil {
-				t.Fatal(err)
-			}
-
-			_, err := newYKustomizeLocalBackend(cfgWithSources(t, src))
-			if err == nil || !strings.Contains(err.Error(), "rename syntax") {
-				t.Fatalf("rename check should run for %s: %v", name, err)
-			}
-		})
 	}
 }

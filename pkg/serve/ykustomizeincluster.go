@@ -83,7 +83,7 @@ func newYKustomizeInClusterBackend(ctx context.Context, cfg *Config, logger *zap
 
 func newYKustomizeInClusterBackendWith(ctx context.Context, cfg *Config, logger *zap.Logger, cf clientFactory) (*ykInClusterBackend, error) {
 	if cfg.Type != TypeYKustomizeInCluster {
-		return nil, fmt.Errorf("not a y-kustomize-in-cluster config: %s", cfg.Type)
+		return nil, fmt.Errorf("not a y-kustomize-incluster config: %s", cfg.Type)
 	}
 	ic := cfg.InCluster
 	if ic == nil {
@@ -174,7 +174,7 @@ func (b *ykInClusterBackend) rebuild() {
 		if !ok {
 			continue
 		}
-		addSecretRoutes(sec, routes)
+		b.addSecretRoutes(sec, routes)
 	}
 
 	b.mu.Lock()
@@ -193,15 +193,27 @@ func (b *ykInClusterBackend) rebuild() {
 // addSecretRoutes adds every data key of a matching Secret to the
 // route map. Ignores Secrets whose name doesn't start with the
 // `y-kustomize.` prefix (possible if a user applies the label to
-// other Secrets). Preserves the `first dot only` behavior inherited
-// from ystack's y-kustomize so renames behave identically there.
-func addSecretRoutes(sec *corev1.Secret, routes map[string]ykInClusterRoute) {
+// other Secrets). Data keys named ForbiddenSecretKey
+// ("kustomization.yaml") are skipped with a warning rather than
+// failing the whole rebuild -- a poorly-formed Secret should not
+// take the rest of the watch offline. The local backend, which
+// owns its source via kustomize build, errors fatally on the
+// same condition.
+func (b *ykInClusterBackend) addSecretRoutes(sec *corev1.Secret, routes map[string]ykInClusterRoute) {
 	if !strings.HasPrefix(sec.Name, ykInClusterSecretPrefix) {
 		return
 	}
 	suffix := strings.TrimPrefix(sec.Name, ykInClusterSecretPrefix)
 	pathBase := "/v1/" + strings.Replace(suffix, ".", "/", 1)
 	for key, val := range sec.Data {
+		if key == ForbiddenSecretKey {
+			b.logger.Warn("skipping reserved data key",
+				zap.String("secret", sec.Name),
+				zap.String("key", key),
+				zap.String("reason", "kustomization.yaml is reserved; rename the key"),
+			)
+			continue
+		}
 		route := pathBase + "/" + key
 		body := make([]byte, len(val))
 		copy(body, val)
