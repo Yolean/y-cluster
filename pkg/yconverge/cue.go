@@ -54,18 +54,21 @@ func ParseChecks(cueDir string) ([]Check, error) {
 	return checks, nil
 }
 
-// importPattern matches CUE import paths that look like ystack
-// convergence dependencies (i.e. imports from the ystack CUE module,
-// excluding the verify schema itself).
-var importPattern = regexp.MustCompile(`"(yolean\.se/ystack/[^"]+)"`)
-var verifyImport = "yolean.se/ystack/yconverge/verify"
+// verifySchemaImport is the CUE-vendored path of the verify schema.
+// It is shipped under cue.mod/pkg/yolean.se/ystack/yconverge/verify
+// regardless of the consuming module's own name, so the import path
+// is invariant across modules.
+const verifySchemaImport = "yolean.se/ystack/yconverge/verify"
 
 // ParseImports reads a yconverge.cue file and extracts dependency
-// paths from CUE import statements. Returns filesystem-relative paths
-// suitable for resolving to kustomize base directories.
+// paths from CUE import statements within the given module. Returns
+// filesystem-relative paths suitable for resolving to kustomize base
+// directories.
 //
-// Example: import "yolean.se/ystack/k3s/30-blobs:blobs" → "k3s/30-blobs"
-func ParseImports(cueFile string) ([]string, error) {
+// Example with module "yolean.se/ystack":
+//
+//	import "yolean.se/ystack/k3s/30-blobs:blobs" → "k3s/30-blobs"
+func ParseImports(cueFile, modulePath string) ([]string, error) {
 	data, err := os.ReadFile(cueFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -74,11 +77,13 @@ func ParseImports(cueFile string) ([]string, error) {
 		return nil, err
 	}
 
-	matches := importPattern.FindAllStringSubmatch(string(data), -1)
+	prefix := modulePath + "/"
+	pattern := regexp.MustCompile(`"(` + regexp.QuoteMeta(prefix) + `[^"]+)"`)
+	matches := pattern.FindAllStringSubmatch(string(data), -1)
 	var deps []string
 	for _, m := range matches {
 		imp := m[1]
-		if imp == verifyImport {
+		if imp == verifySchemaImport {
 			continue
 		}
 		// Strip the CUE package label (":name" suffix)
@@ -87,7 +92,7 @@ func ParseImports(cueFile string) ([]string, error) {
 			path = path[:i]
 		}
 		// Strip the module prefix
-		path = strings.TrimPrefix(path, "yolean.se/ystack/")
+		path = strings.TrimPrefix(path, prefix)
 		deps = append(deps, path)
 	}
 	return deps, nil

@@ -2,7 +2,9 @@ package yconverge
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -11,46 +13,53 @@ import (
 // files to discover dependencies. Returns the list of directories to
 // converge, in dependency order (deps first, target last).
 //
-// baseDir is the root directory from which CUE import paths are resolved.
-// For ystack, this is the ystack root (the CUE module root).
+// cueRoot is the CUE module root (the directory containing cue.mod).
+// CUE import paths are resolved relative to it. The module name is
+// read from cue.mod/module.cue so the same machinery works for any
+// CUE module, not just yolean.se/ystack.
 // targetDir is the kustomize base to converge.
-func ResolveDeps(baseDir, targetDir string) ([]string, error) {
+func ResolveDeps(cueRoot, targetDir string) ([]string, error) {
 	abs, err := filepath.Abs(targetDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve target: %w", err)
 	}
-	baseAbs, err := filepath.Abs(baseDir)
+	rootAbs, err := filepath.Abs(cueRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve base: %w", err)
+		return nil, fmt.Errorf("resolve cue root: %w", err)
+	}
+
+	modulePath, err := ParseCueModuleName(rootAbs)
+	if err != nil {
+		return nil, fmt.Errorf("read cue module name: %w", err)
 	}
 
 	visited := make(map[string]bool)
 	var order []string
-	if err := resolveDepsWalk(baseAbs, abs, visited, &order); err != nil {
+	if err := resolveDepsWalk(rootAbs, modulePath, abs, visited, &order); err != nil {
 		return nil, err
 	}
 	return order, nil
 }
 
-func resolveDepsWalk(baseDir, dir string, visited map[string]bool, order *[]string) error {
+func resolveDepsWalk(cueRoot, modulePath, dir string, visited map[string]bool, order *[]string) error {
 	if visited[dir] {
 		return nil
 	}
 	visited[dir] = true
 
 	cueFile := filepath.Join(dir, "yconverge.cue")
-	imports, err := ParseImports(cueFile)
+	imports, err := ParseImports(cueFile, modulePath)
 	if err != nil {
 		return fmt.Errorf("parse imports %s: %w", cueFile, err)
 	}
 
 	for _, imp := range imports {
-		depDir := filepath.Join(baseDir, imp)
+		depDir := filepath.Join(cueRoot, imp)
 		depAbs, err := filepath.Abs(depDir)
 		if err != nil {
 			return fmt.Errorf("resolve dep %s: %w", imp, err)
 		}
-		if err := resolveDepsWalk(baseDir, depAbs, visited, order); err != nil {
+		if err := resolveDepsWalk(cueRoot, modulePath, depAbs, visited, order); err != nil {
 			return err
 		}
 	}
@@ -78,16 +87,29 @@ func FindCueModuleRoot(dir string) string {
 	}
 }
 
-func fileExists(path string) bool {
-	_, err := filepath.Abs(path)
+// moduleNamePattern matches the `module: "..."` declaration at the
+// top of cue.mod/module.cue. CUE allows extra fields (language,
+// deps, etc.) so we match the line, not the whole file.
+var moduleNamePattern = regexp.MustCompile(`(?m)^\s*module:\s*"([^"]+)"`)
+
+// ParseCueModuleName reads cue.mod/module.cue under cueRoot and
+// returns the declared module path (e.g. "yolean.se/ystack").
+func ParseCueModuleName(cueRoot string) (string, error) {
+	path := filepath.Join(cueRoot, "cue.mod", "module.cue")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return "", err
 	}
-	info, err := filepath.Glob(path)
-	if err != nil || len(info) == 0 {
-		return false
+	m := moduleNamePattern.FindStringSubmatch(string(data))
+	if len(m) < 2 {
+		return "", fmt.Errorf(`module declaration not found in %s`, path)
 	}
-	return true
+	return m[1], nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func contains(slice []string, s string) bool {

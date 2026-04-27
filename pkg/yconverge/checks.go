@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Yolean/y-cluster/pkg/k8swait"
 )
 
 // Check represents a single post-apply verification step.
@@ -79,16 +81,15 @@ func (r *CheckRunner) runWait(ctx context.Context, check Check, ns string, timeo
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
 	)
-
-	args := []string{"--context=" + r.Context, "wait",
-		"--for=" + check.For,
-		"--timeout=" + formatDuration(timeout),
+	if err := k8swait.Wait(ctx, r.Context, check.Resource, ns, check.For, timeout); err != nil {
+		r.Logger.Error("wait check failed",
+			zap.String("resource", check.Resource),
+			zap.String("for", check.For),
+			zap.Error(err),
+		)
+		return err
 	}
-	if ns != "" {
-		args = append(args, "-n", ns)
-	}
-	args = append(args, check.Resource)
-	return r.kubectl(ctx, args...)
+	return nil
 }
 
 func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, timeout time.Duration) error {
@@ -101,15 +102,14 @@ func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, ti
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
 	)
-
-	args := []string{"--context=" + r.Context, "rollout", "status",
-		"--timeout=" + formatDuration(timeout),
+	if err := k8swait.RolloutStatus(ctx, r.Context, check.Resource, ns, timeout); err != nil {
+		r.Logger.Error("rollout check failed",
+			zap.String("resource", check.Resource),
+			zap.Error(err),
+		)
+		return err
 	}
-	if ns != "" {
-		args = append(args, "-n", ns)
-	}
-	args = append(args, check.Resource)
-	return r.kubectl(ctx, args...)
+	return nil
 }
 
 func (r *CheckRunner) runExec(ctx context.Context, check Check, timeout time.Duration) error {
@@ -142,22 +142,11 @@ func (r *CheckRunner) runExec(ctx context.Context, check Check, timeout time.Dur
 	}
 }
 
-func (r *CheckRunner) kubectl(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run()
-}
-
 func parseDuration(s string) (time.Duration, error) {
 	if s == "" {
 		s = DefaultTimeout
 	}
 	return time.ParseDuration(s)
-}
-
-func formatDuration(d time.Duration) string {
-	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
 // CheckError wraps a check failure with index and check context.

@@ -34,7 +34,7 @@ step: verify.#Step & {
 	checks: []
 }
 `)
-	deps, err := ParseImports(filepath.Join(dir, "yconverge.cue"))
+	deps, err := ParseImports(filepath.Join(dir, "yconverge.cue"), "yolean.se/ystack")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ step: verify.#Step & {
 	checks: []
 }
 `)
-	deps, err := ParseImports(filepath.Join(dir, "yconverge.cue"))
+	deps, err := ParseImports(filepath.Join(dir, "yconverge.cue"), "yolean.se/ystack")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestParseImports_NoImports(t *testing.T) {
 package test
 step: checks: []
 `)
-	deps, err := ParseImports(filepath.Join(dir, "yconverge.cue"))
+	deps, err := ParseImports(filepath.Join(dir, "yconverge.cue"), "yolean.se/ystack")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ step: checks: []
 }
 
 func TestParseImports_MissingFile(t *testing.T) {
-	deps, err := ParseImports("/nonexistent/yconverge.cue")
+	deps, err := ParseImports("/nonexistent/yconverge.cue", "yolean.se/ystack")
 	if err != nil {
 		t.Fatal(err)
 	}
