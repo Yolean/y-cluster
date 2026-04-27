@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=../../pkg/provision/schema/qemu.schema.json
+#
+# Worked example consumed by the qemu e2e test. Most fields are
+# omitted so they fall through to schema defaults; only the
+# discriminator and the few values that need to differ from the
+# packaged defaults (port, name, memory, etc.) are listed.
+#
+# Tag a cluster with `name:` if you intend to run more than one VM
+# from the same host. Bumping `k3s.version` tracks the release; the
+# image default mirrors the rancher/k3s tag pinned in
+# pkg/provision/config/k3s.yaml.
+provider: qemu

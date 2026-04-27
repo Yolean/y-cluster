@@ -6,7 +6,7 @@
 # kubeconfig is inferred from the pod's service account, and namespace
 # comes from the pod's namespace file.
 port: __PORT__
-type: y-kustomize-in-cluster
+type: y-kustomize-incluster
 inCluster:
   kubeconfig: __KUBECONFIG__
   namespace: default

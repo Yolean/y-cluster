@@ -3,11 +3,11 @@ package yconverge
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/k8sapply"
 	"github.com/Yolean/y-cluster/pkg/kustomize/traverse"
 )
 
@@ -45,31 +45,35 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 	// Find the CUE module root for resolving import paths
 	cueRoot := FindCueModuleRoot(absDir)
 
-	// Resolve dependency order from all CUE files in the kustomize tree.
-	// An overlay (e.g. backend/qa) inherits dependencies from its base
-	// (e.g. backend/base/yconverge.cue imports db).
+	// Resolve dependency order from all CUE files in the kustomize
+	// tree. An overlay (e.g. backend/qa) inherits dependencies from
+	// its base (e.g. backend/base/yconverge.cue imports db). The
+	// traversal must succeed: if it fails (corrupt kustomization,
+	// permission denied, symlink cycle) the apply might still
+	// succeed but no checks would be discovered, leaving the apply
+	// silently unverified. Treat traversal errors as fatal.
 	var steps []string
 	if cueRoot != "" {
-		// Walk the kustomize tree to find all dirs with yconverge.cue
-		tResult, walkErr := traverse.Walk(absDir, nil)
-		if walkErr == nil {
-			cueDirs := FindCueFiles(tResult.Dirs)
-			// Resolve deps from each CUE file, collecting all unique steps
-			visited := make(map[string]bool)
-			for _, cueDir := range cueDirs {
-				depSteps, depErr := ResolveDeps(cueRoot, cueDir)
-				if depErr != nil {
-					return nil, fmt.Errorf("resolve deps from %s: %w", cueDir, depErr)
-				}
-				for _, s := range depSteps {
-					if !visited[s] {
-						visited[s] = true
-						steps = append(steps, s)
-					}
+		tResult, walkErr := traverse.Walk(absDir, func(format string, a ...any) {
+			logger.Warn(fmt.Sprintf(format, a...))
+		})
+		if walkErr != nil {
+			return nil, fmt.Errorf("traverse %s: %w", absDir, walkErr)
+		}
+		cueDirs := FindCueFiles(tResult.Dirs)
+		visited := make(map[string]bool)
+		for _, cueDir := range cueDirs {
+			depSteps, depErr := ResolveDeps(cueRoot, cueDir)
+			if depErr != nil {
+				return nil, fmt.Errorf("resolve deps from %s: %w", cueDir, depErr)
+			}
+			for _, s := range depSteps {
+				if !visited[s] {
+					visited[s] = true
+					steps = append(steps, s)
 				}
 			}
 		}
-		// Always include the target itself as the final step
 		if !contains(steps, absDir) {
 			steps = append(steps, absDir)
 		}
@@ -97,6 +101,11 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				KustomizeDir: step,
 				DryRun:       opts.DryRun,
 				SkipChecks:   opts.SkipChecks,
+				// Q14: --checks-only must propagate so callers can
+				// verify a whole chain without applying anywhere.
+				// Earlier this field was dropped, so deps re-applied
+				// even when the user only wanted a health check.
+				ChecksOnly:   opts.ChecksOnly,
 			}
 			if _, err := convergeSingle(ctx, depOpts, logger); err != nil {
 				return nil, fmt.Errorf("dependency %s: %w", RelPath(cueRoot, step), err)
@@ -169,28 +178,27 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 	return &Result{Steps: []string{absDir}}, nil
 }
 
-// kubectlApply runs kubectl apply --server-side on a kustomize base.
+// kubectlApply runs server-side apply against the named context's
+// cluster, equivalent to:
+//
+//	kubectl --context=<...> apply --server-side --force-conflicts \
+//	  --field-manager=y-cluster -k <KustomizeDir>
+//
+// Implemented in pkg/k8sapply via client-go directly so callers
+// get typed errors (apierrors.IsConflict, IsForbidden, etc.)
+// instead of "exit status 1, see stderr".
 func kubectlApply(ctx context.Context, opts Options, logger *zap.Logger) error {
-	args := []string{
-		"--context=" + opts.Context,
-		"apply",
-		"--server-side=true",
-		"--force-conflicts",
-		"-k", opts.KustomizeDir,
+	dryRun := k8sapply.DryRunNone
+	if opts.DryRun == "server" {
+		dryRun = k8sapply.DryRunServer
 	}
-	if opts.DryRun != "" {
-		args = append(args, "--dry-run="+opts.DryRun)
-	}
-
-	logger.Debug("kubectl apply", zap.Strings("args", args))
-
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply: %s: %w", string(output), err)
-	}
-	if len(output) > 0 {
-		logger.Info("applied", zap.String("output", string(output)))
+	logger.Debug("apply",
+		zap.String("context", opts.Context),
+		zap.String("kustomizeDir", opts.KustomizeDir),
+		zap.String("dryRun", string(dryRun)),
+	)
+	if err := k8sapply.Apply(ctx, opts.Context, opts.KustomizeDir, dryRun, logger); err != nil {
+		return fmt.Errorf("apply %s: %w", opts.KustomizeDir, err)
 	}
 	return nil
 }

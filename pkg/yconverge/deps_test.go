@@ -5,8 +5,17 @@ import (
 	"testing"
 )
 
+// writeYstackModule declares a cue.mod/module.cue with the ystack
+// module path so deps_test fixtures can use the historical
+// "yolean.se/ystack/..." import strings.
+func writeYstackModule(t *testing.T, root string) {
+	t.Helper()
+	writeFile(t, filepath.Join(root, "cue.mod/module.cue"), `module: "yolean.se/ystack"`)
+}
+
 func TestResolveDeps_NoDeps(t *testing.T) {
 	root := t.TempDir()
+	writeYstackModule(t, root)
 	writeFile(t, filepath.Join(root, "base/yconverge.cue"), `
 package base
 step: checks: []
@@ -24,6 +33,7 @@ step: checks: []
 
 func TestResolveDeps_LinearChain(t *testing.T) {
 	root := t.TempDir()
+	writeYstackModule(t, root)
 
 	// a depends on b, b depends on c
 	writeFile(t, filepath.Join(root, "c/yconverge.cue"), `
@@ -64,6 +74,7 @@ step: checks: []
 
 func TestResolveDeps_DiamondDependency(t *testing.T) {
 	root := t.TempDir()
+	writeYstackModule(t, root)
 
 	// top depends on left and right, both depend on shared
 	writeFile(t, filepath.Join(root, "shared/yconverge.cue"), `
@@ -119,6 +130,7 @@ step: checks: []
 
 func TestResolveDeps_NoCueFile(t *testing.T) {
 	root := t.TempDir()
+	writeYstackModule(t, root)
 	writeFile(t, filepath.Join(root, "base/kustomization.yaml"), "")
 	// No yconverge.cue — should return just the target
 	order, err := ResolveDeps(root, filepath.Join(root, "base"))
@@ -132,6 +144,7 @@ func TestResolveDeps_NoCueFile(t *testing.T) {
 
 func TestResolveDeps_VisitsEachOnce(t *testing.T) {
 	root := t.TempDir()
+	writeYstackModule(t, root)
 	writeFile(t, filepath.Join(root, "shared/yconverge.cue"), `
 package shared
 step: checks: []
@@ -194,6 +207,63 @@ func TestFindCueModuleRoot_NotFound(t *testing.T) {
 	got := FindCueModuleRoot(root)
 	if got != "" {
 		t.Fatalf("expected empty, got %s", got)
+	}
+}
+
+func TestParseCueModuleName(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "cue.mod/module.cue"), `module: "example.com/myorg/mymodule"
+language: version: "v0.16.0"
+`)
+	got, err := ParseCueModuleName(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "example.com/myorg/mymodule" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestParseCueModuleName_Missing(t *testing.T) {
+	root := t.TempDir()
+	if _, err := ParseCueModuleName(root); err == nil {
+		t.Fatal("expected error when cue.mod/module.cue is missing")
+	}
+}
+
+func TestParseCueModuleName_Malformed(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "cue.mod/module.cue"), `language: version: "v0.16.0"`)
+	if _, err := ParseCueModuleName(root); err == nil {
+		t.Fatal("expected error when module declaration is missing")
+	}
+}
+
+// TestResolveDeps_NonYstackModule covers Q9: dropping the
+// yolean.se/ystack hardcode. Imports in a different module must
+// resolve correctly when cue.mod declares the module name.
+func TestResolveDeps_NonYstackModule(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "cue.mod/module.cue"), `module: "example.com/foo"`)
+	writeFile(t, filepath.Join(root, "lib/yconverge.cue"), `
+package lib
+step: checks: []
+`)
+	writeFile(t, filepath.Join(root, "app/yconverge.cue"), `
+package app
+import "example.com/foo/lib:lib"
+_dep: lib.step
+step: checks: []
+`)
+	order, err := ResolveDeps(root, filepath.Join(root, "app"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(order), order)
+	}
+	if filepath.Base(order[0]) != "lib" || filepath.Base(order[1]) != "app" {
+		t.Fatalf("expected [lib, app], got %v", basenames(order))
 	}
 }
 

@@ -14,24 +14,25 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
-	"sync"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/e2e/cluster"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
 
-const (
-	kwokImage     = "registry.k8s.io/kwok/cluster:v0.7.0-k8s.v1.33.0"
-	containerName = "y-cluster-e2e"
-	contextName   = "y-cluster-e2e"
+// contextName and clusterKubeconfig are populated by setupCluster
+// from the shared cluster harness so other test files in this
+// package can reach the kubeconfig + context without each
+// importing e2e/cluster directly.
+var (
+	contextName       string
+	clusterKubeconfig string
 )
 
 func testdataDir(t *testing.T) string {
@@ -45,81 +46,19 @@ func testdataDir(t *testing.T) string {
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	_ = exec.Command("docker", "rm", "-f", containerName).Run()
+	cluster.TeardownAll()
 	os.Exit(code)
 }
 
-var clusterOnce sync.Once
-var clusterKubeconfig string
-
+// setupCluster brings up (or reuses) the shared kwok cluster and
+// stashes its kubeconfig metadata in package-level vars so tests
+// across files can use them. Skips the test when Docker is
+// unavailable.
 func setupCluster(t *testing.T) {
 	t.Helper()
-
-	clusterOnce.Do(func() {
-		ctx := context.Background()
-
-		if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
-			t.Skip("Docker not available")
-		}
-
-		_ = exec.CommandContext(ctx, "docker", "rm", "-f", containerName).Run()
-
-		cmd := exec.CommandContext(ctx, "docker", "run", "-d",
-			"--name", containerName,
-			"-p", "0:8080",
-			kwokImage)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("start kwok: %s: %v", out, err)
-		}
-
-		portOut, err := exec.CommandContext(ctx, "docker", "port", containerName, "8080").Output()
-		if err != nil {
-			t.Fatalf("get port: %v", err)
-		}
-		parts := strings.Split(strings.TrimSpace(string(portOut)), ":")
-		port := parts[len(parts)-1]
-
-		dir, err := os.MkdirTemp("", "y-cluster-e2e-*")
-		if err != nil {
-			t.Fatal(err)
-		}
-		clusterKubeconfig = filepath.Join(dir, "kubeconfig")
-		content := fmt.Sprintf(`apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: http://127.0.0.1:%s
-  name: %s
-contexts:
-- context:
-    cluster: %s
-    user: %s
-  name: %s
-current-context: %s
-users:
-- name: %s
-`, port, contextName, contextName, contextName, contextName, contextName, contextName)
-
-		if err := os.WriteFile(clusterKubeconfig, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			cmd := exec.CommandContext(ctx, "kubectl", "--context="+contextName, "get", "svc")
-			cmd.Env = append(os.Environ(), "KUBECONFIG="+clusterKubeconfig)
-			if err := cmd.Run(); err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("kwok not ready after 30s")
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-	})
-
-	os.Setenv("KUBECONFIG", clusterKubeconfig)
-	t.Cleanup(func() { os.Unsetenv("KUBECONFIG") })
+	c := cluster.Kwok(t)
+	contextName = c.Context
+	clusterKubeconfig = c.Kubeconfig
 }
 
 func logger(t *testing.T) *zap.Logger {
@@ -295,6 +234,59 @@ func TestChecksOnly_SkipsApply(t *testing.T) {
 		ChecksOnly:   true,
 	}, log)
 	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestChecksOnly_PropagatesToDeps covers Q14 from
+// QUESTIONS_TO_CLUSTER_MAINTAINERS.md: --checks-only on a target with
+// dependencies must NOT re-apply the deps. We prove the propagation
+// by deleting a dep's resource after a successful converge and then
+// running --checks-only on the parent: with propagation the dep's
+// check fails (resource missing) because no apply happens; without
+// propagation the dep would silently get re-applied and the check
+// would pass.
+func TestChecksOnly_PropagatesToDeps(t *testing.T) {
+	setupCluster(t)
+	td := testdataDir(t)
+	log := logger(t)
+
+	// First: full converge of the chain (db is a dep of backend).
+	if _, err := yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: filepath.Join(td, "e2e-backend/base"),
+	}, log); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete the db's ConfigMap. Its yconverge check is `kubectl get
+	// configmap db-config`, which now fails until the next apply.
+	out, err := exec.Command("kubectl", "--context="+contextName,
+		"delete", "configmap", "db-config", "--ignore-not-found=true").CombinedOutput()
+	if err != nil {
+		t.Fatalf("delete db-config: %s: %v", out, err)
+	}
+
+	// --checks-only on backend should propagate to db, and db's
+	// check should fail because nothing re-applied the configmap.
+	_, err = yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: filepath.Join(td, "e2e-backend/base"),
+		ChecksOnly:   true,
+	}, log)
+	if err == nil {
+		t.Fatal("expected dep check to fail when --checks-only propagates and the dep's resource is missing")
+	}
+	if !strings.Contains(err.Error(), "db") {
+		t.Fatalf("expected db check failure in error, got %v", err)
+	}
+
+	// Restore db-config so subsequent tests don't see the missing
+	// resource if the suite is re-run.
+	if _, err := yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: filepath.Join(td, "e2e-db/base"),
+	}, log); err != nil {
 		t.Fatal(err)
 	}
 }

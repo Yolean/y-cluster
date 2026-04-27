@@ -8,11 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
-	"sigs.k8s.io/yaml"
+	"github.com/Yolean/y-cluster/pkg/configfile"
 )
 
 // ConfigFilename is the name of the YAML file every `-c` dir must contain.
@@ -23,7 +22,7 @@ type BackendType string
 
 const (
 	TypeYKustomizeLocal     BackendType = "y-kustomize-local"
-	TypeYKustomizeInCluster BackendType = "y-kustomize-in-cluster"
+	TypeYKustomizeInCluster BackendType = "y-kustomize-incluster"
 	TypeStatic              BackendType = "static"
 )
 
@@ -54,7 +53,7 @@ type YKustomizeLocalSource struct {
 	Dir string `json:"dir" yaml:"dir"`
 }
 
-// YKustomizeInClusterConfig configures type y-kustomize-in-cluster: a
+// YKustomizeInClusterConfig configures type y-kustomize-incluster: a
 // backend that serves y-kustomize bases by watching Kubernetes
 // Secrets named `y-kustomize.{group}.{name}` and mapping their data
 // keys to `/v1/{group}/{name}/{file}` URLs. This replaces the
@@ -79,32 +78,21 @@ type YKustomizeInClusterConfig struct {
 	Context string `json:"context,omitempty" yaml:"context,omitempty"`
 }
 
+// SetDir lets pkg/configfile attach the absolute config-dir path
+// after a successful load; relative `sources[].dir` paths resolve
+// against this. Part of the configfile.DirAware contract.
+func (c *Config) SetDir(dir string) { c.Dir = dir }
+
+// Validate satisfies configfile.Validator. The lower-cased
+// validate() keeps the long, internal switch out of the public API.
+func (c *Config) Validate() error { return c.validate() }
+
 // LoadConfigDir reads `{dir}/y-cluster-serve.yaml`, validates it, and
 // returns the parsed config with Dir set to the absolute of `dir`.
 func LoadConfigDir(dir string) (*Config, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", dir, err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, fmt.Errorf("config dir %s: %w", dir, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("config path is not a directory: %s", abs)
-	}
-	path := filepath.Join(abs, ConfigFilename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
 	var c Config
-	if err := yaml.UnmarshalStrict(data, &c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	c.Dir = abs
-	if err := c.validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if err := configfile.Load(dir, ConfigFilename, &c); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }

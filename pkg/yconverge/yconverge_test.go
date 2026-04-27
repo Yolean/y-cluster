@@ -2,7 +2,9 @@ package yconverge
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -86,5 +88,40 @@ func TestRun_MissingDir(t *testing.T) {
 	}, logger)
 	if err == nil {
 		t.Fatal("expected error for missing dir")
+	}
+}
+
+// TestRun_TraverseErrorIsFatal covers Q12: a corrupt kustomization
+// inside a CUE module must surface as a fatal error rather than
+// fall through to a single-step run that silently skips checks.
+func TestRun_TraverseErrorIsFatal(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cue.mod"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cue.mod", "module.cue"),
+		[]byte(`module: "yolean.se/ystack"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "broken")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Invalid YAML in kustomization triggers the traverse failure.
+	if err := os.WriteFile(filepath.Join(target, "kustomization.yaml"),
+		[]byte("resources:\n- ../missing\n  bogus: ["), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Run(context.Background(), Options{
+		Context:      "test",
+		KustomizeDir: target,
+		PrintDeps:    true, // keep network/cluster out of the test
+	}, logger)
+	if err == nil {
+		t.Fatal("expected traverse error to be fatal")
+	}
+	if !strings.Contains(err.Error(), "traverse") {
+		t.Fatalf("expected traverse error wrap, got %v", err)
 	}
 }

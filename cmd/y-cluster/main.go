@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -13,11 +14,75 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/Yolean/y-cluster/pkg/dockerexec"
+	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
 
+// version is the human-readable release tag. Default "dev" applies
+// to any local build; release tooling overrides via
+// `-ldflags '-X main.version=v0.4.0'`. The short git ref and an
+// optional `-dirty` marker get appended at runtime from the VCS
+// metadata Go's toolchain embeds in the binary -- so even a
+// tagged release prints something like "v0.4.0 (abc1234)" and
+// a dev build is "dev (abc1234-dirty)" without any extra ldflags.
 var version = "dev"
+
+// shortSHALen is how many hex chars of the git revision we
+// surface. 7 matches the git default and what skaffold-style
+// version strings use.
+const shortSHALen = 7
+
+// formatVersion combines the release tag with the VCS metadata
+// from debug.BuildInfo into a single user-facing string.
+//
+// Output shape (cobra prints "<binary> version <this>"):
+//
+//	v0.4.0 (abc1234)        -- tagged, clean
+//	v0.4.0 (abc1234-dirty)  -- tagged, uncommitted local changes
+//	dev (abc1234)           -- untagged build, clean
+//	dev (abc1234-dirty)     -- untagged, uncommitted local changes
+//	v0.4.0                  -- no VCS info (built from tarball)
+//
+// Pure function on its inputs so it's easy to test against
+// synthetic BuildSetting slices without spinning up a real build.
+func formatVersion(release string, settings []debug.BuildSetting) string {
+	var rev string
+	var dirty bool
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return release
+	}
+	short := rev
+	if len(short) > shortSHALen {
+		short = short[:shortSHALen]
+	}
+	if dirty {
+		short += "-dirty"
+	}
+	return release + " (" + short + ")"
+}
+
+// versionString resolves the runtime version once, at root-command
+// construction time. debug.ReadBuildInfo is guaranteed available
+// for any binary built with the go toolchain; if it's somehow not,
+// we fall back to the bare release tag.
+func versionString() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	return formatVersion(version, info.Settings)
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -41,7 +106,7 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     binaryName(),
 		Short:   "Idempotent Kubernetes convergence with dependency ordering and checks",
-		Version: version,
+		Version: versionString(),
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			logger := newLogger(verbose)
 			cmd.SetContext(withLogger(cmd.Context(), logger))
@@ -56,6 +121,11 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
 	root.AddCommand(serveCmd())
+	root.AddCommand(imagesCmd())
+	root.AddCommand(detectCmd())
+	root.AddCommand(ctrCmd())
+	root.AddCommand(crictlCmd())
+	root.AddCommand(cacheCmd())
 
 	return root
 }
@@ -80,6 +150,52 @@ func yconvergeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "yconverge",
 		Short: "Apply a kustomize base with dependency resolution and checks",
+		Long: `yconverge is the convergence primitive: apply a kustomize base, then
+run the checks that verify the apply landed.
+
+Two mechanisms control behaviour, deliberately separate:
+
+  Ordering across modules  -- CUE imports in yconverge.cue.
+    Each import is converged as its OWN yconverge invocation:
+    its own apply, its own checks, before the importing base.
+    Use this to express "mysql must be healthy before keycloak
+    starts." Tree-wide aggregation pulls in CUE files reachable
+    via kustomize resources/components/bases, so an overlay
+    inherits its base's imports automatically.
+
+  Checks after one apply   -- yconverge.cue files anywhere in
+    the kustomize tree of the target. Every check runs after
+    the apply that produced its resources. An overlay's checks
+    include the base's, since both files are in the same tree.
+
+Subcommands of the yconverge primitive:
+
+  --print-deps      print the topological order without applying
+  --checks-only     run checks against an already-applied state
+                    (also propagates to deps so you can verify a
+                    whole chain without re-applying anywhere)
+  --skip-checks     apply but don't verify (useful in
+                    --dry-run=server)
+  --dry-run=server  validate against the apiserver, no mutation
+
+Define checks in yconverge.cue:
+
+  package my_base
+  import "yolean.se/ystack/yconverge/verify"
+  step: verify.#Step & {
+      checks: [
+          {kind: "rollout", resource: "deployment/my-app", timeout: "120s"},
+          {kind: "wait",    resource: "ns/dev", for: "jsonpath={.status.phase}=Active"},
+          {kind: "exec",    command: "curl -sf http://$NAMESPACE/", description: "app responds"},
+      ]
+  }
+
+Three check kinds: wait (kubectl-wait semantics, condition= or
+jsonpath=), rollout (apps/v1 rollout-status semantics on
+Deployment / StatefulSet / DaemonSet), exec (arbitrary shell
+retried until timeout). Exec sees $CONTEXT and $NAMESPACE.
+
+Symlink the binary as kubectl-yconverge for kubectl-plugin use.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := loggerFromContext(cmd.Context())
 			result, err := yconverge.Run(cmd.Context(), opts, logger)
@@ -155,87 +271,192 @@ func loggerFromContext(ctx context.Context) *zap.Logger {
 	return zap.NewNop()
 }
 
-func provisionCmd() *cobra.Command {
-	cfg := qemu.DefaultConfig()
+// loadProvision is shared by provision/teardown/export/import. Each
+// subcommand reads y-cluster-provision.yaml from its -c <dir>;
+// provider-specific data dispatches via config.LoadProvision.
+func loadProvision(dir string) (any, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("--config (-c) is required")
+	}
+	return config.LoadProvision(dir)
+}
 
+// asQEMU narrows for subcommands that are qemu-specific (export,
+// import: VMDK conversion makes no sense for docker).
+func asQEMU(cfg any) (*config.QEMUConfig, error) {
+	q, ok := cfg.(*config.QEMUConfig)
+	if !ok {
+		return nil, fmt.Errorf("provider %T not supported by this subcommand (qemu only)", cfg)
+	}
+	return q, nil
+}
+
+func provisionCmd() *cobra.Command {
+	var configDir string
 	cmd := &cobra.Command{
 		Use:   "provision",
 		Short: "Create a local Kubernetes cluster",
+		Long: `Create a local Kubernetes cluster from y-cluster-provision.yaml in
+the -c directory. The config's 'provider:' field selects the
+backend (qemu or docker). When 'provider:' is omitted, y-cluster
+runs a runtime probe and picks one:
+
+  Linux + /dev/kvm + qemu-system-x86_64    -> qemu
+  docker CLI + 'docker info' OK            -> docker
+
+qemu wins over docker on Linux because it has the full
+disk-and-appliance feature surface (cloud-init seed, persistent
+disk, snapshots) that the docker provisioner doesn't implement.
+On a host where neither probe matches, provision errors with a
+message naming what was checked.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := loggerFromContext(cmd.Context())
-			if err := qemu.CheckPrerequisites(); err != nil {
-				return err
-			}
-			cluster, err := qemu.Provision(cmd.Context(), cfg, logger)
+			loaded, err := loadProvision(configDir)
 			if err != nil {
 				return err
 			}
-			logger.Info("cluster ready",
-				zap.String("ssh", fmt.Sprintf("ssh -p %s -i %s ystack@localhost",
-					cfg.SSHPort, filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"))),
-			)
-			_ = cluster // cluster is running, caller can now converge
-			return nil
+			switch v := loaded.(type) {
+			case *config.QEMUConfig:
+				rt := qemu.FromConfig(v)
+				if err := qemu.CheckPrerequisites(); err != nil {
+					return err
+				}
+				if _, err := qemu.Provision(cmd.Context(), rt, logger); err != nil {
+					return err
+				}
+				logger.Info("cluster ready",
+					zap.String("ssh", fmt.Sprintf("ssh -p %s -i %s ystack@localhost",
+						rt.SSHPort, filepath.Join(rt.CacheDir, rt.Name+"-ssh"))),
+				)
+				return nil
+			case *config.DockerConfig:
+				if _, err := docker.Provision(cmd.Context(), *v, logger); err != nil {
+					return err
+				}
+				logger.Info("cluster ready",
+					zap.String("docker", fmt.Sprintf("docker exec -it %s sh", v.Name)),
+				)
+				return nil
+			default:
+				return fmt.Errorf("provider %T not supported by provision", v)
+			}
 		},
 	}
-
-	cmd.Flags().StringVar(&cfg.Name, "name", cfg.Name, "VM name")
-	cmd.Flags().StringVar(&cfg.DiskSize, "disk-size", cfg.DiskSize, "disk size")
-	cmd.Flags().StringVar(&cfg.Memory, "memory", cfg.Memory, "memory in MB")
-	cmd.Flags().StringVar(&cfg.CPUs, "cpus", cfg.CPUs, "CPU count")
-	cmd.Flags().StringVar(&cfg.SSHPort, "ssh-port", cfg.SSHPort, "host SSH port")
-	cmd.Flags().StringVar(&cfg.Context, "context", cfg.Context, "kubeconfig context name")
+	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
+	if err := cmd.MarkFlagRequired("config"); err != nil {
+		panic(err)
+	}
 	return cmd
 }
 
 func teardownCmd() *cobra.Command {
-	cfg := qemu.DefaultConfig()
-	var keepDisk bool
-
+	var (
+		configDir string
+		keepDisk  bool
+	)
 	cmd := &cobra.Command{
 		Use:   "teardown",
 		Short: "Stop and remove the local cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := loggerFromContext(cmd.Context())
-			return qemu.TeardownConfig(cfg, keepDisk, logger)
+			loaded, err := loadProvision(configDir)
+			if err != nil {
+				return err
+			}
+			switch v := loaded.(type) {
+			case *config.QEMUConfig:
+				return qemu.TeardownConfig(qemu.FromConfig(v), keepDisk, logger)
+			case *config.DockerConfig:
+				// docker has no persistent disk; keepDisk is
+				// a no-op for this provider.
+				cluster, err := docker.Provision(cmd.Context(), *v, logger)
+				if err != nil {
+					// Even if Provision fails (container already
+					// gone, etc.), Teardown's docker rm -f is
+					// idempotent.
+					return (&dockerNamedTeardown{name: v.Name, ctx: v.Context, logger: logger}).run()
+				}
+				return cluster.Teardown(false)
+			default:
+				return fmt.Errorf("provider %T not supported by teardown", v)
+			}
 		},
 	}
-
-	cmd.Flags().StringVar(&cfg.Name, "name", cfg.Name, "VM name")
-	cmd.Flags().BoolVar(&keepDisk, "keep-disk", false, "preserve disk image for faster re-provision")
+	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
+	cmd.Flags().BoolVar(&keepDisk, "keep-disk", false, "preserve disk image for faster re-provision (qemu only)")
+	if err := cmd.MarkFlagRequired("config"); err != nil {
+		panic(err)
+	}
 	return cmd
 }
 
-func exportCmd() *cobra.Command {
-	var diskPath string
+// dockerNamedTeardown is a fallback for when a teardown is asked
+// for a container that we can't fully connect to (e.g. exited, no
+// kubeconfig). Just removes the named container and cleans up the
+// context entry in the host's kubeconfig.
+type dockerNamedTeardown struct {
+	name   string
+	ctx    string
+	logger *zap.Logger
+}
 
+func (k *dockerNamedTeardown) run() error {
+	cli, err := dockerexec.New()
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer func() { _ = cli.Close() }()
+	return dockerexec.Remove(context.Background(), cli, k.name)
+}
+
+func exportCmd() *cobra.Command {
+	var configDir string
 	cmd := &cobra.Command{
 		Use:   "export <output.vmdk>",
 		Short: "Export the cluster disk as a VMware appliance",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if diskPath == "" {
-				cfg := qemu.DefaultConfig()
-				diskPath = filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
+			loaded, err := loadProvision(configDir)
+			if err != nil {
+				return err
 			}
-			return qemu.ExportVMDK(diskPath, args[0])
+			q, err := asQEMU(loaded)
+			if err != nil {
+				return err
+			}
+			rc := qemu.FromConfig(q)
+			return qemu.ExportVMDK(filepath.Join(rc.CacheDir, rc.Name+".qcow2"), args[0])
 		},
 	}
-
-	cmd.Flags().StringVar(&diskPath, "disk", "", "path to qcow2 disk (default: auto-detect from config)")
+	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
+	if err := cmd.MarkFlagRequired("config"); err != nil {
+		panic(err)
+	}
 	return cmd
 }
 
 func importCmd() *cobra.Command {
+	var configDir string
 	cmd := &cobra.Command{
 		Use:   "import <input.vmdk>",
 		Short: "Import a VMware appliance as the cluster disk",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := qemu.DefaultConfig()
-			diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
-			return qemu.ImportVMDK(args[0], diskPath)
+			loaded, err := loadProvision(configDir)
+			if err != nil {
+				return err
+			}
+			q, err := asQEMU(loaded)
+			if err != nil {
+				return err
+			}
+			rc := qemu.FromConfig(q)
+			return qemu.ImportVMDK(args[0], filepath.Join(rc.CacheDir, rc.Name+".qcow2"))
 		},
+	}
+	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
+	if err := cmd.MarkFlagRequired("config"); err != nil {
+		panic(err)
 	}
 	return cmd
 }

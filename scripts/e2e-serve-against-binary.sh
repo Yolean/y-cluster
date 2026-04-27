@@ -23,21 +23,52 @@ cfg="$work/config"
 src_a="$work/sources/a"
 src_b="$work/sources/b"
 state="$work/state"
-mkdir -p "$cfg" "$src_a/y-kustomize-bases/blobs/setup-bucket-job" \
-  "$src_b/y-kustomize-bases/kafka/setup-topic-job" "$state"
+mkdir -p "$cfg" "$src_a/blobs-setup-bucket-job" \
+  "$src_b/kafka-setup-topic-job" "$state"
 
-cat >"$src_a/y-kustomize-bases/blobs/setup-bucket-job/base-for-annotations.yaml" <<'EOF'
+# y-kustomize-local now requires a kustomization.yaml at each
+# source root: serve runs `kustomize build` against the dir,
+# which surfaces a Secret per group/name that the HTTP layer
+# unpacks into /v1/<group>/<name>/<file> routes.
+cat >"$src_a/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: y-kustomize.blobs.setup-bucket-job
+  options:
+    disableNameSuffixHash: true
+  files:
+  - blobs-setup-bucket-job/base-for-annotations.yaml
+  - blobs-setup-bucket-job/values.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+EOF
+
+cat >"$src_a/blobs-setup-bucket-job/base-for-annotations.yaml" <<'EOF'
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: setup-bucket-job
 EOF
 
-cat >"$src_a/y-kustomize-bases/blobs/setup-bucket-job/values.yaml" <<'EOF'
+cat >"$src_a/blobs-setup-bucket-job/values.yaml" <<'EOF'
 bucket: builds
 EOF
 
-cat >"$src_b/y-kustomize-bases/kafka/setup-topic-job/base-for-annotations.yaml" <<'EOF'
+cat >"$src_b/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+secretGenerator:
+- name: y-kustomize.kafka.setup-topic-job
+  options:
+    disableNameSuffixHash: true
+  files:
+  - kafka-setup-topic-job/base-for-annotations.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+EOF
+
+cat >"$src_b/kafka-setup-topic-job/base-for-annotations.yaml" <<'EOF'
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -87,7 +118,10 @@ if [ "$code" != "304" ]; then
 fi
 
 echo "--> ensure again is a no-op"
-"$Y_CLUSTER_BIN" serve ensure -c "$cfg" --state-dir "$state" 2>&1 | grep -q "already running"
+# Typed Ensure result emits "y-cluster serve <action> on :<port>" to
+# stdout, where <action> is started / restarted / noop. A second
+# ensure with no config drift must report noop.
+"$Y_CLUSTER_BIN" serve ensure -c "$cfg" --state-dir "$state" | grep -q "noop"
 
 echo "--> stop"
 "$Y_CLUSTER_BIN" serve stop --state-dir "$state"

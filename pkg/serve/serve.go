@@ -2,12 +2,14 @@ package serve
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -65,37 +67,103 @@ func Run(ctx context.Context, opts Options) error {
 	return startBackground(ctx, cfgs, paths, opts)
 }
 
-// Ensure launches or restarts the daemon so that the configured set
-// matches opts.ConfigDirs and /health returns 200 on every port.
-// Returns started=true if a new daemon was launched.
-func Ensure(ctx context.Context, opts Options) (bool, error) {
+// EnsureAction describes what Ensure had to do.
+type EnsureAction int
+
+const (
+	// EnsureNoop: a daemon was already running with the
+	// requested config and answering /health.
+	EnsureNoop EnsureAction = iota
+	// EnsureStarted: no daemon was running; one was launched.
+	EnsureStarted
+	// EnsureRestarted: a daemon was running with stale config
+	// (or had died); it was stopped and a fresh one launched.
+	EnsureRestarted
+)
+
+// String returns "noop" / "started" / "restarted" so log lines
+// don't have to enumerate the values.
+func (a EnsureAction) String() string {
+	switch a {
+	case EnsureNoop:
+		return "noop"
+	case EnsureStarted:
+		return "started"
+	case EnsureRestarted:
+		return "restarted"
+	default:
+		return fmt.Sprintf("EnsureAction(%d)", int(a))
+	}
+}
+
+// EnsureResult is the typed status Ensure returns. The CLI uses
+// it to print actionable status messages instead of a single
+// "started"/"already running" pair that hides whether anything
+// actually changed.
+type EnsureResult struct {
+	Action EnsureAction
+	Ports  []int // every port the daemon now listens on
+}
+
+// Ensure launches or restarts the daemon so that the configured
+// set matches opts.ConfigDirs and /health returns 200 on every
+// port. The returned EnsureResult.Action reports whether the
+// daemon was started, restarted (because the config changed or
+// the previous instance had died), or kept (no-op).
+func Ensure(ctx context.Context, opts Options) (EnsureResult, error) {
 	if err := refuseRoot(); err != nil {
-		return false, err
+		return EnsureResult{}, err
 	}
 
 	cfgs, err := LoadConfigDirs(opts.ConfigDirs)
 	if err != nil {
-		return false, err
+		return EnsureResult{}, err
 	}
 	paths, err := ResolveStatePaths(opts.StateDir)
 	if err != nil {
-		return false, err
+		return EnsureResult{}, err
 	}
 
+	ports := configPorts(cfgs)
 	want := Digest(cfgs)
 	have, healthy := inspectRunning(paths, cfgs)
 	if healthy && have == want {
-		return false, nil
+		return EnsureResult{Action: EnsureNoop, Ports: ports}, nil
 	}
-	if have != "" {
+	// Anything we have to clean up before launching counts as a
+	// restart from the operator's view. That includes a stale
+	// pidfile from a daemon that crashed -- "restarted" tells
+	// them the previous process is gone, not that we found
+	// nothing.
+	action := EnsureStarted
+	if pidfilePresent(paths) {
+		action = EnsureRestarted
 		if err := stopByPidfile(paths, 10*time.Second); err != nil {
-			return false, fmt.Errorf("stop stale daemon: %w", err)
+			return EnsureResult{}, fmt.Errorf("stop stale daemon: %w", err)
 		}
 	}
 	if err := startBackground(ctx, cfgs, paths, opts); err != nil {
-		return false, err
+		return EnsureResult{}, err
 	}
-	return true, nil
+	return EnsureResult{Action: action, Ports: ports}, nil
+}
+
+// pidfilePresent is the "is there state on disk to clean up?"
+// check Ensure uses to decide between Started and Restarted. We
+// don't care whether the pid is alive -- a leftover pidfile from
+// a crashed daemon is still state we have to clear.
+func pidfilePresent(paths StatePaths) bool {
+	_, err := os.Stat(paths.Pid)
+	return err == nil
+}
+
+// configPorts returns one port per Config in input order.
+func configPorts(cfgs []*Config) []int {
+	out := make([]int, 0, len(cfgs))
+	for _, c := range cfgs {
+		out = append(out, c.Port)
+	}
+	return out
 }
 
 // Stop terminates a running daemon. Idempotent.
@@ -208,9 +276,65 @@ func startBackground(ctx context.Context, cfgs []*Config, paths StatePaths, opts
 		urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d/health", c.Port))
 	}
 	if err := waitHealthy(ctx, urls, healthTimeout); err != nil {
-		return fmt.Errorf("daemon pid %d started but not healthy: %w", pid, err)
+		// Always check the log first: if the daemon logged an
+		// error during startup, that's the actionable root
+		// cause. The previous "not healthy after 10s" message
+		// only said "i waited", which doesn't tell the operator
+		// whether the daemon refused config, crashed, or is
+		// just slow. We prefer the daemon's own diagnosis when
+		// it has one.
+		//
+		// Checking PidAlive here is unreliable: a process that
+		// exited but hasn't been reaped (Setsid'd children
+		// reaped by init) still answers signal(0), so
+		// PidAlive=true doesn't mean the daemon's actually
+		// running.
+		if msg := lastErrorFromLog(paths.Log); msg != "" {
+			return fmt.Errorf("daemon pid %d failed to start: %s", pid, msg)
+		}
+		return fmt.Errorf("daemon pid %d started but not healthy after %s; see %s",
+			pid, healthTimeout, paths.Log)
 	}
 	return nil
+}
+
+// lastErrorFromLog scans paths.Log for the most recent
+// error-level log entry and returns its `error` field (or `msg`
+// if `error` is missing). Returns "" if the log can't be read,
+// has no error entries, or doesn't parse as JSON. The daemon
+// uses zap's JSON encoder (per Q-S1), so each line is one
+// object.
+func lastErrorFromLog(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var last string
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var e struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(line, &e); err != nil {
+			continue
+		}
+		if e.Level != "error" {
+			continue
+		}
+		switch {
+		case e.Error != "" && e.Msg != "":
+			last = e.Msg + ": " + e.Error
+		case e.Error != "":
+			last = e.Error
+		case e.Msg != "":
+			last = e.Msg
+		}
+	}
+	return strings.TrimSpace(last)
 }
 
 // runForeground runs the daemon body in-process with console logging to

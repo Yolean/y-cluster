@@ -1,15 +1,23 @@
 // Package kubeconfig manages the host's kubeconfig for local cluster
 // provisioners. It provides consistent context naming, merge behavior,
 // and cleanup across all provisioner types.
+//
+// All operations go through k8s.io/client-go/tools/clientcmd —
+// the same kubeconfig parser kubectl itself uses — so we get
+// typed errors (clientcmdapi-shaped Config, *fs.PathError on the
+// file ops) instead of "exit status 1" from a kubectl shell-out.
 package kubeconfig
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"os/exec"
 	"strings"
 
 	"go.uber.org/zap"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // Manager handles kubeconfig operations for a single cluster context.
@@ -42,76 +50,134 @@ func New(contextName, clusterName string, logger *zap.Logger) (*Manager, error) 
 	}, nil
 }
 
-// CleanupStale removes any existing context, cluster, and user entries
-// matching this manager's names. Safe to call before provision — it
-// won't error if entries don't exist.
+// CleanupStale removes any existing context, cluster, and user
+// entries matching this manager's names. Safe to call before
+// provision — missing entries are a no-op.
 func (m *Manager) CleanupStale() {
-	for _, args := range [][]string{
-		{"config", "delete-context", m.Context},
-		{"config", "delete-cluster", m.ClusterName},
-		{"config", "delete-user", m.ClusterName},
-	} {
-		cmd := exec.Command("kubectl", args...)
-		cmd.Env = append(os.Environ(), "KUBECONFIG="+m.Path)
-		_ = cmd.Run() // ignore errors -- entries may not exist
-	}
-}
-
-// Import takes a raw kubeconfig (e.g. from k3s), renames the default
-// entries to this manager's context/cluster/user names, and merges
-// into the host kubeconfig at m.Path.
-func (m *Manager) Import(rawKubeconfig []byte) error {
-	tmpFile := m.Path + ".tmp"
-	if err := os.WriteFile(tmpFile, rawKubeconfig, 0o600); err != nil {
-		return fmt.Errorf("write temp kubeconfig: %w", err)
-	}
-	defer os.Remove(tmpFile)
-
-	// Rename default context to our context name
-	cmd := exec.Command("kubectl", "config", "rename-context", "default", m.Context)
-	cmd.Env = append(os.Environ(), "KUBECONFIG="+tmpFile)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("rename context: %s: %w", out, err)
-	}
-
-	// Rename cluster and user entries
-	content, err := os.ReadFile(tmpFile)
+	cfg, err := loadOrEmpty(m.Path)
 	if err != nil {
-		return err
+		// If the file is unreadable for any reason other than
+		// "doesn't exist" we'd silently corrupt state by
+		// over-writing it; log and bail. Match the previous
+		// shell-out's "ignore errors" mood without going so far
+		// as to clobber.
+		m.logger.Warn("kubeconfig load for cleanup failed",
+			zap.String("path", m.Path), zap.Error(err))
+		return
 	}
-	renamed := strings.ReplaceAll(string(content), "name: default", "name: "+m.ClusterName)
-	renamed = strings.ReplaceAll(renamed, "cluster: default", "cluster: "+m.ClusterName)
-	renamed = strings.ReplaceAll(renamed, "user: default", "user: "+m.ClusterName)
-	if err := os.WriteFile(tmpFile, []byte(renamed), 0o600); err != nil {
-		return err
+	delete(cfg.Contexts, m.Context)
+	delete(cfg.Clusters, m.ClusterName)
+	delete(cfg.AuthInfos, m.ClusterName)
+	if cfg.CurrentContext == m.Context {
+		cfg.CurrentContext = ""
 	}
-
-	// Merge into existing kubeconfig
-	if _, err := os.Stat(m.Path); err == nil {
-		m.logger.Info("merging into existing kubeconfig", zap.String("path", m.Path))
-		mergedFile := tmpFile + "-merged"
-		cmd := exec.Command("kubectl", "config", "view", "--flatten")
-		cmd.Env = append(os.Environ(), "KUBECONFIG="+tmpFile+":"+m.Path)
-		merged, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("merge kubeconfig: %w", err)
-		}
-		if err := os.WriteFile(mergedFile, merged, 0o600); err != nil {
-			return err
-		}
-		return os.Rename(mergedFile, m.Path)
+	if err := clientcmd.WriteToFile(*cfg, m.Path); err != nil {
+		m.logger.Warn("kubeconfig write after cleanup failed",
+			zap.String("path", m.Path), zap.Error(err))
 	}
-
-	// No existing kubeconfig — just move the temp file
-	return os.Rename(tmpFile, m.Path)
 }
 
-// CleanupTeardown removes the context and fixes null→[] for kubie
-// compatibility. kubectl writes `contexts: null` instead of `contexts: []`
-// when the last entry is removed.
+// Import takes a raw kubeconfig (e.g. from k3s), renames its
+// `default` context/cluster/user entries to this manager's
+// names, and merges into the host kubeconfig at m.Path.
+//
+// k3s writes a kubeconfig whose context, cluster, and user are
+// all called "default". We rename them in-memory rather than
+// post-processing the YAML so a future k3s release that writes
+// extra fields can't surprise us.
+func (m *Manager) Import(rawKubeconfig []byte) error {
+	incoming, err := clientcmd.Load(rawKubeconfig)
+	if err != nil {
+		return fmt.Errorf("parse incoming kubeconfig: %w", err)
+	}
+	renameDefaults(incoming, m.Context, m.ClusterName)
+
+	existing, err := loadOrEmpty(m.Path)
+	if err != nil {
+		return fmt.Errorf("load existing %s: %w", m.Path, err)
+	}
+	merge(existing, incoming)
+
+	if err := clientcmd.WriteToFile(*existing, m.Path); err != nil {
+		return fmt.Errorf("write %s: %w", m.Path, err)
+	}
+	return nil
+}
+
+// CleanupTeardown removes the context and (historically) fixed
+// `null → []` for kubie compatibility. clientcmd's writer emits
+// `null` for empty maps too, so we still apply the post-write
+// fix.
 func (m *Manager) CleanupTeardown() {
 	m.CleanupStale()
 	m.fixNullLists()
+}
+
+// renameDefaults rewrites the canonical k3s "default" entry
+// names to this Manager's. We don't iterate every entry — we
+// know k3s's shape and renaming foreign entries would be wrong
+// in a merged kubeconfig.
+func renameDefaults(cfg *clientcmdapi.Config, contextName, clusterName string) {
+	if c, ok := cfg.Contexts["default"]; ok {
+		c.Cluster = clusterName
+		c.AuthInfo = clusterName
+		cfg.Contexts[contextName] = c
+		delete(cfg.Contexts, "default")
+	}
+	if cl, ok := cfg.Clusters["default"]; ok {
+		cfg.Clusters[clusterName] = cl
+		delete(cfg.Clusters, "default")
+	}
+	if ai, ok := cfg.AuthInfos["default"]; ok {
+		cfg.AuthInfos[clusterName] = ai
+		delete(cfg.AuthInfos, "default")
+	}
+	if cfg.CurrentContext == "default" {
+		cfg.CurrentContext = contextName
+	}
+}
+
+// merge folds incoming into existing. Identical names in
+// existing are replaced — this is what kubectl config view
+// --flatten does for an overlapping key, and what we want when
+// re-provisioning.
+func merge(existing, incoming *clientcmdapi.Config) {
+	if existing.Contexts == nil {
+		existing.Contexts = map[string]*clientcmdapi.Context{}
+	}
+	if existing.Clusters == nil {
+		existing.Clusters = map[string]*clientcmdapi.Cluster{}
+	}
+	if existing.AuthInfos == nil {
+		existing.AuthInfos = map[string]*clientcmdapi.AuthInfo{}
+	}
+	for k, v := range incoming.Contexts {
+		existing.Contexts[k] = v
+	}
+	for k, v := range incoming.Clusters {
+		existing.Clusters[k] = v
+	}
+	for k, v := range incoming.AuthInfos {
+		existing.AuthInfos[k] = v
+	}
+	if incoming.CurrentContext != "" {
+		existing.CurrentContext = incoming.CurrentContext
+	}
+}
+
+// loadOrEmpty returns the parsed kubeconfig at path or an empty
+// config when the file doesn't exist. Other read errors
+// propagate so callers don't silently overwrite a corrupted but
+// present file.
+func loadOrEmpty(path string) (*clientcmdapi.Config, error) {
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return clientcmdapi.NewConfig(), nil
+		}
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func (m *Manager) fixNullLists() {

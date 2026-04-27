@@ -1,37 +1,56 @@
 package serve
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/Yolean/y-cluster/pkg/kustomize/traverse"
+	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/kyaml/filesys"
+	"sigs.k8s.io/yaml"
 )
 
-// yKustomizeBasesDir is the conventional subdirectory in a source.
-const yKustomizeBasesDir = "y-kustomize-bases"
+// ykInClusterSecretPrefix is reused here -- the local backend
+// uses the same naming convention as the in-cluster backend so
+// the two modes are interchangeable. (See ykustomizeincluster.go.)
 
-// ykRoute is a resolved path → file mapping with metadata used to emit
-// the openapi spec.
+// ForbiddenSecretKey is the data-key name the y-kustomize serve
+// refuses, regardless of backend (local kustomize build or
+// in-cluster Secret watch). HTTP kustomize resources can't be a
+// directory or another kustomization, so a key with this name
+// would mislead users into fetching it as a base.
+const ForbiddenSecretKey = "kustomization.yaml"
+
+// ykRoute is a resolved path -> body mapping with metadata used
+// by the openapi spec.
 type ykRoute struct {
 	Path        string // e.g. /v1/blobs/setup-bucket-job/base-for-annotations.yaml
-	FilePath    string // absolute filesystem path
-	ContentType string // detected at scan time, used by openapi
+	Body        []byte // served verbatim
+	ContentType string // detected from path suffix
 }
 
-// ykBackend serves a frozen map of /v1 routes from scanned sources.
+// ykBackend serves a frozen map of /v1 routes built from
+// `kustomize build` output. Bytes live in memory because the
+// authoritative source is the kustomize build, not the
+// filesystem -- a re-read from disk would be a different value
+// (raw file vs the base64-decoded data key kustomize produced).
 type ykBackend struct {
 	cfg    *Config
 	routes map[string]ykRoute
 	order  []string // sorted paths, for openapi stability
 }
 
-// newYKustomizeLocalBackend scans every source dir and builds a route
-// table. Duplicate routes across sources are a fatal error with both
-// source paths in the message.
+// newYKustomizeLocalBackend runs `kustomize build` on each
+// configured source directory, picks out the Secrets named
+// `y-kustomize.{group}.{name}`, and serves each Secret's data
+// keys at `/v1/{group}/{name}/{key}`.
+//
+// The local mode now mirrors the in-cluster mode exactly: same
+// Secret naming, same URL shape, same `ForbiddenSecretKey`
+// guard. The only difference is the source of truth -- a
+// kustomize build vs a kubernetes watch.
 func newYKustomizeLocalBackend(cfg *Config) (*ykBackend, error) {
 	if cfg.Type != TypeYKustomizeLocal {
 		return nil, fmt.Errorf("not a y-kustomize-local config: %s", cfg.Type)
@@ -42,39 +61,25 @@ func newYKustomizeLocalBackend(cfg *Config) (*ykBackend, error) {
 	}
 
 	routes := map[string]ykRoute{}
-	origin := map[string]string{} // route → source dir (for dup error)
+	origin := map[string]string{} // route -> source dir (for dup error)
 
 	for _, src := range sources {
-		info, err := os.Stat(src)
+		secrets, err := buildKustomizeSecrets(src)
 		if err != nil {
-			return nil, fmt.Errorf("source %s: %w", src, err)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("source %s is not a directory", src)
-		}
-		basesDir := filepath.Join(src, yKustomizeBasesDir)
-		basesInfo, err := os.Stat(basesDir)
-		if err != nil {
-			return nil, fmt.Errorf("source %s: missing %s/", src, yKustomizeBasesDir)
-		}
-		if !basesInfo.IsDir() {
-			return nil, fmt.Errorf("source %s: %s is not a directory", src, yKustomizeBasesDir)
-		}
-
-		if err := checkForFileRenames(src); err != nil {
 			return nil, err
 		}
-
-		scanned, err := scanYKustomizeBases(basesDir)
-		if err != nil {
-			return nil, fmt.Errorf("scan %s: %w", basesDir, err)
-		}
-		for _, r := range scanned {
-			if prev, dup := origin[r.Path]; dup {
-				return nil, fmt.Errorf("duplicate route %s from %s and %s", r.Path, prev, src)
+		for _, sec := range secrets {
+			srcRoutes, err := secretRoutes(sec)
+			if err != nil {
+				return nil, fmt.Errorf("source %s: %w", src, err)
 			}
-			routes[r.Path] = r
-			origin[r.Path] = src
+			for _, r := range srcRoutes {
+				if prev, dup := origin[r.Path]; dup {
+					return nil, fmt.Errorf("duplicate route %s from %s and %s", r.Path, prev, src)
+				}
+				routes[r.Path] = r
+				origin[r.Path] = src
+			}
 		}
 	}
 
@@ -87,91 +92,123 @@ func newYKustomizeLocalBackend(cfg *Config) (*ykBackend, error) {
 	return &ykBackend{cfg: cfg, routes: routes, order: order}, nil
 }
 
-// checkForFileRenames reads the kustomization file (yaml/yml/Kustomization)
-// in a source dir and fails if any secretGenerator or configMapGenerator
-// files entry uses the [key=]path rename syntax. The local serve maps
-// routes by on-disk filename; renames would cause the served path to
-// silently differ from the in-cluster path.
-func checkForFileRenames(sourceDir string) error {
-	k, kpath, err := traverse.LoadKustomization(sourceDir)
-	if err != nil {
-		return fmt.Errorf("%s: %w", kpath, err)
-	}
-	if k == nil {
-		// No kustomization file is fine — the source just has raw bases.
-		return nil
-	}
-	for _, sg := range k.SecretGenerator {
-		for _, f := range sg.FileSources {
-			if strings.Contains(f, "=") {
-				return renameSyntaxError(kpath, "secretGenerator", f)
-			}
-		}
-	}
-	for _, cg := range k.ConfigMapGenerator {
-		for _, f := range cg.FileSources {
-			if strings.Contains(f, "=") {
-				return renameSyntaxError(kpath, "configMapGenerator", f)
-			}
-		}
-	}
-	return nil
+// parsedSecret is the small subset of corev1.Secret we need
+// after parsing kustomize output. We keep it private rather than
+// importing corev1 -- the YAML parse is cheaper and avoids
+// pulling the typed clientset into a backend that doesn't talk
+// to an apiserver.
+type parsedSecret struct {
+	Name string
+	Data map[string][]byte
 }
 
-func renameSyntaxError(kpath, generator, entry string) error {
-	return fmt.Errorf(
-		"%s: %s files entry %q uses rename syntax (key=path); "+
-			"rename the source file to match the key so local serve and in-cluster serve produce the same routes",
-		kpath, generator, entry)
-}
-
-// scanYKustomizeBases walks {basesDir}/{group}/{name}/{file} and returns
-// the resulting routes. Files outside the {group}/{name}/ layer, or
-// non-file leaves, are ignored.
-func scanYKustomizeBases(basesDir string) ([]ykRoute, error) {
-	groups, err := os.ReadDir(basesDir)
+// buildKustomizeSecrets runs `kustomize build` on dir and
+// returns every Secret resource whose name starts with the
+// y-kustomize. prefix (we ignore other Secrets because the
+// convention is the contract). Other resource kinds in the
+// build output are ignored entirely -- they're applied to the
+// cluster, not served.
+func buildKustomizeSecrets(dir string) ([]*parsedSecret, error) {
+	fs := filesys.MakeFsOnDisk()
+	k := krusty.MakeKustomizer(krusty.MakeDefaultOptions())
+	rm, err := k.Run(fs, dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("kustomize build %s: %w", dir, err)
 	}
-	var out []ykRoute
-	for _, g := range groups {
-		if !g.IsDir() {
+	yml, err := rm.AsYaml()
+	if err != nil {
+		return nil, fmt.Errorf("encode %s: %w", dir, err)
+	}
+
+	var out []*parsedSecret
+	for _, doc := range splitYAMLDocs(yml) {
+		var raw map[string]any
+		if err := yaml.Unmarshal(doc, &raw); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", dir, err)
+		}
+		if raw == nil {
 			continue
 		}
-		groupPath := filepath.Join(basesDir, g.Name())
-		names, err := os.ReadDir(groupPath)
-		if err != nil {
-			return nil, err
+		kind, _ := raw["kind"].(string)
+		if kind != "Secret" {
+			continue
 		}
-		for _, n := range names {
-			if !n.IsDir() {
-				continue
-			}
-			namePath := filepath.Join(groupPath, n.Name())
-			files, err := os.ReadDir(namePath)
-			if err != nil {
-				return nil, err
-			}
-			for _, f := range files {
-				if f.IsDir() {
-					continue
+		meta, _ := raw["metadata"].(map[string]any)
+		name, _ := meta["name"].(string)
+		if !strings.HasPrefix(name, ykInClusterSecretPrefix) {
+			continue
+		}
+
+		ps := &parsedSecret{Name: name, Data: map[string][]byte{}}
+		// kustomize emits Secret data as base64-encoded under
+		// `data:`; decoded plaintext lives under `stringData:` only
+		// while building. By the time AsYaml() emits the manifest
+		// the values are always base64.
+		if data, ok := raw["data"].(map[string]any); ok {
+			for k, v := range data {
+				s, _ := v.(string)
+				dec, err := base64.StdEncoding.DecodeString(s)
+				if err != nil {
+					return nil, fmt.Errorf("secret %s data[%q]: base64 decode: %w", name, k, err)
 				}
-				filePath := filepath.Join(namePath, f.Name())
-				route := fmt.Sprintf("/v1/%s/%s/%s", g.Name(), n.Name(), f.Name())
-				out = append(out, ykRoute{
-					Path:        route,
-					FilePath:    filePath,
-					ContentType: DetectContentType(f.Name()),
-				})
+				ps.Data[k] = dec
 			}
 		}
+		out = append(out, ps)
 	}
 	return out, nil
 }
 
-// ServeHTTP implements http.Handler. Only /v1/** paths are served; other
-// paths fall through to 404 so the parent mux can route /health and
-// /openapi.yaml.
+// splitYAMLDocs splits a multi-document YAML stream by `---`.
+// `\n---\n` is the kustomize / kubectl convention; surrounding
+// whitespace is trimmed so a leading/trailing separator doesn't
+// produce an empty doc.
+func splitYAMLDocs(b []byte) [][]byte {
+	const sep = "\n---\n"
+	if strings.HasPrefix(string(b), "---\n") {
+		b = append([]byte{'\n'}, b...)
+	}
+	parts := strings.Split(string(b), sep)
+	out := make([][]byte, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) > 0 {
+			out = append(out, []byte(p))
+		}
+	}
+	return out
+}
+
+// secretRoutes turns a Secret named `y-kustomize.{group}.{name}`
+// into ykRoutes at `/v1/{group}/{name}/{key}` for each data key.
+// Returns ForbiddenSecretKey error if any data key is named
+// `kustomization.yaml`.
+func secretRoutes(sec *parsedSecret) ([]ykRoute, error) {
+	suffix := strings.TrimPrefix(sec.Name, ykInClusterSecretPrefix)
+	pathBase := "/v1/" + strings.Replace(suffix, ".", "/", 1)
+	out := make([]ykRoute, 0, len(sec.Data))
+	for key, val := range sec.Data {
+		if key == ForbiddenSecretKey {
+			return nil, fmt.Errorf(
+				"secret %q data key %q is reserved: a key by that name "+
+					"would mislead callers into fetching the URL as a kustomize base "+
+					"(http kustomize resources can't be a directory or another kustomization); "+
+					"rename the data key", sec.Name, key)
+		}
+		body := make([]byte, len(val))
+		copy(body, val)
+		out = append(out, ykRoute{
+			Path:        pathBase + "/" + key,
+			Body:        body,
+			ContentType: DetectContentType(key),
+		})
+	}
+	return out, nil
+}
+
+// ServeHTTP implements http.Handler. Only /v1/** paths are
+// served; other paths fall through to 404 so the parent mux can
+// route /health and /openapi.yaml.
 func (b *ykBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		MethodNotAllowed(w, http.MethodGet, http.MethodHead)
@@ -186,18 +223,14 @@ func (b *ykBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	body, err := os.ReadFile(route.FilePath)
-	if err != nil {
-		http.Error(w, "read: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	WriteAsset(w, r, route.FilePath, body)
+	WriteAsset(w, r, route.Path, route.Body)
 }
 
 // Routes returns the sorted list of served paths (stable order).
 func (b *ykBackend) Routes() []string { return b.order }
 
-// RouteContentType returns the content type a route will be served with.
+// RouteContentType returns the content type a route will be
+// served with.
 func (b *ykBackend) RouteContentType(path string) string {
 	return b.routes[path].ContentType
 }
