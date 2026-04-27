@@ -22,6 +22,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
@@ -256,6 +257,18 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
+
+	// Install the bundled Envoy Gateway (CRDs + controller +
+	// default GatewayClass). Replaces the Traefik k3s would
+	// otherwise have run; --disable=traefik passed to k3s above
+	// keeps that one out of the picture.
+	if err := envoygateway.Install(ctx, envoygateway.Options{
+		ContextName: cfg.Context,
+		Logger:      logger,
+	}); err != nil {
+		return nil, fmt.Errorf("install envoy gateway: %w", err)
+	}
+	logger.Info("envoy gateway ready", zap.String("version", envoygateway.Version))
 
 	return c, nil
 }

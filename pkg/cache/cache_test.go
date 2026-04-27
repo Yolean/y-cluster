@@ -89,3 +89,26 @@ func TestImages_AndK3sShareRoot(t *testing.T) {
 	}
 }
 
+func TestEnvoyGateway_VersionLayout(t *testing.T) {
+	t.Setenv("Y_CLUSTER_CACHE_DIR", "/tmp/y-cache")
+	root, err := EnvoyGateway("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != "/tmp/y-cache/envoygateway" {
+		t.Fatalf("envoygateway root: %q", root)
+	}
+	versioned, err := EnvoyGatewayVersion("", "v1.7.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if versioned != "/tmp/y-cache/envoygateway/v1.7.2" {
+		t.Fatalf("versioned: %q", versioned)
+	}
+}
+
+func TestEnvoyGatewayVersion_RejectsEmptyVersion(t *testing.T) {
+	if _, err := EnvoyGatewayVersion("", ""); err == nil {
+		t.Fatal("want error for empty version")
+	}
+}

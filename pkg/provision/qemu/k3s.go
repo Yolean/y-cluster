@@ -50,11 +50,16 @@ func (c *Cluster) installK3s(ctx context.Context) error {
 // installK3sScript runs the canonical curl|sh installer with
 // INSTALL_K3S_VERSION pinned. The VM must have outbound HTTPS to
 // get.k3s.io and github.com release URLs.
+//
+// `--disable=traefik` is added because y-cluster ships Envoy
+// Gateway as the cluster ingress. Running both controllers
+// would have two consumers fighting over the host:80/:443
+// forwards.
 func (c *Cluster) installK3sScript(ctx context.Context) error {
 	cmd := fmt.Sprintf(
 		"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=%s INSTALL_K3S_EXEC=%s sudo -E sh -",
 		shellQuote(c.cfg.K3s.Version),
-		shellQuote("--write-kubeconfig-mode=644"),
+		shellQuote("--write-kubeconfig-mode=644 --disable=traefik"),
 	)
 	out, err := c.SSH(ctx, cmd)
 	if err != nil {
@@ -88,7 +93,7 @@ func (c *Cluster) installK3sAirgap(ctx context.Context) error {
 		fmt.Sprintf(
 			"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=%s INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=%s sudo -E sh -",
 			shellQuote(c.cfg.K3s.Version),
-			shellQuote("--write-kubeconfig-mode=644"),
+			shellQuote("--write-kubeconfig-mode=644 --disable=traefik"),
 		),
 	} {
 		out, err := c.SSH(ctx, step)

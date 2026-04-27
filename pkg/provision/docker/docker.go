@@ -25,6 +25,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 )
 
@@ -155,7 +156,10 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		Image: image,
 		Config: &container.Config{
 			Image: image,
-			Cmd:   []string{"server", "--tls-san=127.0.0.1"},
+			// --disable=traefik because y-cluster bundles Envoy
+			// Gateway as the ingress controller; two of them
+			// would fight over host:80/:443.
+			Cmd: []string{"server", "--tls-san=127.0.0.1", "--disable=traefik"},
 		},
 		HostConfig: hostConfig,
 	})
@@ -192,6 +196,18 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
+
+	// Install the bundled Envoy Gateway (CRDs + controller +
+	// default GatewayClass). Replaces Traefik, which we disabled
+	// in the k3s server cmd above.
+	if err := envoygateway.Install(ctx, envoygateway.Options{
+		ContextName: cfg.Context,
+		Logger:      logger,
+	}); err != nil {
+		return nil, fmt.Errorf("install envoy gateway: %w", err)
+	}
+	logger.Info("envoy gateway ready", zap.String("version", envoygateway.Version))
+
 	return c, nil
 }
 

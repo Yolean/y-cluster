@@ -13,8 +13,9 @@
 //	4. $HOME/.cache/y-cluster  (POSIX fallback when XDG is unset)
 //
 // All four candidates collapse to the same root; the subtrees
-// (Images, K3s) are conventional names beneath it so a user can
-// `ls $(y-cluster cache info -p)` and see what's there.
+// (Images, K3s, EnvoyGateway) are conventional names beneath it
+// so a user can `ls $(y-cluster cache info -p)` and see what's
+// there.
 package cache
 
 import (
@@ -65,4 +66,42 @@ func K3s(flagOverride string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, "k3s"), nil
+}
+
+// EnvoyGateway returns the Envoy Gateway download root. Each EG
+// release lives under <root>/envoygateway/<version>/ and contains
+//
+//	install.yaml         -- upstream release manifest
+//	images/<digest>/     -- OCI layouts of the EG container
+//	                        images, written by pkg/images.Cache
+//	                        with this dir as its --cache-dir
+//	                        override (per-version isolation, so
+//	                        purging a version is one recursive
+//	                        delete).
+//
+// The version subdirectory is the operator-friendly purge unit;
+// the shared <root>/images/ tree is intentionally bypassed for
+// EG so dedup-across-versions doesn't fight purge clarity. The
+// EG image surface is small enough (3 images) that the duplicate
+// cost is negligible.
+func EnvoyGateway(flagOverride string) (string, error) {
+	root, err := Root(flagOverride)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "envoygateway"), nil
+}
+
+// EnvoyGatewayVersion is the per-release subdir of EnvoyGateway.
+// Pass version directly -- the caller owns mapping its config to
+// a release tag (typically envoygateway.Version).
+func EnvoyGatewayVersion(flagOverride, version string) (string, error) {
+	if version == "" {
+		return "", fmt.Errorf("EnvoyGatewayVersion: version is empty")
+	}
+	root, err := EnvoyGateway(flagOverride)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, version), nil
 }
