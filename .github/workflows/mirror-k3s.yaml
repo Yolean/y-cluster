@@ -1,0 +1,89 @@
+name: mirror-k3s
+
+# Mirrors the rancher/k3s container image so y-cluster's provisioners
+# don't pull from Docker Hub at provision time. Triggered by changes
+# to the pin file plus a weekly safety net so a force-deleted ghcr
+# tag self-heals before the next provision attempt.
+#
+# Source of truth: pkg/provision/config/k3s.yaml. Bumping `version:`
+# in that file is the only edit needed to publish a new mirror tag
+# and to update the schemas/runtime defaults across all provisioners.
+#
+# Yolean-only guard mirrors the rest of the workflows: the mirror runs
+# under github.com/Yolean/y-cluster but stays a no-op if the workflow
+# is ever enabled under YoleanAgents.
+
+on:
+  push:
+    branches: [main]
+    paths:
+    - pkg/provision/config/k3s.yaml
+    - .github/workflows/mirror-k3s.yaml
+  workflow_dispatch:
+  schedule:
+  - cron: '0 6 * * 1'
+
+jobs:
+  mirror:
+    if: github.repository_owner == 'Yolean'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Read pin file
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(yq '.version' pkg/provision/config/k3s.yaml)
+          upstream=$(yq '.mirror.upstream' pkg/provision/config/k3s.yaml)
+          target=$(yq '.mirror.target' pkg/provision/config/k3s.yaml)
+          test -n "$version" && test "$version" != "null"   || { echo "version missing in pin file" >&2; exit 1; }
+          test -n "$upstream" && test "$upstream" != "null" || { echo "mirror.upstream missing in pin file" >&2; exit 1; }
+          test -n "$target" && test "$target" != "null"     || { echo "mirror.target missing in pin file" >&2; exit 1; }
+          # k3s GitHub releases use `+k3sN` as build-metadata
+          # separator; Docker tag syntax forbids `+`, so the same
+          # release on docker.io/rancher/k3s appears with `-`. We
+          # mirror with the Docker-tag form on both sides.
+          # Canonical implementation: pkg/provision/config.DockerTag
+          # in defaults.go. If that algorithm ever changes, this
+          # one-liner must change too.
+          image_tag=$(printf '%s\n' "$version" | tr '+' '-')
+          {
+            echo "version=$version"
+            echo "upstream=$upstream"
+            echo "target=$target"
+            echo "image_tag=$image_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Will mirror $upstream:$image_tag -> $target:$image_tag (k3s release $version)"
+
+      - uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror image
+        env:
+          UPSTREAM: ${{ steps.pin.outputs.upstream }}
+          TARGET: ${{ steps.pin.outputs.target }}
+          IMAGE_TAG: ${{ steps.pin.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          # crane cp copies all manifest entries (multi-arch index)
+          # without flattening to a single platform.
+          crane cp "${UPSTREAM}:${IMAGE_TAG}" "${TARGET}:${IMAGE_TAG}"
+
+      - name: Verify
+        env:
+          TARGET: ${{ steps.pin.outputs.target }}
+          IMAGE_TAG: ${{ steps.pin.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          crane manifest "${TARGET}:${IMAGE_TAG}" >/dev/null
+          echo "Mirrored ${TARGET}:${IMAGE_TAG}"
