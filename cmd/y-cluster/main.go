@@ -56,6 +56,11 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
 	root.AddCommand(serveCmd())
+	root.AddCommand(imagesCmd())
+	root.AddCommand(detectCmd())
+	root.AddCommand(ctrCmd())
+	root.AddCommand(crictlCmd())
+	root.AddCommand(cacheCmd())
 
 	return root
 }
