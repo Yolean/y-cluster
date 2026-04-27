@@ -3,6 +3,9 @@
 #
 # Always:
 #   unit tests (no build tags) + go vet
+#   golangci-lint, if installed (CI installs it; dev machines opt in)
+#   y-cluster binary build + serve smoke test (the same script
+#   the release pipeline runs against the published archive)
 #
 # If Docker is reachable:
 #   e2e tests against a kwok container in Docker
@@ -25,6 +28,21 @@ echo
 echo "==> go vet"
 go vet ./...
 
+echo
+if command -v golangci-lint >/dev/null 2>&1; then
+  echo "==> golangci-lint"
+  golangci-lint run --timeout=5m
+else
+  echo "==> golangci-lint  (skipped: not installed; CI runs it)"
+fi
+
+echo
+echo "==> serve smoke test against built binary"
+bin=$(mktemp -d)/y-cluster
+trap 'rm -rf "$(dirname "$bin")"' EXIT
+go build -o "$bin" ./cmd/y-cluster
+Y_CLUSTER_BIN="$bin" bash scripts/e2e-serve-against-binary.sh
+
 if ! docker info >/dev/null 2>&1; then
   echo
   echo "Docker daemon not reachable; skipping e2e."
@@ -38,4 +56,4 @@ fi
 
 echo
 echo "==> e2e (-tags=$tags)"
-exec go test -tags "$tags" -count=1 -timeout=20m ./e2e/
+go test -tags "$tags" -count=1 -timeout=20m ./e2e/

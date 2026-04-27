@@ -93,6 +93,10 @@ func TestQemu_ProvisionTeardown(t *testing.T) {
 	if cfg.Kubeconfig == "" {
 		t.Skip("KUBECONFIG must be set")
 	}
+	// Point qemuRunning at the test's isolated cache so the
+	// y-cluster binary spawned by detect/ctr/crictl finds the VM
+	// we just provisioned (default lookup path is ~/.cache/y-cluster-qemu).
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", cfg.CacheDir)
 
 	// Provision-time registries.yaml: we only check that the file
 	// is staged correctly, so the mirror endpoint can be invalid.

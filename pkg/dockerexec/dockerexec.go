@@ -31,7 +31,9 @@ import (
 // via client.FromEnv; negotiates the API version with the daemon
 // so we don't pin a server-side level.
 func New() (*client.Client, error) {
-	return client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+	// API-version negotiation is the moby client default since the
+	// option got deprecated as a no-op; we don't pass it explicitly.
+	return client.New(client.FromEnv)
 }
 
 // Remove force-removes the named container. NotFound is treated

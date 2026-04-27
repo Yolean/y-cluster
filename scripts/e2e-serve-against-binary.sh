@@ -118,7 +118,10 @@ if [ "$code" != "304" ]; then
 fi
 
 echo "--> ensure again is a no-op"
-"$Y_CLUSTER_BIN" serve ensure -c "$cfg" --state-dir "$state" 2>&1 | grep -q "already running"
+# Typed Ensure result emits "y-cluster serve <action> on :<port>" to
+# stdout, where <action> is started / restarted / noop. A second
+# ensure with no config drift must report noop.
+"$Y_CLUSTER_BIN" serve ensure -c "$cfg" --state-dir "$state" | grep -q "noop"
 
 echo "--> stop"
 "$Y_CLUSTER_BIN" serve stop --state-dir "$state"

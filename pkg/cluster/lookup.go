@@ -159,19 +159,26 @@ func dockerContainerRunning(ctx context.Context, name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("docker client: %w", err)
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	return dockerexec.IsRunning(ctx, cli, name)
 }
 
 // qemuRunning checks the qemu provisioner's pidfile convention:
-// ~/.cache/y-cluster-qemu/<name>.pid contains a live PID. Returns
-// (true, sshKeyPath) on a hit, (false, "") otherwise.
+// <cache-dir>/<name>.pid contains a live PID. The cache dir is
+// $Y_CLUSTER_QEMU_CACHE_DIR when set, else ~/.cache/y-cluster-qemu --
+// matching qemu.FromConfig's default. The env override exists so
+// e2e tests can run an isolated cluster under t.TempDir() and
+// still have detect/ctr/crictl find it. Returns (true, sshKeyPath)
+// on a hit, (false, "") otherwise.
 func qemuRunning(name string) (bool, string) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false, ""
+	cacheDir := os.Getenv("Y_CLUSTER_QEMU_CACHE_DIR")
+	if cacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, ""
+		}
+		cacheDir = filepath.Join(home, ".cache", "y-cluster-qemu")
 	}
-	cacheDir := filepath.Join(home, ".cache", "y-cluster-qemu")
 	pidPath := filepath.Join(cacheDir, name+".pid")
 	data, err := os.ReadFile(pidPath)
 	if err != nil {

@@ -39,7 +39,7 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 		if err != nil {
 			return fmt.Errorf("docker client: %w", err)
 		}
-		defer cli.Close()
+		defer func() { _ = cli.Close() }()
 		return dockerexec.Exec(ctx, cli, lr.ContainerName,
 			append([]string{binary}, args...),
 			stdin, stdout, stderr)

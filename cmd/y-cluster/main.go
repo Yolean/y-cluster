@@ -405,7 +405,7 @@ func (k *dockerNamedTeardown) run() error {
 	if err != nil {
 		return fmt.Errorf("docker client: %w", err)
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	return dockerexec.Remove(context.Background(), cli, k.name)
 }
 

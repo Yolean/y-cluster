@@ -48,9 +48,20 @@ func PushFixtureImage(t *testing.T, reg *Registry, repo, tag string) (digestRef 
 // archive (the format `ctr image import` accepts) at archivePath.
 // Used by the `images load` arbitrary-OCI tests so they don't
 // require a running registry.
+//
+// The image is stamped linux/amd64 in its config; without it,
+// containerd's `ctr image import` filters the image out as
+// platform-less and the load is silently a no-op.
 func SaveFixtureArchive(t *testing.T, archivePath, repo, tag string) {
 	t.Helper()
 	img := mutate.ConfigMediaType(empty.Image, "application/vnd.docker.container.image.v1+json")
+	img, err := mutate.ConfigFile(img, &v1.ConfigFile{
+		Architecture: "amd64",
+		OS:           "linux",
+	})
+	if err != nil {
+		t.Fatalf("set fixture platform: %v", err)
+	}
 	ref, err := name.NewTag(fmt.Sprintf("%s:%s", repo, tag))
 	if err != nil {
 		t.Fatalf("parse tag: %v", err)

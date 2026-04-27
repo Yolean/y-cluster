@@ -81,8 +81,8 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 	// Synthetic archive — no registry needed for this leg.
 	archive := filepath.Join(t.TempDir(), "fixture.tar")
 	cluster.SaveFixtureArchive(t, archive, "y-cluster.local/e2e-load", "v1")
-	if _, err := runYClusterRaw(t, bin, "images", "load", "--context="+ctxName, archive); err != nil {
-		t.Fatalf("images load %s: %v", archive, err)
+	if loadOut, err := runYClusterRaw(t, bin, "images", "load", "--context="+ctxName, archive); err != nil {
+		t.Fatalf("images load %s: %v\n%s", archive, err, loadOut)
 	}
 	out = runYCluster(t, bin, "ctr", "--context="+ctxName, "--", "-n", "k8s.io", "image", "ls", "-q")
 	if !strings.Contains(out, "y-cluster.local/e2e-load:v1") {

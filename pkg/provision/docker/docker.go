@@ -60,7 +60,7 @@ func CheckPrerequisites() error {
 	if err != nil {
 		return fmt.Errorf("docker client: %w", err)
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	if _, err := cli.Ping(context.Background(), client.PingOptions{}); err != nil {
 		return fmt.Errorf("docker daemon unreachable: %w", err)
 	}
@@ -152,8 +152,10 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		zap.String("cpus", cfg.CPUs),
 	)
 	createRes, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
-		Name:  cfg.Name,
-		Image: image,
+		Name: cfg.Name,
+		// moby's client rejects the request when both top-level
+		// Image and Config.Image are set; we use Config.Image so
+		// we can set Cmd in the same struct.
 		Config: &container.Config{
 			Image: image,
 			// --disable=traefik because y-cluster bundles Envoy
