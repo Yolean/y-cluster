@@ -108,11 +108,14 @@ func TestStopVM_EscalatesToSIGKILL(t *testing.T) {
 	withGraceTimeouts(t, 1*time.Second, 5*time.Second)
 
 	// bash trap '' TERM ignores SIGTERM until the shell exits; only
-	// SIGKILL will reap it. `sleep infinity` keeps it alive without
-	// burning CPU. exec sleep so the bash shell is replaced with the
-	// process we want to outlive SIGTERM (otherwise SIGTERM would go
-	// to bash, which forwards/handles signals differently).
-	cmd := startReapableChild(t, "bash", "-c", "trap '' TERM; sleep infinity")
+	// SIGKILL will reap it. A long finite sleep keeps it alive
+	// without burning CPU. We avoid `sleep infinity` because that's
+	// a GNU coreutils extension -- macOS BSD sleep rejects it with
+	// "invalid time interval" and bash exits before the test has a
+	// chance to send SIGTERM, making the test pass-by-coincidence
+	// (returning fast through the "process is already dead" branch
+	// of stopVM). 60s is plenty for the test's grace timeouts.
+	cmd := startReapableChild(t, "bash", "-c", "trap '' TERM; sleep 60")
 
 	// Give bash a moment to install the trap before we ask stopVM
 	// to send SIGTERM. Without this the signal can race the trap

@@ -178,7 +178,7 @@ func applyOne(ctx context.Context, dyn dynamic.Interface, mapper meta.RESTMapper
 		// apierrors.IsConflict / IsForbidden / IsServerTimeout.
 		return fmt.Errorf("apply %s/%s: %w", gvk.Kind, obj.GetName(), err)
 	}
-	logger.Info("applied",
+	logger.Debug("applied",
 		zap.String("kind", gvk.Kind),
 		zap.String("name", obj.GetName()),
 		zap.String("namespace", ns),

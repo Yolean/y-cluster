@@ -5,12 +5,12 @@ package yconverge
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/Yolean/y-cluster/pkg/k8swait"
 )
 
 // Check represents a single post-apply verification step.
@@ -32,11 +32,37 @@ type CheckRunner struct {
 	Context   string // Kubernetes context name
 	Namespace string // resolved namespace
 	Logger    *zap.Logger
+	// Stdout receives the per-check progress headers ("yconverge
+	// check N/total <kind>") and forwarded kubectl output. nil ->
+	// os.Stdout. Distinct from Logger (the diagnostic channel)
+	// because these lines are part of the user-facing UI, not
+	// a log.
+	Stdout io.Writer
+}
+
+func (r *CheckRunner) progressOut() io.Writer {
+	if r.Stdout != nil {
+		return r.Stdout
+	}
+	return os.Stdout
 }
 
 // RunAll executes checks in order. A failing check stops execution.
+//
+// Each check emits a progress header before running:
+//
+//	yconverge check N/total <kind>
+//
+// where N is 1-indexed. The header is written before the check
+// runs (so a hanging or slow check is visible by the header
+// landing without follow-up output) and is silent on success
+// past whatever kubectl wait / rollout-status / the exec command
+// itself prints.
 func (r *CheckRunner) RunAll(ctx context.Context, checks []Check) error {
+	out := r.progressOut()
+	total := len(checks)
 	for i, check := range checks {
+		fmt.Fprintf(out, "yconverge check %d/%d %s\n", i+1, total, check.Kind)
 		if err := r.runOne(ctx, check); err != nil {
 			return &CheckError{
 				Index: i,
@@ -76,12 +102,12 @@ func (r *CheckRunner) runWait(ctx context.Context, check Check, ns string, timeo
 	if desc == "" {
 		desc = fmt.Sprintf("wait %s %s", check.Resource, check.For)
 	}
-	r.Logger.Info("check",
+	r.Logger.Debug("check",
 		zap.String("kind", "wait"),
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
 	)
-	if err := k8swait.Wait(ctx, r.Context, check.Resource, ns, check.For, timeout); err != nil {
+	if err := kubectlWait(ctx, r.progressOut(), r.Context, check.Resource, ns, check.For, timeout); err != nil {
 		r.Logger.Error("wait check failed",
 			zap.String("resource", check.Resource),
 			zap.String("for", check.For),
@@ -97,12 +123,12 @@ func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, ti
 	if desc == "" {
 		desc = fmt.Sprintf("rollout %s", check.Resource)
 	}
-	r.Logger.Info("check",
+	r.Logger.Debug("check",
 		zap.String("kind", "rollout"),
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
 	)
-	if err := k8swait.RolloutStatus(ctx, r.Context, check.Resource, ns, timeout); err != nil {
+	if err := kubectlRolloutStatus(ctx, r.progressOut(), r.Context, check.Resource, ns, timeout); err != nil {
 		r.Logger.Error("rollout check failed",
 			zap.String("resource", check.Resource),
 			zap.Error(err),
@@ -113,7 +139,7 @@ func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, ti
 }
 
 func (r *CheckRunner) runExec(ctx context.Context, check Check, timeout time.Duration) error {
-	r.Logger.Info("check",
+	r.Logger.Debug("check",
 		zap.String("kind", "exec"),
 		zap.String("description", check.Description),
 	)
