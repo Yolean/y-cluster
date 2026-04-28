@@ -1,15 +1,14 @@
 package envoygateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/Yolean/y-cluster/pkg/k8sapply"
-	"github.com/Yolean/y-cluster/pkg/k8swait"
 )
 
 // Namespace is where the EG controller and its services live in
@@ -60,12 +59,21 @@ type Options struct {
 // Order:
 //
 //  1. Ensure install.yaml is cached for the resolved version.
-//  2. Apply install.yaml (CRDs first via k8sapply's CRD-aware
-//     ordering, then the rest).
-//  3. Wait for envoy-gateway Deployment in envoy-gateway-system
-//     to finish rolling out (skipped when ReadyTimeout < 0).
-//  4. Apply the default `eg` GatewayClass (skipped when
+//  2. kubectl apply --server-side --force-conflicts install.yaml.
+//     kubectl handles CRD-then-CR ordering by retrying on
+//     RESTMapping errors -- the upstream EG manifest puts CRDs
+//     first so the second pass picks up the in-namespace objects
+//     once the CRDs are registered.
+//  3. kubectl rollout status deployment/envoy-gateway in
+//     envoy-gateway-system (skipped when ReadyTimeout < 0).
+//  4. kubectl apply the default `eg` GatewayClass (skipped when
 //     SkipGatewayClass is set).
+//
+// Implementation switched from client-go's typed apply / rollout
+// to kubectl shellouts to drop pkg/k8sapply + pkg/k8swait (and
+// thereby k8s.io/client-go) from the binary. Stdout / stderr are
+// forwarded so the operator sees the same `<kind>/<name>
+// serverside-applied` output kubectl prints directly.
 func Install(ctx context.Context, opts Options) error {
 	if opts.ContextName == "" {
 		return fmt.Errorf("envoygateway.Install: ContextName is required")
@@ -96,7 +104,7 @@ func Install(ctx context.Context, opts Options) error {
 		zap.String("version", version),
 		zap.String("namespace", Namespace),
 	)
-	if err := k8sapply.ApplyYAML(ctx, opts.ContextName, manifest, k8sapply.DryRunNone, logger); err != nil {
+	if err := kubectlApplyStdin(ctx, opts.ContextName, manifest); err != nil {
 		return fmt.Errorf("apply install.yaml: %w", err)
 	}
 
@@ -110,17 +118,64 @@ func Install(ctx context.Context, opts Options) error {
 			zap.String("deployment", DeploymentName),
 			zap.Duration("timeout", timeout),
 		)
-		if err := k8swait.RolloutStatus(ctx, opts.ContextName,
-			"deployment/"+DeploymentName, Namespace, timeout); err != nil {
+		if err := kubectlRolloutStatus(ctx, opts.ContextName, DeploymentName, Namespace, timeout); err != nil {
 			return fmt.Errorf("wait for %s/%s rollout: %w", Namespace, DeploymentName, err)
 		}
 	}
 
 	if !opts.SkipGatewayClass {
 		logger.Info("applying default GatewayClass eg")
-		if err := k8sapply.ApplyYAML(ctx, opts.ContextName, gatewayClassYAML, k8sapply.DryRunNone, logger); err != nil {
+		if err := kubectlApplyStdin(ctx, opts.ContextName, gatewayClassYAML); err != nil {
 			return fmt.Errorf("apply GatewayClass: %w", err)
 		}
+	}
+	return nil
+}
+
+// kubectlApplyStdin applies the given YAML manifest via:
+//
+//	kubectl --context=X apply --server-side --force-conflicts \
+//	  --field-manager=y-cluster -f -
+//
+// Stdout/stderr are forwarded to the host process so the operator
+// sees `<kind>/<name> serverside-applied` directly. The manifest
+// is piped on stdin -- avoids a temp file and leaves no trace on
+// disk.
+//
+// Field manager `y-cluster` matches what pkg/yconverge uses, so a
+// re-apply under either path doesn't fight over field ownership.
+func kubectlApplyStdin(ctx context.Context, contextName string, manifest []byte) error {
+	cmd := exec.CommandContext(ctx, "kubectl",
+		"--context="+contextName,
+		"apply",
+		"--server-side", "--force-conflicts",
+		"--field-manager=y-cluster",
+		"-f", "-",
+	)
+	cmd.Stdin = bytes.NewReader(manifest)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kubectl apply --server-side: %w", err)
+	}
+	return nil
+}
+
+// kubectlRolloutStatus runs `kubectl rollout status deployment/<name>
+// -n <ns> --timeout=<timeout>`. The timeout flag accepts Go duration
+// strings via .String().
+func kubectlRolloutStatus(ctx context.Context, contextName, deployment, namespace string, timeout time.Duration) error {
+	cmd := exec.CommandContext(ctx, "kubectl",
+		"--context="+contextName,
+		"rollout", "status",
+		"deployment/"+deployment,
+		"-n", namespace,
+		"--timeout="+timeout.String(),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kubectl rollout status: %w", err)
 	}
 	return nil
 }
