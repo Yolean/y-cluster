@@ -164,6 +164,114 @@ data:
 	}
 }
 
+// TestConvergeMode_DependencyGetsSameApplyPath proves that a
+// kustomization reached via a CUE dependency goes through the
+// same label-routed apply path as a direct -k target -- the
+// "convergeSingle is called for both" code path is otherwise
+// only verified by reading the source.
+//
+// Mirrors TestConvergeMode_ReplaceRecreates but through the dep
+// edge: a base directory whose ConfigMap carries
+// converge-mode=replace, imported by a dependent. Running
+// yconverge against the dependent twice and asserting the
+// base resource's UID changes between runs proves the
+// replace-mode delete-then-apply fired during the dep step.
+//
+// If the dep path silently bypassed the label routing (e.g. a
+// future "fast path" for deps that just shells out a single
+// `kubectl apply -k` per step), the UID would stay the same on
+// the second run and the assertion fails.
+func TestConvergeMode_DependencyGetsSameApplyPath(t *testing.T) {
+	setupCluster(t)
+	root := t.TempDir()
+	baseName := "convergetest-dep-base"
+	depName := "convergetest-dep-dependent"
+
+	// CUE module root + base directory carrying replace-mode.
+	writeKustomization(t, root, map[string]string{
+		"cue.mod/module.cue": `module: "yolean.se/test"
+language: { version: "v0.16.0" }
+`,
+		"base/kustomization.yaml": "resources:\n- cm.yaml\n",
+		"base/cm.yaml": fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  labels:
+    yolean.se/converge-mode: replace
+data:
+  marker: same
+`, baseName),
+		"base/yconverge.cue": `package base
+import "yolean.se/ystack/yconverge/verify"
+step: verify.#Step & { checks: [] }
+`,
+		"dependent/kustomization.yaml": "resources:\n- cm.yaml\n",
+		"dependent/cm.yaml": fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+data:
+  who: dependent
+`, depName),
+		"dependent/yconverge.cue": `package dependent
+import (
+  "yolean.se/ystack/yconverge/verify"
+  "yolean.se/test/base:base"
+)
+_dep: base.step
+step: verify.#Step & { checks: [] }
+`,
+		// Pure-CUE schema lives under cue.mod/pkg/, the standard
+		// CUE registry path, so the kustomize tree walker doesn't
+		// see it as a converge step (no kustomization.yaml beside
+		// it would have triggered "no kustomization file" anyway).
+		// The verify schema's import path is hardcoded to
+		// yolean.se/ystack/... in pkg/yconverge/cue.go's
+		// verifySchemaImport so the dep walker recognises it and
+		// skips it. Keep the same path here regardless of this
+		// fixture's own module name.
+		"cue.mod/pkg/yolean.se/ystack/yconverge/verify/schema.cue": `package verify
+#Step: { checks: [...{...}] }
+`,
+	})
+	t.Cleanup(func() {
+		for _, n := range []string{baseName, depName} {
+			_ = exec.Command("kubectl", "--context="+contextName, "delete", "configmap", n, "--ignore-not-found").Run()
+		}
+	})
+
+	depDir := filepath.Join(root, "dependent")
+	_, err := yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: depDir,
+		SkipChecks:   true,
+	}, logger(t))
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	uid1 := kubectlGet(t, "configmap", baseName, "-o", "jsonpath={.metadata.uid}")
+	if uid1 == "" {
+		t.Fatalf("first run did not create the base ConfigMap %q via the dep edge", baseName)
+	}
+	if got := kubectlGet(t, "configmap", depName, "-o", "jsonpath={.data.who}"); got != "dependent" {
+		t.Fatalf("dependent did not land: data.who=%q", got)
+	}
+
+	_, err = yconverge.Run(context.Background(), yconverge.Options{
+		Context:      contextName,
+		KustomizeDir: depDir,
+		SkipChecks:   true,
+	}, logger(t))
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	uid2 := kubectlGet(t, "configmap", baseName, "-o", "jsonpath={.metadata.uid}")
+	if uid1 == uid2 {
+		t.Fatalf("base resource (replace-mode) was not recreated when applied via the dep edge; both runs returned UID %q -- dep path is bypassing label routing", uid1)
+	}
+}
+
 // TestConvergeMode_MixedKustomization is the smoke test for the
 // five-step plan running all five steps cleanly when a single
 // kustomize tree carries multiple modes plus an unlabelled
