@@ -110,23 +110,44 @@ func TestApplySteps_NoDryRunByDefault(t *testing.T) {
 }
 
 // TestApplySteps_TolerateContract pins the per-step "expected
-// empty / idempotent" stderr substrings. The bash plugin
-// distinguishes which kubectl errors are the documented
-// converge-mode happy path (empty selector match, AlreadyExists
-// on a re-create) from a real failure -- accidental loosening
-// of these would silently swallow a genuine bug.
+// empty / idempotent" output substrings, split between the two
+// channels kubectl uses:
+//
+//   - stderrTolerate: stderr substrings that, together with a
+//     non-zero exit, count as success. Used for the apply / create
+//     "no objects passed to <verb>" empty-selector case and for
+//     create's AlreadyExists re-run case.
+//   - stdoutSuppress: stdout substrings that, when produced by an
+//     otherwise successful kubectl run, are dropped before
+//     forwarding to the user. Used for `kubectl delete`'s
+//     "No resources found" line on empty match (delete prints
+//     this to stdout, not stderr, with exit 0).
+//
+// Accidental loosening of either would silently swallow a
+// genuine bug or noise up the user-facing output.
 func TestApplySteps_TolerateContract(t *testing.T) {
 	steps := applySteps(Options{Context: "local", KustomizeDir: "/tmp/k"})
-	want := [][]string{
+
+	wantStderr := [][]string{
 		{"AlreadyExists", "no objects passed to create"}, // create
-		{"No resources found"},                           // delete
+		nil,                                               // delete (none on stderr)
 		{"no objects passed to apply"},                   // serverside-force
 		{"no objects passed to apply"},                   // serverside
 		{"no objects passed to apply"},                   // plain apply
 	}
-	for i, w := range want {
-		if !reflect.DeepEqual(steps[i].tolerate, w) {
-			t.Errorf("step %d tolerate mismatch\n got:  %v\n want: %v", i, steps[i].tolerate, w)
+	wantStdout := [][]string{
+		nil,                       // create
+		{"No resources found"},    // delete
+		nil, nil, nil,             // apply variants
+	}
+	for i := range steps {
+		if !reflect.DeepEqual(steps[i].stderrTolerate, wantStderr[i]) {
+			t.Errorf("step %d stderrTolerate mismatch\n got:  %v\n want: %v",
+				i, steps[i].stderrTolerate, wantStderr[i])
+		}
+		if !reflect.DeepEqual(steps[i].stdoutSuppress, wantStdout[i]) {
+			t.Errorf("step %d stdoutSuppress mismatch\n got:  %v\n want: %v",
+				i, steps[i].stdoutSuppress, wantStdout[i])
 		}
 	}
 }

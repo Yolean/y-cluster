@@ -34,29 +34,52 @@ func runKubectlStreaming(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// runKubectlTolerant runs `kubectl <args...>` like
-// runKubectlStreaming but suppresses the entire invocation when
-// kubectl's stderr matches any of the `tolerate` substrings. Used
-// for the converge-mode steps where "no objects passed to <verb>"
-// (an empty selector match) and "AlreadyExists" (re-run of a
-// create-mode resource) are the expected idempotent path.
+// runKubectlTolerant runs `kubectl <args...>` and suppresses
+// "expected idempotent" output. Two slots:
 //
-// stdout still streams to the user's terminal so the kubectl-style
-// per-resource lines are visible. stderr is captured: if the error
-// is tolerated, we say nothing; if not, we forward the captured
-// stderr to the user before returning so the diagnostic isn't
-// swallowed.
-func runKubectlTolerant(ctx context.Context, tolerate []string, args ...string) error {
+//   - stderrTolerate: if kubectl exits non-zero AND its stderr
+//     matches one of these substrings, treat as success and
+//     drop the stderr text. Used for "no objects passed to
+//     <verb>" (empty selector match) and "AlreadyExists" (re-run
+//     of a create-mode resource).
+//   - stdoutSuppress: if kubectl's stdout matches one of these
+//     substrings, drop the stdout text from the user's view.
+//     Used for `kubectl delete`'s "No resources found" line --
+//     it lands on stdout with exit 0, so without suppression a
+//     vanilla yconverge run prints noise even when there's
+//     nothing for the delete step to do.
+//
+// Both lists default to nil. stdout that doesn't match a
+// suppress pattern is forwarded verbatim so the kubectl-style
+// per-resource lines (`<kind>/<name> serverside-applied` etc.)
+// reach the user. stderr that doesn't match a tolerate pattern
+// is forwarded too, before the error propagates, so a real
+// kubectl diagnostic isn't swallowed.
+func runKubectlTolerant(ctx context.Context, stderrTolerate, stdoutSuppress []string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+
+	if sout := stdout.String(); sout != "" {
+		suppress := false
+		for _, p := range stdoutSuppress {
+			if strings.Contains(sout, p) {
+				suppress = true
+				break
+			}
+		}
+		if !suppress {
+			_, _ = os.Stdout.WriteString(sout)
+		}
+	}
+
 	if err == nil {
 		return nil
 	}
 	msg := stderr.String()
-	for _, t := range tolerate {
+	for _, t := range stderrTolerate {
 		if strings.Contains(msg, t) {
 			return nil
 		}
@@ -112,7 +135,7 @@ func argSummary(args []string) string {
 // resource's dry-run plan is provably non-mutating.
 func kubectlApply(ctx context.Context, opts Options) error {
 	for _, step := range applySteps(opts) {
-		if err := runKubectlTolerant(ctx, step.tolerate, step.args...); err != nil {
+		if err := runKubectlTolerant(ctx, step.stderrTolerate, step.stdoutSuppress, step.args...); err != nil {
 			return err
 		}
 	}
@@ -123,8 +146,9 @@ func kubectlApply(ctx context.Context, opts Options) error {
 // kubectl invocations. Pulled out so unit tests can assert the
 // argv each step produces without spawning kubectl.
 type applyStep struct {
-	args     []string
-	tolerate []string
+	args           []string
+	stderrTolerate []string
+	stdoutSuppress []string
 }
 
 // applySteps returns the five-step apply plan for the given
@@ -152,28 +176,33 @@ func applySteps(opts Options) []applyStep {
 	return []applyStep{
 		// 1. create: --save-config; skip-if-exists via AlreadyExists tolerance.
 		{
-			args:     withDryRun(ctxFlag, "create", "--save-config", sel("create")),
-			tolerate: []string{"AlreadyExists", "no objects passed to create"},
+			args:           withDryRun(ctxFlag, "create", "--save-config", sel("create")),
+			stderrTolerate: []string{"AlreadyExists", "no objects passed to create"},
 		},
-		// 2. delete (replace-mode resources). kubectl simulates under
-		// --dry-run=server so the plan stays non-mutating end-to-end.
+		// 2. delete (replace-mode resources). kubectl prints "No
+		// resources found" to STDOUT (not stderr) with exit 0 when
+		// the selector matches nothing, so we suppress that line on
+		// stdout rather than tolerating it on stderr. Real deletes
+		// ("configmap "x" deleted") still pass through.
+		// kubectl simulates under --dry-run=server so the plan
+		// stays non-mutating end-to-end.
 		{
-			args:     withDryRun(ctxFlag, "delete", sel("replace")),
-			tolerate: []string{"No resources found"},
+			args:           withDryRun(ctxFlag, "delete", sel("replace")),
+			stdoutSuppress: []string{"No resources found"},
 		},
 		// 3. apply --server-side --force-conflicts.
 		{
 			args: withDryRun(ctxFlag, "apply",
 				"--server-side", "--force-conflicts", "--field-manager=y-cluster",
 				sel("serverside-force")),
-			tolerate: []string{"no objects passed to apply"},
+			stderrTolerate: []string{"no objects passed to apply"},
 		},
 		// 4. apply --server-side (no force).
 		{
 			args: withDryRun(ctxFlag, "apply",
 				"--server-side", "--field-manager=y-cluster",
 				sel("serverside")),
-			tolerate: []string{"no objects passed to apply"},
+			stderrTolerate: []string{"no objects passed to apply"},
 		},
 		// 5. plain apply for everything else (including replace-mode
 		// resources, now reapplied after the delete in step 2).
@@ -182,7 +211,7 @@ func applySteps(opts Options) []applyStep {
 				"--selector="+ConvergeModeLabel+"!=create,"+
 					ConvergeModeLabel+"!=serverside,"+
 					ConvergeModeLabel+"!=serverside-force"),
-			tolerate: []string{"no objects passed to apply"},
+			stderrTolerate: []string{"no objects passed to apply"},
 		},
 	}
 }
