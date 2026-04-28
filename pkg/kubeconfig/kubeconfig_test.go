@@ -34,69 +34,48 @@ func TestNew_ReadsKUBECONFIG(t *testing.T) {
 	}
 }
 
-func TestFixNullLists(t *testing.T) {
+// TestSave_EmptyListsAsBrackets pins the kubie-friendly output
+// shape: empty cluster/context/user lists must serialise as `[]`,
+// not `null`. Was previously the job of a post-write
+// fixNullLists() pass against clientcmd's `null` output; the
+// hand-rolled schema's Save initialises empty slices so the YAML
+// encoder writes `[]` directly.
+func TestSave_EmptyListsAsBrackets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kubeconfig")
 
-	content := `apiVersion: v1
-clusters: null
-contexts: null
-kind: Config
-users: null
-`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	f := emptyFile()
+	f.CurrentContext = "" // explicit: no entries, no current-context
+	if err := f.Save(path); err != nil {
 		t.Fatal(err)
 	}
-
-	m := &Manager{Path: path}
-	m.fixNullLists()
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	result := string(data)
 	if strings.Contains(result, "null") {
-		t.Fatalf("null should be replaced: %s", result)
+		t.Fatalf("expected no `null` in output: %s", result)
 	}
-	if !strings.Contains(result, "clusters: []") {
-		t.Fatalf("expected clusters: [], got: %s", result)
-	}
-	if !strings.Contains(result, "contexts: []") {
-		t.Fatalf("expected contexts: [], got: %s", result)
-	}
-	if !strings.Contains(result, "users: []") {
-		t.Fatalf("expected users: [], got: %s", result)
+	for _, want := range []string{"clusters: []", "contexts: []", "users: []"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("expected %q, got: %s", want, result)
+		}
 	}
 }
 
-func TestFixNullLists_NoChange(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "kubeconfig")
-
-	content := `apiVersion: v1
-clusters: []
-contexts: []
-kind: Config
-users: []
-`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+// TestLoad_MissingFileEmptyConfig: the typical "first provision"
+// case is a fresh KUBECONFIG path that doesn't exist yet. Load
+// must return an empty File without erroring so callers can
+// merge straight into it.
+func TestLoad_MissingFileEmptyConfig(t *testing.T) {
+	f, err := Load(filepath.Join(t.TempDir(), "missing"))
+	if err != nil {
+		t.Fatalf("Load on missing file: %v", err)
 	}
-
-	m := &Manager{Path: path}
-	m.fixNullLists()
-
-	data, _ := os.ReadFile(path)
-	if string(data) != content {
-		t.Fatalf("should not modify when no nulls: %s", data)
+	if len(f.Clusters) != 0 || len(f.Contexts) != 0 || len(f.Users) != 0 {
+		t.Fatalf("missing-file load should return empty entries: %+v", f)
 	}
-}
-
-func TestFixNullLists_MissingFile(t *testing.T) {
-	m := &Manager{Path: "/nonexistent/kubeconfig"}
-	// Should not panic
-	m.fixNullLists()
 }
 
 func TestImport_NewKubeconfig(t *testing.T) {
