@@ -2,6 +2,8 @@ package serve
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -10,11 +12,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -27,56 +24,64 @@ const (
 	// inCluster.labelSelector.
 	ykInClusterDefaultLabel = "yolean.se/module-part=y-kustomize"
 
-	// ykInClusterResyncPeriod controls how often the informer
-	// re-lists Secrets even without events. Ten minutes matches the
-	// k8s.io/client-go examples and is cheap on small object counts.
-	ykInClusterResyncPeriod = 10 * time.Minute
+	// ykInClusterDefaultPoll is the interval between Secret list
+	// refreshes. The previous design used a client-go informer
+	// (long-running watch with apiserver-side timeouts and resume
+	// semantics); polling is dramatically simpler and acceptable
+	// here because the served set is small and the consumer
+	// tolerates a few seconds of staleness.
+	//
+	// Configurable via inCluster.pollInterval.
+	ykInClusterDefaultPoll = 5 * time.Second
 )
 
 // ykInClusterRoute is an in-memory served path. Unlike the local
 // backend which reads from disk on every request, the in-cluster
-// backend keeps bodies in memory because the authoritative source is
-// the informer's store, which is itself in-memory.
+// backend keeps bodies in memory because the authoritative source
+// is the last poll's response.
 type ykInClusterRoute struct {
 	Path        string
 	ContentType string
 	Body        []byte
 }
 
-// ykInClusterBackend watches Kubernetes Secrets with a matching label
-// and serves each Secret's data keys at `/v1/{group}/{name}/{key}`.
-type ykInClusterBackend struct {
-	namespace string
-	selector  string
-	logger    *zap.Logger
+// secretLister is the minimal apiserver shape this backend needs.
+// pkg/serve/kubeclient.go's k8sClient is the production
+// implementation; tests inject an httptest-backed fake.
+type secretLister interface {
+	listSecrets(ctx context.Context, labelSelector string) ([]byte, error)
+}
 
-	informer cache.SharedIndexInformer
-	factory  informers.SharedInformerFactory
-	stopCh   chan struct{}
+// ykInClusterBackend polls the apiserver for matching Secrets and
+// serves each Secret's data keys at `/v1/{group}/{name}/{key}`.
+type ykInClusterBackend struct {
+	namespace    string
+	selector     string
+	pollInterval time.Duration
+	logger       *zap.Logger
+
+	client secretLister
+	stopCh chan struct{}
 
 	mu     sync.RWMutex
 	routes map[string]ykInClusterRoute
 }
 
-// clientFactory is an injection point so tests can substitute a
-// fake.Clientset without touching kubeconfig loading.
-type clientFactory func(cfg YKustomizeInClusterConfig) (kubernetes.Interface, string, error)
+// clientFactory is an injection point so tests can substitute an
+// httptest-backed fake without dragging real kubeconfig loading.
+type clientFactory func(cfg YKustomizeInClusterConfig) (secretLister, string, error)
 
-var defaultClientFactory clientFactory = func(cfg YKustomizeInClusterConfig) (kubernetes.Interface, string, error) {
-	restCfg, ns, err := loadK8sConfig(cfg)
+var defaultClientFactory clientFactory = func(cfg YKustomizeInClusterConfig) (secretLister, string, error) {
+	c, err := newK8sClient(cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("kube config: %w", err)
+		return nil, "", err
 	}
-	cs, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, "", fmt.Errorf("kube client: %w", err)
-	}
-	return cs, ns, nil
+	return c, c.namespace, nil
 }
 
-// newYKustomizeInClusterBackend builds a backend, starts its informer,
-// waits for initial cache sync, and populates the initial route table.
-// The informer keeps running until ctx is cancelled or Close() is called.
+// newYKustomizeInClusterBackend builds a backend, runs an initial
+// refresh, and starts the polling goroutine. The goroutine stops
+// when ctx is cancelled or Close() is called.
 func newYKustomizeInClusterBackend(ctx context.Context, cfg *Config, logger *zap.Logger) (*ykInClusterBackend, error) {
 	return newYKustomizeInClusterBackendWith(ctx, cfg, logger, defaultClientFactory)
 }
@@ -90,7 +95,7 @@ func newYKustomizeInClusterBackendWith(ctx context.Context, cfg *Config, logger 
 		return nil, fmt.Errorf("inCluster config missing after validate") // defensive
 	}
 
-	clientset, namespace, err := cf(*ic)
+	client, namespace, err := cf(*ic)
 	if err != nil {
 		return nil, err
 	}
@@ -100,57 +105,41 @@ func newYKustomizeInClusterBackendWith(ctx context.Context, cfg *Config, logger 
 		selector = ykInClusterDefaultLabel
 	}
 
+	poll := ic.PollInterval
+	if poll <= 0 {
+		poll = ykInClusterDefaultPoll
+	}
+
 	b := &ykInClusterBackend{
-		namespace: namespace,
-		selector:  selector,
-		logger:    logger,
-		stopCh:    make(chan struct{}),
-		routes:    make(map[string]ykInClusterRoute),
+		namespace:    namespace,
+		selector:     selector,
+		pollInterval: poll,
+		logger:       logger,
+		client:       client,
+		stopCh:       make(chan struct{}),
+		routes:       make(map[string]ykInClusterRoute),
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(
-		clientset,
-		ykInClusterResyncPeriod,
-		informers.WithNamespace(namespace),
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = selector
-		}),
-	)
-	b.factory = factory
-	b.informer = factory.Core().V1().Secrets().Informer()
-
-	if _, err := b.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { b.onChange() },
-		UpdateFunc: func(_, obj any) { b.onChange() },
-		DeleteFunc: func(obj any) { b.onChange() },
-	}); err != nil {
-		return nil, fmt.Errorf("register handler: %w", err)
+	// Initial refresh: must succeed so the first /v1 request after
+	// `serve ensure` returns serves the current state, not an
+	// empty 404. Same semantics as the previous WaitForCacheSync.
+	if err := b.refresh(ctx); err != nil {
+		return nil, fmt.Errorf("initial poll: %w", err)
 	}
 
-	// Plumb ctx cancellation through to the informer's stopCh so a
-	// SIGTERM to the daemon cleanly stops the watch goroutines.
-	go func() {
-		<-ctx.Done()
-		b.Close()
-	}()
-
-	factory.Start(b.stopCh)
-
-	if !cache.WaitForCacheSync(b.stopCh, b.informer.HasSynced) {
-		return nil, fmt.Errorf("initial cache sync cancelled")
-	}
-	b.rebuild()
+	go b.run(ctx)
 
 	logger.Info("in-cluster backend ready",
 		zap.Int("port", cfg.Port),
 		zap.String("namespace", namespace),
 		zap.String("labelSelector", selector),
+		zap.Duration("pollInterval", poll),
 		zap.Int("routes", len(b.routes)),
 	)
 	return b, nil
 }
 
-// Close stops the informer. Safe to call multiple times.
+// Close stops the polling goroutine. Safe to call multiple times.
 func (b *ykInClusterBackend) Close() {
 	select {
 	case <-b.stopCh:
@@ -160,21 +149,43 @@ func (b *ykInClusterBackend) Close() {
 	}
 }
 
-// onChange rebuilds the route table under write lock. The informer
-// fires events in a single worker goroutine so we won't race with
-// ourselves; readers take the read lock and see a coherent snapshot.
-func (b *ykInClusterBackend) onChange() {
-	b.rebuild()
+// run is the polling loop. Sleeps pollInterval between refreshes;
+// returns on context cancel or Close. Errors are logged but don't
+// stop the loop -- a transient apiserver hiccup shouldn't take the
+// route table offline; readers keep serving the last known state.
+func (b *ykInClusterBackend) run(ctx context.Context) {
+	t := time.NewTicker(b.pollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-b.stopCh:
+			return
+		case <-t.C:
+		}
+		if err := b.refresh(ctx); err != nil {
+			b.logger.Warn("poll failed; keeping last known routes",
+				zap.Error(err),
+			)
+		}
+	}
 }
 
-func (b *ykInClusterBackend) rebuild() {
+// refresh issues one list and replaces the route table on success.
+func (b *ykInClusterBackend) refresh(ctx context.Context) error {
+	body, err := b.client.listSecrets(ctx, b.selector)
+	if err != nil {
+		return err
+	}
+	var list secretList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return fmt.Errorf("decode SecretList: %w", err)
+	}
+
 	routes := make(map[string]ykInClusterRoute)
-	for _, obj := range b.informer.GetStore().List() {
-		sec, ok := obj.(*corev1.Secret)
-		if !ok {
-			continue
-		}
-		b.addSecretRoutes(sec, routes)
+	for i := range list.Items {
+		b.addSecretRoutes(&list.Items[i], routes)
 	}
 
 	b.mu.Lock()
@@ -188,35 +199,54 @@ func (b *ykInClusterBackend) rebuild() {
 			zap.Int("after", len(routes)),
 		)
 	}
+	return nil
+}
+
+// secretList is the minimal subset of corev1.SecretList the route
+// builder needs. Unmarshals the apiserver's standard JSON encoding
+// of `kubectl get secrets -o json`.
+type secretList struct {
+	Items []secretItem `json:"items"`
+}
+
+type secretItem struct {
+	Metadata secretMeta        `json:"metadata"`
+	Data     map[string]string `json:"data,omitempty"` // base64-encoded
+}
+
+type secretMeta struct {
+	Name string `json:"name"`
 }
 
 // addSecretRoutes adds every data key of a matching Secret to the
-// route map. Ignores Secrets whose name doesn't start with the
-// `y-kustomize.` prefix (possible if a user applies the label to
-// other Secrets). Data keys named ForbiddenSecretKey
-// ("kustomization.yaml") are skipped with a warning rather than
-// failing the whole rebuild -- a poorly-formed Secret should not
-// take the rest of the watch offline. The local backend, which
-// owns its source via kustomize build, errors fatally on the
-// same condition.
-func (b *ykInClusterBackend) addSecretRoutes(sec *corev1.Secret, routes map[string]ykInClusterRoute) {
-	if !strings.HasPrefix(sec.Name, ykInClusterSecretPrefix) {
+// route map. Mirrors the previous informer-driven version: ignores
+// Secrets whose name doesn't start with `y-kustomize.`, skips data
+// keys named ForbiddenSecretKey ("kustomization.yaml") with a warn.
+func (b *ykInClusterBackend) addSecretRoutes(sec *secretItem, routes map[string]ykInClusterRoute) {
+	if !strings.HasPrefix(sec.Metadata.Name, ykInClusterSecretPrefix) {
 		return
 	}
-	suffix := strings.TrimPrefix(sec.Name, ykInClusterSecretPrefix)
+	suffix := strings.TrimPrefix(sec.Metadata.Name, ykInClusterSecretPrefix)
 	pathBase := "/v1/" + strings.Replace(suffix, ".", "/", 1)
-	for key, val := range sec.Data {
+	for key, b64 := range sec.Data {
 		if key == ForbiddenSecretKey {
 			b.logger.Warn("skipping reserved data key",
-				zap.String("secret", sec.Name),
+				zap.String("secret", sec.Metadata.Name),
 				zap.String("key", key),
 				zap.String("reason", "kustomization.yaml is reserved; rename the key"),
 			)
 			continue
 		}
+		body, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			b.logger.Warn("skipping un-decodable data value",
+				zap.String("secret", sec.Metadata.Name),
+				zap.String("key", key),
+				zap.Error(err),
+			)
+			continue
+		}
 		route := pathBase + "/" + key
-		body := make([]byte, len(val))
-		copy(body, val)
 		routes[route] = ykInClusterRoute{
 			Path:        route,
 			ContentType: DetectContentType(key),
@@ -246,10 +276,7 @@ func (b *ykInClusterBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	WriteAsset(w, r, route.Path, route.Body)
 }
 
-// Routes returns the sorted list of served paths (stable order). The
-// openapi handler queries this on every request so the spec reflects
-// the current watch state, per SERVE_FEATURE.md ("the openapi spec
-// adapts to the watch").
+// Routes returns the sorted list of served paths (stable order).
 func (b *ykInClusterBackend) Routes() []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -269,15 +296,15 @@ func (b *ykInClusterBackend) RouteContentType(path string) string {
 	return b.routes[path].ContentType
 }
 
-// Health returns a map of extra fields to include in /health alongside
-// the standard ok/type fields. Computed on each call so it reflects
-// the current watch state.
+// Health returns a map of extra fields to include in /health.
+// Computed on each call so it reflects the current poll state.
 func (b *ykInClusterBackend) Health() map[string]any {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return map[string]any{
 		"namespace":     b.namespace,
 		"labelSelector": b.selector,
+		"pollInterval":  b.pollInterval.String(),
 		"routes":        len(b.routes),
 	}
 }
