@@ -88,12 +88,12 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 	// Multi-step: if more than one step, each step before the last
 	// is a dependency that gets its own full convergence cycle.
 	if len(steps) > 1 {
-		logger.Info("converge plan",
+		logger.Debug("converge plan",
 			zap.String("context", opts.Context),
 			zap.Int("steps", len(steps)),
 		)
 		for _, step := range steps[:len(steps)-1] {
-			logger.Info("converge dependency",
+			logger.Debug("converge dependency",
 				zap.String("dir", RelPath(cueRoot, step)),
 			)
 			depOpts := Options{
@@ -114,7 +114,7 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 	}
 
 	// Final step: the target itself
-	logger.Info("converge target",
+	logger.Debug("converge target",
 		zap.String("dir", RelPath(cueRoot, absDir)),
 	)
 	if _, err := convergeSingle(ctx, opts, logger); err != nil {

@@ -76,7 +76,7 @@ func (r *CheckRunner) runWait(ctx context.Context, check Check, ns string, timeo
 	if desc == "" {
 		desc = fmt.Sprintf("wait %s %s", check.Resource, check.For)
 	}
-	r.Logger.Info("check",
+	r.Logger.Debug("check",
 		zap.String("kind", "wait"),
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
@@ -97,7 +97,7 @@ func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, ti
 	if desc == "" {
 		desc = fmt.Sprintf("rollout %s", check.Resource)
 	}
-	r.Logger.Info("check",
+	r.Logger.Debug("check",
 		zap.String("kind", "rollout"),
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
@@ -113,7 +113,7 @@ func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, ti
 }
 
 func (r *CheckRunner) runExec(ctx context.Context, check Check, timeout time.Duration) error {
-	r.Logger.Info("check",
+	r.Logger.Debug("check",
 		zap.String("kind", "exec"),
 		zap.String("description", check.Description),
 	)
