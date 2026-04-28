@@ -148,7 +148,7 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 
 	// Apply (unless checks-only)
 	if !opts.ChecksOnly {
-		if err := applyStep(ctx, opts, logger); err != nil {
+		if err := runApply(ctx, opts, logger); err != nil {
 			return nil, fmt.Errorf("apply %s: %w", opts.KustomizeDir, err)
 		}
 	}
@@ -177,12 +177,12 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 	return &Result{Steps: []string{absDir}}, nil
 }
 
-// applyStep wraps the shellout to `kubectl apply` in the package's
+// runApply wraps the shellout to `kubectl apply` in the package's
 // kubectl.go helper, with one extra responsibility: emit a debug
 // log of what's being applied so `-v` runs trace what each
 // dependency-walk step is doing without the user having to
 // correlate kubectl invocations to the dep graph manually.
-func applyStep(ctx context.Context, opts Options, logger *zap.Logger) error {
+func runApply(ctx context.Context, opts Options, logger *zap.Logger) error {
 	logger.Debug("apply",
 		zap.String("context", opts.Context),
 		zap.String("kustomizeDir", opts.KustomizeDir),

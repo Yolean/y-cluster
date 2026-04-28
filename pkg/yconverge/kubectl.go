@@ -111,82 +111,80 @@ func argSummary(args []string) string {
 // Dry-run forwards to delete + create + apply so a replace-mode
 // resource's dry-run plan is provably non-mutating.
 func kubectlApply(ctx context.Context, opts Options) error {
+	for _, step := range applySteps(opts) {
+		if err := runKubectlTolerant(ctx, step.tolerate, step.args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyStep is the data shape behind one of the five label-routed
+// kubectl invocations. Pulled out so unit tests can assert the
+// argv each step produces without spawning kubectl.
+type applyStep struct {
+	args     []string
+	tolerate []string
+}
+
+// applySteps returns the five-step apply plan for the given
+// Options. The returned slice's order matters and is preserved by
+// the runtime: create -> delete (replace) -> serverside-force ->
+// serverside -> plain-apply (the rest, including replace-mode
+// resources reapplied after their delete).
+func applySteps(opts Options) []applyStep {
 	dryRun := ""
 	if opts.DryRun == "server" {
 		dryRun = "--dry-run=server"
 	}
 	ctxFlag := "--context=" + opts.Context
 	dirFlag := []string{"-k", opts.KustomizeDir}
+	sel := func(eq string) string { return "--selector=" + ConvergeModeLabel + "=" + eq }
 
-	// 1. create: --save-config; skip-if-exists via AlreadyExists tolerance.
-	createArgs := []string{ctxFlag, "create", "--save-config",
-		"--selector=" + ConvergeModeLabel + "=create"}
-	if dryRun != "" {
-		createArgs = append(createArgs, dryRun)
-	}
-	createArgs = append(createArgs, dirFlag...)
-	if err := runKubectlTolerant(ctx,
-		[]string{"AlreadyExists", "no objects passed to create"},
-		createArgs...,
-	); err != nil {
-		return err
-	}
-
-	// 2. delete (replace-mode resources). kubectl simulates under
-	// --dry-run=server so the plan stays non-mutating end-to-end.
-	deleteArgs := []string{ctxFlag, "delete",
-		"--selector=" + ConvergeModeLabel + "=replace"}
-	if dryRun != "" {
-		deleteArgs = append(deleteArgs, dryRun)
-	}
-	deleteArgs = append(deleteArgs, dirFlag...)
-	if err := runKubectlTolerant(ctx,
-		[]string{"No resources found"},
-		deleteArgs...,
-	); err != nil {
-		return err
-	}
-
-	// 3. apply --server-side --force-conflicts.
-	for _, mode := range []struct {
-		label string
-		flags []string
-	}{
-		{"serverside-force", []string{"--server-side", "--force-conflicts", "--field-manager=y-cluster"}},
-		{"serverside", []string{"--server-side", "--field-manager=y-cluster"}},
-	} {
-		args := []string{ctxFlag, "apply"}
-		args = append(args, mode.flags...)
-		args = append(args, "--selector="+ConvergeModeLabel+"="+mode.label)
+	withDryRun := func(args ...string) []string {
+		out := append([]string(nil), args...)
 		if dryRun != "" {
-			args = append(args, dryRun)
+			out = append(out, dryRun)
 		}
-		args = append(args, dirFlag...)
-		if err := runKubectlTolerant(ctx,
-			[]string{"no objects passed to apply"},
-			args...,
-		); err != nil {
-			return err
-		}
+		return append(out, dirFlag...)
 	}
 
-	// 5. plain apply for everything else (including replace-mode
-	// resources, now reapplied after the delete in step 2).
-	noneArgs := []string{ctxFlag, "apply",
-		"--selector=" + ConvergeModeLabel + "!=create," +
-			ConvergeModeLabel + "!=serverside," +
-			ConvergeModeLabel + "!=serverside-force"}
-	if dryRun != "" {
-		noneArgs = append(noneArgs, dryRun)
+	return []applyStep{
+		// 1. create: --save-config; skip-if-exists via AlreadyExists tolerance.
+		{
+			args:     withDryRun(ctxFlag, "create", "--save-config", sel("create")),
+			tolerate: []string{"AlreadyExists", "no objects passed to create"},
+		},
+		// 2. delete (replace-mode resources). kubectl simulates under
+		// --dry-run=server so the plan stays non-mutating end-to-end.
+		{
+			args:     withDryRun(ctxFlag, "delete", sel("replace")),
+			tolerate: []string{"No resources found"},
+		},
+		// 3. apply --server-side --force-conflicts.
+		{
+			args: withDryRun(ctxFlag, "apply",
+				"--server-side", "--force-conflicts", "--field-manager=y-cluster",
+				sel("serverside-force")),
+			tolerate: []string{"no objects passed to apply"},
+		},
+		// 4. apply --server-side (no force).
+		{
+			args: withDryRun(ctxFlag, "apply",
+				"--server-side", "--field-manager=y-cluster",
+				sel("serverside")),
+			tolerate: []string{"no objects passed to apply"},
+		},
+		// 5. plain apply for everything else (including replace-mode
+		// resources, now reapplied after the delete in step 2).
+		{
+			args: withDryRun(ctxFlag, "apply",
+				"--selector="+ConvergeModeLabel+"!=create,"+
+					ConvergeModeLabel+"!=serverside,"+
+					ConvergeModeLabel+"!=serverside-force"),
+			tolerate: []string{"no objects passed to apply"},
+		},
 	}
-	noneArgs = append(noneArgs, dirFlag...)
-	if err := runKubectlTolerant(ctx,
-		[]string{"no objects passed to apply"},
-		noneArgs...,
-	); err != nil {
-		return err
-	}
-	return nil
 }
 
 // kubectlWait runs `kubectl --context=<...> wait <resource> -n <ns>
