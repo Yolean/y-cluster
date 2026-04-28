@@ -112,6 +112,11 @@ func rootCmd() *cobra.Command {
 			cmd.SetContext(withLogger(cmd.Context(), logger))
 		},
 	}
+	// Anchor --version output to the binary identity rather than
+	// cobra's default "<Use> version ...". The plugin entry point
+	// overrides this with an "(as kubectl-yconverge)" suffix to
+	// preserve the invocation-path signal.
+	root.SetVersionTemplate("y-cluster version {{.Version}}\n")
 
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "debug logging")
 
@@ -134,7 +139,17 @@ func yconvergePluginCmd() *cobra.Command {
 	cmd := yconvergeCmd()
 	cmd.Use = "kubectl-yconverge"
 	cmd.Short = "kubectl plugin: apply a kustomize base with dependency resolution and checks"
-	// Add persistent flags that rootCmd normally provides
+	// Plugin invocations bypass rootCmd, so the Version, --verbose,
+	// and PersistentPreRun the plugin still wants have to be wired
+	// here too. `kubectl yconverge --version` would otherwise error
+	// "unknown flag --version" because cobra needs Version on the
+	// command --version is dispatched to.
+	cmd.Version = versionString()
+	// The version line names the binary that actually shipped
+	// (y-cluster), with the invocation path called out so a
+	// stack trace pasted into a bug report still says how the
+	// process was reached.
+	cmd.SetVersionTemplate("y-cluster version {{.Version}} as kubectl-yconverge\n")
 	var verbose bool
 	cmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "debug logging")
 	cmd.PersistentPreRun = func(c *cobra.Command, args []string) {

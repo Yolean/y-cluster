@@ -78,8 +78,11 @@ func TestYconvergeCmd_MissingK(t *testing.T) {
 	}
 }
 
-// TestRootCmd_Version locks in that --version still names the
-// release tag. The git-suffix piece relies on debug.BuildInfo
+// TestRootCmd_Version anchors --version output to the binary
+// name (y-cluster) rather than cobra's default <Use> prefix --
+// the latter would have read "kubectl-yconverge ..." under the
+// plugin entry, which doesn't match the artefact a user actually
+// installed. The git-suffix piece relies on debug.BuildInfo
 // having vcs.* settings, which `go test` doesn't always stamp;
 // formatVersion's unit tests below cover the suffix logic with
 // synthetic settings.
@@ -91,8 +94,37 @@ func TestRootCmd_Version(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "dev") {
-		t.Fatalf("expected version 'dev', got %s", out.String())
+	got := out.String()
+	if !strings.HasPrefix(got, "y-cluster version dev") {
+		t.Fatalf("expected `y-cluster version dev...`, got %q", got)
+	}
+	if strings.Contains(got, "kubectl-yconverge") {
+		t.Fatalf("rootCmd output must not carry the plugin suffix: %q", got)
+	}
+}
+
+// TestPluginCmd_Version covers the kubectl-yconverge plugin
+// invocation path. Two regressions to catch: (1)
+// yconvergePluginCmd bypasses rootCmd, so without its own
+// Version field cobra answers `--version` with "unknown flag
+// --version"; (2) the version line should name the underlying
+// binary (y-cluster) but flag the invocation path so a stack
+// trace pasted into a bug report still says how the process
+// was reached.
+func TestPluginCmd_Version(t *testing.T) {
+	cmd := yconvergePluginCmd()
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("kubectl-yconverge --version: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	if !strings.HasPrefix(got, "y-cluster version dev") {
+		t.Fatalf("plugin --version must lead with `y-cluster version dev...`, got %q", got)
+	}
+	if !strings.HasSuffix(got, "as kubectl-yconverge") {
+		t.Fatalf("plugin --version must end with `as kubectl-yconverge`, got %q", got)
 	}
 }
 
