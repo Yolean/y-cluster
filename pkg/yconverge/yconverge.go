@@ -3,6 +3,8 @@ package yconverge
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 
 	"go.uber.org/zap"
@@ -18,6 +20,22 @@ type Options struct {
 	ChecksOnly   bool   // skip apply, run checks only
 	PrintDeps    bool   // print dependency order and exit
 	SkipChecks   bool   // skip checks after apply
+
+	// Stdout is where user-facing progress and forwarded kubectl
+	// output is written. nil -> os.Stdout. Tests pass a buffer to
+	// capture; the CLI leaves it nil. Distinct from the zap logger
+	// (which is the diagnostic channel on stderr) -- this writer
+	// is the command's UI, like kubectl's own per-resource lines.
+	Stdout io.Writer
+}
+
+// progressOut returns the writer the four "yconverge ..." headers
+// and the forwarded kubectl stdout share. Always non-nil.
+func (o Options) progressOut() io.Writer {
+	if o.Stdout != nil {
+		return o.Stdout
+	}
+	return os.Stdout
 }
 
 // Result holds the outcome of a yconverge run.
@@ -86,15 +104,16 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 
 	// Multi-step: if more than one step, each step before the last
 	// is a dependency that gets its own full convergence cycle.
-	if len(steps) > 1 {
+	hasDeps := len(steps) > 1
+	if hasDeps {
 		logger.Debug("converge plan",
 			zap.String("context", opts.Context),
 			zap.Int("steps", len(steps)),
 		)
 		for _, step := range steps[:len(steps)-1] {
-			logger.Debug("converge dependency",
-				zap.String("dir", RelPath(cueRoot, step)),
-			)
+			rel := RelPath(cueRoot, step)
+			logger.Debug("converge dependency", zap.String("dir", rel))
+			fmt.Fprintf(opts.progressOut(), "yconverge dependency %s\n", rel)
 			depOpts := Options{
 				Context:      opts.Context,
 				KustomizeDir: step,
@@ -104,18 +123,22 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				// verify a whole chain without applying anywhere.
 				// Earlier this field was dropped, so deps re-applied
 				// even when the user only wanted a health check.
-				ChecksOnly:   opts.ChecksOnly,
+				ChecksOnly: opts.ChecksOnly,
+				Stdout:     opts.Stdout,
 			}
 			if _, err := convergeSingle(ctx, depOpts, logger); err != nil {
-				return nil, fmt.Errorf("dependency %s: %w", RelPath(cueRoot, step), err)
+				return nil, fmt.Errorf("dependency %s: %w", rel, err)
 			}
 		}
 	}
 
-	// Final step: the target itself
-	logger.Debug("converge target",
-		zap.String("dir", RelPath(cueRoot, absDir)),
-	)
+	// Final step: the target itself. Emit a "target" header only
+	// when at least one dep ran -- a no-dep run doesn't need a
+	// header for what the user explicitly passed via -k.
+	logger.Debug("converge target", zap.String("dir", RelPath(cueRoot, absDir)))
+	if hasDeps {
+		fmt.Fprintf(opts.progressOut(), "yconverge target %s\n", RelPath(cueRoot, absDir))
+	}
 	if _, err := convergeSingle(ctx, opts, logger); err != nil {
 		return nil, err
 	}
@@ -159,6 +182,7 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 			Context:   opts.Context,
 			Namespace: namespace,
 			Logger:    logger,
+			Stdout:    opts.progressOut(),
 		}
 		for _, cueDir := range cueDirs {
 			checks, err := ParseChecks(cueDir)

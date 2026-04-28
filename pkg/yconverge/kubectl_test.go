@@ -6,148 +6,194 @@ import (
 	"testing"
 )
 
-// TestApplySteps_OrderAndCount: the bash plugin runs five
-// label-routed kubectl invocations in a fixed order. Pin the
-// order here so a refactor that reshuffles them (or drops the
-// fall-through plain-apply step) fails loudly.
-func TestApplySteps_OrderAndCount(t *testing.T) {
-	steps := applySteps(Options{Context: "local", KustomizeDir: "/tmp/k"})
-	if len(steps) != 5 {
-		t.Fatalf("want 5 steps, got %d", len(steps))
+// TestApplyGroups_OrderAndCount: the apply plan is five groups in
+// a fixed order. Pin both the count and the mode-header sequence
+// so a refactor that reshuffles them (or drops the unlabelled
+// fall-through group) fails loudly.
+func TestApplyGroups_OrderAndCount(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k"})
+	if len(groups) != 5 {
+		t.Fatalf("want 5 groups, got %d", len(groups))
 	}
 
-	// Step ordering, asserted on the first verb-ish token after
-	// --context=... so the test stays stable if a flag's order
-	// inside one step shifts.
-	wantVerbs := []string{"create", "delete", "apply", "apply", "apply"}
-	for i, want := range wantVerbs {
-		if got := steps[i].args[1]; got != want {
-			t.Errorf("step %d: verb %q, want %q (full args: %v)", i, got, want, steps[i].args)
+	wantModes := []string{"create", "replace", "serverside-force", "serverside", ""}
+	for i, want := range wantModes {
+		if got := groups[i].mode; got != want {
+			t.Errorf("group %d: mode %q, want %q", i, got, want)
 		}
 	}
 }
 
-// TestApplySteps_PerStepArgs locks the exact argv each step
-// produces for a vanilla (non-dry-run) Options. This is the
-// regression guard for the converge-mode contract: any drift
-// in `--save-config`, `--server-side`, `--force-conflicts`,
-// `--field-manager=y-cluster`, or the selector formula
-// surfaces as a test failure rather than as silent semantic
-// change against the cluster.
-func TestApplySteps_PerStepArgs(t *testing.T) {
-	steps := applySteps(Options{Context: "local", KustomizeDir: "/tmp/k"})
-	want := [][]string{
-		{
-			"--context=local", "create", "--save-config",
-			"--selector=yolean.se/converge-mode=create",
-			"-k", "/tmp/k",
-		},
-		{
-			"--context=local", "delete",
-			"--selector=yolean.se/converge-mode=replace",
-			"-k", "/tmp/k",
-		},
-		{
-			"--context=local", "apply",
-			"--server-side", "--force-conflicts", "--field-manager=y-cluster",
-			"--selector=yolean.se/converge-mode=serverside-force",
-			"-k", "/tmp/k",
-		},
-		{
-			"--context=local", "apply",
-			"--server-side", "--field-manager=y-cluster",
-			"--selector=yolean.se/converge-mode=serverside",
-			"-k", "/tmp/k",
-		},
-		{
-			"--context=local", "apply",
-			"--selector=yolean.se/converge-mode!=create," +
-				"yolean.se/converge-mode!=serverside," +
-				"yolean.se/converge-mode!=serverside-force",
-			"-k", "/tmp/k",
-		},
-	}
-	for i, w := range want {
-		if !reflect.DeepEqual(steps[i].args, w) {
-			t.Errorf("step %d args mismatch\n got:  %v\n want: %v", i, steps[i].args, w)
+// TestApplyGroups_ReplaceHasTwoInvocations is the structural
+// invariant for the replace mode: one delete followed by one
+// re-creating apply, both under one progress header. If a future
+// refactor splits or merges them, the user-facing line ("yconverge
+// converge-mode=replace" covering both delete + recreate) breaks.
+func TestApplyGroups_ReplaceHasTwoInvocations(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k"})
+
+	for i, g := range groups {
+		want := 1
+		if g.mode == "replace" {
+			want = 2
+		}
+		if len(g.invocations) != want {
+			t.Errorf("group %d (mode=%q): %d invocations, want %d",
+				i, g.mode, len(g.invocations), want)
 		}
 	}
-}
 
-// TestApplySteps_DryRunForwards: --dry-run=server must reach
-// every step (delete + create + apply variants), so a dry-run of
-// a kustomization with replace-mode resources is provably
-// non-mutating end-to-end -- the bash plugin's behaviour.
-func TestApplySteps_DryRunForwards(t *testing.T) {
-	steps := applySteps(Options{Context: "local", KustomizeDir: "/tmp/k", DryRun: "server"})
-	for i, s := range steps {
+	// Replace's two invocations are delete then apply with the
+	// same selector -- catches an accidental selector drift
+	// between them.
+	replace := groups[1]
+	if got := replace.invocations[0].args[1]; got != "delete" {
+		t.Errorf("replace invocation 0: verb %q, want delete", got)
+	}
+	if got := replace.invocations[1].args[1]; got != "apply" {
+		t.Errorf("replace invocation 1: verb %q, want apply", got)
+	}
+	sel := "--selector=" + ConvergeModeLabel + "=replace"
+	for j, inv := range replace.invocations {
 		found := false
-		for _, a := range s.args {
-			if a == "--dry-run=server" {
+		for _, a := range inv.args {
+			if a == sel {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("step %d (verb=%s) missing --dry-run=server: %v", i, s.args[1], s.args)
+			t.Errorf("replace invocation %d missing %q: %v", j, sel, inv.args)
 		}
 	}
 }
 
-// TestApplySteps_NoDryRunByDefault confirms the inverse: an
-// empty Options.DryRun must not insert --dry-run=anything.
-// Catches a typo where a default value (e.g. "none") gets
-// forwarded as a flag.
-func TestApplySteps_NoDryRunByDefault(t *testing.T) {
-	steps := applySteps(Options{Context: "local", KustomizeDir: "/tmp/k"})
-	for i, s := range steps {
-		for _, a := range s.args {
-			if strings.HasPrefix(a, "--dry-run=") {
-				t.Errorf("step %d unexpectedly carries %q: %v", i, a, s.args)
+// TestApplyGroups_DefaultExcludesReplaceToo: the unlabelled bucket's
+// negative selector must exclude replace too, because replace's
+// resources are re-applied inside the replace group's second
+// invocation. If the default group also re-applied them we'd
+// double-apply -- visible as duplicate "<kind>/<name> created"
+// lines on first run.
+func TestApplyGroups_DefaultExcludesReplaceToo(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k"})
+	def := groups[4]
+	if def.mode != "" {
+		t.Fatalf("group 4 should be the default (mode=\"\") group, got mode=%q", def.mode)
+	}
+	args := def.invocations[0].args
+	var sel string
+	for _, a := range args {
+		if strings.HasPrefix(a, "--selector=") {
+			sel = a
+			break
+		}
+	}
+	for _, mode := range []string{"create", "replace", "serverside", "serverside-force"} {
+		want := ConvergeModeLabel + "!=" + mode
+		if !strings.Contains(sel, want) {
+			t.Errorf("default selector missing %q\nsel: %s", want, sel)
+		}
+	}
+}
+
+// TestApplyGroups_DryRunForwards: --dry-run=server must reach
+// every invocation, including delete and replace's recreate, so
+// a dry-run of a replace-mode resource is provably non-mutating
+// end-to-end.
+func TestApplyGroups_DryRunForwards(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k", DryRun: "server"})
+	for gi, g := range groups {
+		for ii, inv := range g.invocations {
+			found := false
+			for _, a := range inv.args {
+				if a == "--dry-run=server" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("group %d (mode=%q) invocation %d missing --dry-run=server: %v",
+					gi, g.mode, ii, inv.args)
 			}
 		}
 	}
 }
 
-// TestApplySteps_TolerateContract pins the per-step "expected
-// empty / idempotent" output substrings, split between the two
-// channels kubectl uses:
+// TestApplyGroups_NoDryRunByDefault confirms the inverse: an
+// empty Options.DryRun must not insert --dry-run=anything. Catches
+// a typo where a default value (e.g. "none") gets forwarded.
+func TestApplyGroups_NoDryRunByDefault(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k"})
+	for gi, g := range groups {
+		for ii, inv := range g.invocations {
+			for _, a := range inv.args {
+				if strings.HasPrefix(a, "--dry-run=") {
+					t.Errorf("group %d (mode=%q) invocation %d unexpectedly carries %q",
+						gi, g.mode, ii, a)
+				}
+			}
+		}
+	}
+}
+
+// TestApplyGroups_TolerateContract pins the per-invocation
+// "expected idempotent" output substrings, split between the
+// two channels kubectl uses:
 //
 //   - stderrTolerate: stderr substrings that, together with a
-//     non-zero exit, count as success. Used for the apply / create
-//     "no objects passed to <verb>" empty-selector case and for
-//     create's AlreadyExists re-run case.
-//   - stdoutSuppress: stdout substrings that, when produced by an
-//     otherwise successful kubectl run, are dropped before
-//     forwarding to the user. Used for `kubectl delete`'s
-//     "No resources found" line on empty match (delete prints
-//     this to stdout, not stderr, with exit 0).
+//     non-zero exit, count as success ("no objects passed to
+//     <verb>" empty-selector case, "AlreadyExists" on create
+//     re-runs).
+//   - stdoutSuppress: stdout substrings that, on otherwise
+//     successful runs, are dropped before forwarding (kubectl
+//     delete's "No resources found" line on empty match).
 //
-// Accidental loosening of either would silently swallow a
-// genuine bug or noise up the user-facing output.
-func TestApplySteps_TolerateContract(t *testing.T) {
-	steps := applySteps(Options{Context: "local", KustomizeDir: "/tmp/k"})
+// Loosening either silently swallows a real bug or noises up
+// the user-facing output.
+func TestApplyGroups_TolerateContract(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k"})
 
-	wantStderr := [][]string{
-		{"AlreadyExists", "no objects passed to create"}, // create
-		nil,                                               // delete (none on stderr)
-		{"no objects passed to apply"},                   // serverside-force
-		{"no objects passed to apply"},                   // serverside
-		{"no objects passed to apply"},                   // plain apply
+	type pair struct {
+		stderr []string
+		stdout []string
 	}
-	wantStdout := [][]string{
-		nil,                       // create
-		{"No resources found"},    // delete
-		nil, nil, nil,             // apply variants
+	want := [][]pair{
+		// create
+		{
+			{stderr: []string{"AlreadyExists", "no objects passed to create"}},
+		},
+		// replace: delete + apply
+		{
+			{stdout: []string{"No resources found"}},
+			{stderr: []string{"no objects passed to apply"}},
+		},
+		// serverside-force
+		{
+			{stderr: []string{"no objects passed to apply"}},
+		},
+		// serverside
+		{
+			{stderr: []string{"no objects passed to apply"}},
+		},
+		// default
+		{
+			{stderr: []string{"no objects passed to apply"}},
+		},
 	}
-	for i := range steps {
-		if !reflect.DeepEqual(steps[i].stderrTolerate, wantStderr[i]) {
-			t.Errorf("step %d stderrTolerate mismatch\n got:  %v\n want: %v",
-				i, steps[i].stderrTolerate, wantStderr[i])
+	for gi, g := range groups {
+		if len(g.invocations) != len(want[gi]) {
+			t.Errorf("group %d invocations: %d want %d", gi, len(g.invocations), len(want[gi]))
+			continue
 		}
-		if !reflect.DeepEqual(steps[i].stdoutSuppress, wantStdout[i]) {
-			t.Errorf("step %d stdoutSuppress mismatch\n got:  %v\n want: %v",
-				i, steps[i].stdoutSuppress, wantStdout[i])
+		for ii, inv := range g.invocations {
+			if !reflect.DeepEqual(inv.stderrTolerate, want[gi][ii].stderr) {
+				t.Errorf("group %d (mode=%q) inv %d stderrTolerate: got %v want %v",
+					gi, g.mode, ii, inv.stderrTolerate, want[gi][ii].stderr)
+			}
+			if !reflect.DeepEqual(inv.stdoutSuppress, want[gi][ii].stdout) {
+				t.Errorf("group %d (mode=%q) inv %d stdoutSuppress: got %v want %v",
+					gi, g.mode, ii, inv.stdoutSuppress, want[gi][ii].stdout)
+			}
 		}
 	}
 }
