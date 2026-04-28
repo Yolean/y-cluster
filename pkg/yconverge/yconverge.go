@@ -7,7 +7,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/Yolean/y-cluster/pkg/k8sapply"
 	"github.com/Yolean/y-cluster/pkg/kustomize/traverse"
 )
 
@@ -149,7 +148,7 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 
 	// Apply (unless checks-only)
 	if !opts.ChecksOnly {
-		if err := kubectlApply(ctx, opts, logger); err != nil {
+		if err := applyStep(ctx, opts, logger); err != nil {
 			return nil, fmt.Errorf("apply %s: %w", opts.KustomizeDir, err)
 		}
 	}
@@ -178,26 +177,18 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 	return &Result{Steps: []string{absDir}}, nil
 }
 
-// kubectlApply runs server-side apply against the named context's
-// cluster, equivalent to:
-//
-//	kubectl --context=<...> apply --server-side --force-conflicts \
-//	  --field-manager=y-cluster -k <KustomizeDir>
-//
-// Implemented in pkg/k8sapply via client-go directly so callers
-// get typed errors (apierrors.IsConflict, IsForbidden, etc.)
-// instead of "exit status 1, see stderr".
-func kubectlApply(ctx context.Context, opts Options, logger *zap.Logger) error {
-	dryRun := k8sapply.DryRunNone
-	if opts.DryRun == "server" {
-		dryRun = k8sapply.DryRunServer
-	}
+// applyStep wraps the shellout to `kubectl apply` in the package's
+// kubectl.go helper, with one extra responsibility: emit a debug
+// log of what's being applied so `-v` runs trace what each
+// dependency-walk step is doing without the user having to
+// correlate kubectl invocations to the dep graph manually.
+func applyStep(ctx context.Context, opts Options, logger *zap.Logger) error {
 	logger.Debug("apply",
 		zap.String("context", opts.Context),
 		zap.String("kustomizeDir", opts.KustomizeDir),
-		zap.String("dryRun", string(dryRun)),
+		zap.String("dryRun", opts.DryRun),
 	)
-	if err := k8sapply.Apply(ctx, opts.Context, opts.KustomizeDir, dryRun, logger); err != nil {
+	if err := kubectlApply(ctx, opts); err != nil {
 		return fmt.Errorf("apply %s: %w", opts.KustomizeDir, err)
 	}
 	return nil

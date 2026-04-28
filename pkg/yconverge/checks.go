@@ -10,7 +10,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/Yolean/y-cluster/pkg/k8swait"
 )
 
 // Check represents a single post-apply verification step.
@@ -81,7 +80,7 @@ func (r *CheckRunner) runWait(ctx context.Context, check Check, ns string, timeo
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
 	)
-	if err := k8swait.Wait(ctx, r.Context, check.Resource, ns, check.For, timeout); err != nil {
+	if err := kubectlWait(ctx, r.Context, check.Resource, ns, check.For, timeout); err != nil {
 		r.Logger.Error("wait check failed",
 			zap.String("resource", check.Resource),
 			zap.String("for", check.For),
@@ -102,7 +101,7 @@ func (r *CheckRunner) runRollout(ctx context.Context, check Check, ns string, ti
 		zap.String("resource", check.Resource),
 		zap.String("description", desc),
 	)
-	if err := k8swait.RolloutStatus(ctx, r.Context, check.Resource, ns, timeout); err != nil {
+	if err := kubectlRolloutStatus(ctx, r.Context, check.Resource, ns, timeout); err != nil {
 		r.Logger.Error("rollout check failed",
 			zap.String("resource", check.Resource),
 			zap.Error(err),
