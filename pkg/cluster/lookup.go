@@ -31,9 +31,8 @@ import (
 	"strings"
 	"syscall"
 
-	"k8s.io/client-go/tools/clientcmd"
-
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
+	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 )
 
 // DefaultContext is the kubeconfig context name we assume when
@@ -130,23 +129,33 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 }
 
 // readClusterName resolves contextName to its cluster entry name
-// via clientcmd. Empty kubeconfigPath uses the kubectl-equivalent
-// $KUBECONFIG / ~/.kube/config search via NewDefaultClientConfigLoadingRules.
-// Returns "" (no error) when the context does not exist.
+// in the kubeconfig. Empty kubeconfigPath uses the kubectl-style
+// search ($KUBECONFIG, then ~/.kube/config). Returns "" (no error)
+// when the context does not exist. Implemented on the typed File
+// schema in pkg/kubeconfig (no client-go).
 func readClusterName(_ context.Context, kubeconfigPath, contextName string) (string, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if kubeconfigPath != "" {
-		rules = &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}
+	resolved := kubeconfigPath
+	if resolved == "" {
+		if env := os.Getenv("KUBECONFIG"); env != "" {
+			// Take the first entry for KUBECONFIG=a:b. The full
+			// merge semantics clientcmd implements aren't relevant
+			// here -- detect/ctr/crictl resolve a context name
+			// against ONE kubeconfig, the same one provision wrote.
+			resolved = strings.SplitN(env, string(os.PathListSeparator), 2)[0]
+		}
 	}
-	cfg, err := rules.Load()
+	if resolved == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("locate home: %w", err)
+		}
+		resolved = filepath.Join(home, ".kube", "config")
+	}
+	cfg, err := kubeconfig.Load(resolved)
 	if err != nil {
 		return "", fmt.Errorf("load kubeconfig: %w", err)
 	}
-	c, ok := cfg.Contexts[contextName]
-	if !ok {
-		return "", nil
-	}
-	return c.Cluster, nil
+	return cfg.ContextCluster(contextName), nil
 }
 
 // dockerContainerRunning asks the local Docker daemon whether

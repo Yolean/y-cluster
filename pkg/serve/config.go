@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/Yolean/y-cluster/pkg/configfile"
 )
@@ -76,6 +77,12 @@ type YKustomizeInClusterConfig struct {
 	// Context is an optional kubeconfig context to override the
 	// current-context. Empty uses the current-context.
 	Context string `json:"context,omitempty" yaml:"context,omitempty"`
+
+	// PollInterval controls how often the backend lists Secrets
+	// from the apiserver to refresh its route table. Default 5s.
+	// Smaller = lower mutation-to-served latency at the cost of
+	// more apiserver round-trips; larger = the inverse.
+	PollInterval time.Duration `json:"pollInterval,omitempty" yaml:"pollInterval,omitempty"`
 }
 
 // SetDir lets pkg/configfile attach the absolute config-dir path
