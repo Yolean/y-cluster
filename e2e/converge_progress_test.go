@@ -95,21 +95,28 @@ step: verify.#Step & { checks: [{
 	}
 	got := string(out)
 
-	wants := []string{
-		"yconverge dependency base",
-		"yconverge converge-mode=replace",
-		"yconverge target dependent",
+	// userPath in pkg/yconverge prints CWD-relative paths so the
+	// shown form matches what -k accepts. Tests run with CWD set
+	// to the e2e/ package dir, so the resolved path traverses
+	// up to /tmp/<TestName>/... -- we substring-match the segment
+	// the user would care about ("/base" / "/dependent") rather
+	// than pinning the long ../../../tmp/.../ prefix.
+	wantSubs := []string{
+		"yconverge dependency",
+		"/base\nyconverge converge-mode=replace\n",
+		"yconverge target",
+		"/dependent\n",
 		"yconverge check 1/1 exec",
 	}
-	for _, w := range wants {
+	for _, w := range wantSubs {
 		if !strings.Contains(got, w) {
-			t.Errorf("missing progress line %q\nfull output:\n%s", w, got)
+			t.Errorf("missing progress substring %q\nfull output:\n%s", w, got)
 		}
 	}
 
 	// Order matters: dependency before target, target before check.
-	depIdx := strings.Index(got, "yconverge dependency base")
-	tgtIdx := strings.Index(got, "yconverge target dependent")
+	depIdx := strings.Index(got, "yconverge dependency")
+	tgtIdx := strings.Index(got, "yconverge target")
 	chkIdx := strings.Index(got, "yconverge check 1/1 exec")
 	if !(depIdx < tgtIdx && tgtIdx < chkIdx) {
 		t.Errorf("progress lines out of order: dep=%d target=%d check=%d\nfull output:\n%s",

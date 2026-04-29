@@ -38,6 +38,30 @@ func (o Options) progressOut() io.Writer {
 	return os.Stdout
 }
 
+// userPath turns an absolute filesystem path into something
+// readable to the user: a CWD-relative form that matches the
+// shape of the -k argument they typed. Tab-completion and a
+// follow-up `cd <shown>` Just Work.
+//
+// Falls back to the absolute path when filepath.Rel can't
+// compute one (rare; happens across drive letters on Windows
+// or when the cwd is otherwise unrelated to the target).
+//
+// The diagnostic zap log lines keep RelPath(cueRoot, step) --
+// structured fields meant for log aggregation are more useful
+// in module-relative form, which doesn't depend on cwd-at-log-time.
+func userPath(absPath string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return absPath
+	}
+	rel, err := filepath.Rel(cwd, absPath)
+	if err != nil {
+		return absPath
+	}
+	return rel
+}
+
 // Result holds the outcome of a yconverge run.
 type Result struct {
 	// Steps lists the directories that were converged, in order.
@@ -111,9 +135,8 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 			zap.Int("steps", len(steps)),
 		)
 		for _, step := range steps[:len(steps)-1] {
-			rel := RelPath(cueRoot, step)
-			logger.Debug("converge dependency", zap.String("dir", rel))
-			fmt.Fprintf(opts.progressOut(), "yconverge dependency %s\n", rel)
+			logger.Debug("converge dependency", zap.String("dir", RelPath(cueRoot, step)))
+			fmt.Fprintf(opts.progressOut(), "yconverge dependency %s\n", userPath(step))
 			depOpts := Options{
 				Context:      opts.Context,
 				KustomizeDir: step,
@@ -127,7 +150,7 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				Stdout:     opts.Stdout,
 			}
 			if _, err := convergeSingle(ctx, depOpts, logger); err != nil {
-				return nil, fmt.Errorf("dependency %s: %w", rel, err)
+				return nil, fmt.Errorf("dependency %s: %w", userPath(step), err)
 			}
 		}
 	}
@@ -137,7 +160,7 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 	// header for what the user explicitly passed via -k.
 	logger.Debug("converge target", zap.String("dir", RelPath(cueRoot, absDir)))
 	if hasDeps {
-		fmt.Fprintf(opts.progressOut(), "yconverge target %s\n", RelPath(cueRoot, absDir))
+		fmt.Fprintf(opts.progressOut(), "yconverge target %s\n", userPath(absDir))
 	}
 	if _, err := convergeSingle(ctx, opts, logger); err != nil {
 		return nil, err
