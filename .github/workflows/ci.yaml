@@ -243,8 +243,22 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          # Idempotent: create the release if it does not yet exist,
-          # then upload (or re-upload) all assets.
-          gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "$tag" --generate-notes --verify-tag
-          gh release upload "$tag" release/y-cluster_${tag}_* --clobber
+          # Idempotent on re-runs and race-free with the
+          # `release: published` event that e2e-release.yaml
+          # listens for:
+          # - First run for a tag: `gh release create ... <files>`
+          #   uploads atomically, so publish fires only after the
+          #   assets are present. The previous shape called
+          #   `release create` (empty publish, fires the event)
+          #   THEN `release upload`; the event-driven validator
+          #   raced in and saw an empty release ("no assets to
+          #   download").
+          # - Re-run for an existing tag: skip create, use
+          #   `release upload --clobber` to refresh the assets
+          #   without retriggering publish.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/y-cluster_${tag}_* --clobber
+          else
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag \
+              release/y-cluster_${tag}_*
+          fi
