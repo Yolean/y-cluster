@@ -1,17 +1,33 @@
 package envoygateway
 
-import _ "embed"
+import "fmt"
 
-// gatewayClassYAML is the default `eg` GatewayClass manifest.
-// Tiny (~10 lines) and y-cluster-owned, so it stays embedded
-// rather than being downloaded -- nothing about it changes per
-// EG release. install.yaml, by contrast, is the upstream release
-// asset and lives in the per-version cache so a fresh provision
-// can pick a different Version without recompiling.
+// EGControllerName is the controllerName Envoy Gateway watches for
+// when picking up GatewayClass resources. Fixed by EG; the
+// y-cluster-installed GatewayClass references it.
+const EGControllerName = "gateway.envoyproxy.io/gatewayclass-controller"
+
+// GatewayClassYAML renders the default GatewayClass manifest with
+// the configured class name. The YAML body is small enough
+// (~10 lines) that we'd previously embedded it verbatim with the
+// name hardcoded; rendering inline lets the operator pick a
+// non-default name via cluster config.
 //
-//go:embed assets/gatewayclass.yaml
-var gatewayClassYAML []byte
-
-// GatewayClassYAML returns the embedded default GatewayClass
-// bytes. Read-only.
-func GatewayClassYAML() []byte { return gatewayClassYAML }
+// Pure function so unit tests can pin the rendered shape against
+// a known-good baseline.
+func GatewayClassYAML(name string) []byte {
+	return []byte(fmt.Sprintf(`---
+# y-cluster default GatewayClass for the bundled Envoy Gateway
+# install. Consumer Gateway resources reference this name via
+# gatewayClassName: %s.
+#
+# y-cluster does NOT install a cluster Gateway here -- listener
+# port and TLS choices belong to the consumer's kustomize bases.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: %s
+spec:
+  controllerName: %s
+`, name, name, EGControllerName))
+}

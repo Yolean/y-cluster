@@ -41,10 +41,15 @@ type Options struct {
 	// kwok-based tests where the controller never actually rolls
 	// out a real Deployment).
 	ReadyTimeout time.Duration
-	// SkipGatewayClass omits applying the default `eg`
-	// GatewayClass. Useful when the consumer's kustomize base
-	// declares its own GatewayClass under a different name.
-	SkipGatewayClass bool
+	// GatewayClassName names the default GatewayClass Install
+	// applies after the controller is up. Empty means "don't apply
+	// a GatewayClass" -- useful when the consumer's kustomize base
+	// ships its own.
+	//
+	// Provision-driven calls fill this from CommonConfig.Gateway.Name
+	// (default "y-cluster"); test calls can leave it empty to skip
+	// the apply.
+	GatewayClassName string
 }
 
 // Install resolves the per-version install.yaml from cache
@@ -66,8 +71,8 @@ type Options struct {
 //     once the CRDs are registered.
 //  3. kubectl rollout status deployment/envoy-gateway in
 //     envoy-gateway-system (skipped when ReadyTimeout < 0).
-//  4. kubectl apply the default `eg` GatewayClass (skipped when
-//     SkipGatewayClass is set).
+//  4. kubectl apply the default GatewayClass with the configured
+//     name (skipped when GatewayClassName is empty).
 //
 // Implementation switched from client-go's typed apply / rollout
 // to kubectl shellouts to drop pkg/k8sapply + pkg/k8swait (and
@@ -123,9 +128,11 @@ func Install(ctx context.Context, opts Options) error {
 		}
 	}
 
-	if !opts.SkipGatewayClass {
-		logger.Info("applying default GatewayClass eg")
-		if err := kubectlApplyStdin(ctx, opts.ContextName, gatewayClassYAML); err != nil {
+	if opts.GatewayClassName != "" {
+		logger.Info("applying default GatewayClass",
+			zap.String("name", opts.GatewayClassName),
+		)
+		if err := kubectlApplyStdin(ctx, opts.ContextName, GatewayClassYAML(opts.GatewayClassName)); err != nil {
 			return fmt.Errorf("apply GatewayClass: %w", err)
 		}
 	}

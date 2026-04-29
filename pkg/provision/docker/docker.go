@@ -201,14 +201,23 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 
 	// Install the bundled Envoy Gateway (CRDs + controller +
 	// default GatewayClass). Replaces Traefik, which we disabled
-	// in the k3s server cmd above.
-	if err := envoygateway.Install(ctx, envoygateway.Options{
-		ContextName: cfg.Context,
-		Logger:      logger,
-	}); err != nil {
-		return nil, fmt.Errorf("install envoy gateway: %w", err)
+	// in the k3s server cmd above. Skipped wholesale when
+	// gateway.skip is set in cluster config.
+	if cfg.Gateway.Skip {
+		logger.Info("envoy gateway install skipped (gateway.skip)")
+	} else {
+		if err := envoygateway.Install(ctx, envoygateway.Options{
+			ContextName:      cfg.Context,
+			GatewayClassName: cfg.Gateway.ClassName,
+			Logger:           logger,
+		}); err != nil {
+			return nil, fmt.Errorf("install envoy gateway: %w", err)
+		}
+		logger.Info("envoy gateway ready",
+			zap.String("version", envoygateway.Version),
+			zap.String("gatewayClass", cfg.Gateway.ClassName),
+		)
 	}
-	logger.Info("envoy gateway ready", zap.String("version", envoygateway.Version))
 
 	return c, nil
 }

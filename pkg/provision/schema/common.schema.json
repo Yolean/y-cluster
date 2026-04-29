@@ -13,6 +13,10 @@
           "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
           "type": "string"
         },
+        "gateway": {
+          "$ref": "#/$defs/GatewayConfig",
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs"
+        },
         "k3s": {
           "$ref": "#/$defs/K3sConfig",
           "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
@@ -50,6 +54,21 @@
       "required": [
         "provider"
       ],
+      "type": "object"
+    },
+    "GatewayConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "className": {
+          "default": "y-cluster",
+          "description": "GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true.",
+          "type": "string"
+        },
+        "skip": {
+          "description": "If true",
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "K3sConfig": {

@@ -61,6 +61,65 @@ type CommonConfig struct {
 	K3s          K3sConfig     `yaml:"k3s,omitempty"          json:"k3s,omitempty"          jsonschema:"description=k3s install settings. Defaults track pkg/provision/config/k3s.yaml."`
 	PortForwards []PortForward `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
 	Registries   Registries    `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
+	Gateway      GatewayConfig `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs, controller, or GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
+}
+
+// GatewayConfig controls the bundled Envoy Gateway install
+// (pkg/provision/envoygateway). Two knobs:
+//
+//   - skip: false (default)                      install CRDs, controller, default GatewayClass
+//   - skip: true                                 no CRDs, controller, or GatewayClass
+//   - className: <string> (default "y-cluster")  rename the default GatewayClass
+//
+// All-or-nothing: there is no "install controller without a default
+// GatewayClass" option. A consumer that wants to ship their own
+// GatewayClass should also ship their own controller install.
+//
+// override-ip is intentionally NOT a field here: it's derived from
+// PortForwards (loopback when guest:80 is bound to a host port)
+// and exposed to ystack consumers via a kube-system ConfigMap, not
+// via cluster config the user has to maintain.
+type GatewayConfig struct {
+	// Skip omits the entire Envoy Gateway install (CRDs, controller,
+	// GatewayClass). Useful for test clusters that don't need HTTP
+	// ingress -- saves the ~50 MB image pull and a few seconds of
+	// rollout. k3s --disable=traefik is still passed; if you want a
+	// different ingress, install it yourself.
+	Skip bool `yaml:"skip,omitempty" json:"skip,omitempty" jsonschema:"description=If true, do not install Envoy Gateway. k3s still runs with --disable=traefik."`
+
+	// ClassName names the default GatewayClass y-cluster applies
+	// after the EG controller is up. Consumer Gateway resources
+	// reference this via gatewayClassName.
+	//
+	// Default: y-cluster. Set to "eg" to keep compatibility with
+	// consumers that hardcoded that name in pre-v0.4 cluster
+	// configs (the ystack gateway-v4 surface, for one).
+	//
+	// Ignored when Skip is true.
+	ClassName string `yaml:"className,omitempty" json:"className,omitempty" jsonschema:"default=y-cluster,description=GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true."`
+}
+
+// applyGatewayDefaults fills ClassName when the install is
+// enabled. When Skip is set, ClassName is left as the user
+// supplied it so debug logs make the operator's intent obvious.
+func (c *CommonConfig) applyGatewayDefaults() {
+	if c.Gateway.Skip {
+		return
+	}
+	if c.Gateway.ClassName == "" {
+		c.Gateway.ClassName = "y-cluster"
+	}
+}
+
+// EffectiveGatewayClassName returns the GatewayClass name the
+// provisioner should hand to envoygateway.Install. Empty string
+// means "do not apply a GatewayClass" (because the whole install
+// is skipped).
+func (c CommonConfig) EffectiveGatewayClassName() string {
+	if c.Gateway.Skip {
+		return ""
+	}
+	return c.Gateway.ClassName
 }
 
 // PortForward maps a host port to a guest port. Common to all
@@ -103,8 +162,8 @@ type K3sConfig struct {
 }
 
 // applyCommonDefaults fills defaults that the reflective tag-default
-// pass can't reach: K3s.Version (data-file driven) and PortForwards
-// (slice default).
+// pass can't reach: K3s.Version (data-file driven), PortForwards
+// (slice default), GatewayConfig.Name (default y-cluster).
 func (c *CommonConfig) applyCommonDefaults() {
 	if c.K3s.Version == "" {
 		c.K3s.Version = K3sDefaultVersion()
@@ -120,6 +179,7 @@ func (c *CommonConfig) applyCommonDefaults() {
 			{Host: "443", Guest: "443"},
 		}
 	}
+	c.applyGatewayDefaults()
 }
 
 // validateCommon checks invariants every provider relies on. The

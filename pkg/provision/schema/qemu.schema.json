@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "GatewayConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "className": {
+          "default": "y-cluster",
+          "description": "GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true.",
+          "type": "string"
+        },
+        "skip": {
+          "description": "If true",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "K3sConfig": {
       "additionalProperties": false,
       "properties": {
@@ -59,6 +74,10 @@
           "default": "40G",
           "description": "qcow2 disk size as a [num][KMGT] string.",
           "type": "string"
+        },
+        "gateway": {
+          "$ref": "#/$defs/GatewayConfig",
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs"
         },
         "k3s": {
           "$ref": "#/$defs/K3sConfig",
