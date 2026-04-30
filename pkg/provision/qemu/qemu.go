@@ -83,6 +83,22 @@ func (c Config) hostAPIPort() string {
 	return ""
 }
 
+// hostRoutableIP returns the host-side IP at which the host reaches
+// the cluster's HTTP ingress. Same derivation as
+// config.CommonConfig.HostRoutableIP -- duplicated here because the
+// runtime Config already carries a translated PortForwards slice
+// and would otherwise need a back-reference to the on-disk config.
+// Empty string means no host-side override; the call site uses it
+// as the DNSHintIP option, which an empty value omits.
+func (c Config) hostRoutableIP() string {
+	for _, pf := range c.PortForwards {
+		if pf.Guest == "80" {
+			return "127.0.0.1"
+		}
+	}
+	return ""
+}
+
 // FromConfig translates the on-disk QEMUConfig (already
 // defaults-applied and validated by configfile.Load) into the
 // runtime Config consumed by Provision/Teardown.
@@ -273,6 +289,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:      cfg.Context,
 			GatewayClassName: cfg.Gateway.ClassName,
+			DNSHintIP:        cfg.hostRoutableIP(),
 			Logger:           logger,
 		}); err != nil {
 			return nil, fmt.Errorf("install envoy gateway: %w", err)

@@ -209,6 +209,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:      cfg.Context,
 			GatewayClassName: cfg.Gateway.ClassName,
+			DNSHintIP:        cfg.HostRoutableIP(),
 			Logger:           logger,
 		}); err != nil {
 			return nil, fmt.Errorf("install envoy gateway: %w", err)

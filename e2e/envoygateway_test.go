@@ -51,8 +51,9 @@ func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 		ContextName:      contextName,
 		CacheOverride:    sharedEnvoyGatewayCache(t),
 		Logger:           logger(t),
-		ReadyTimeout:     -1,        // skip wait: kwok doesn't run the real controller
+		ReadyTimeout:     -1,          // skip wait: kwok doesn't run the real controller
 		GatewayClassName: "y-cluster", // matches the production default
+		DNSHintIP:        "127.0.0.1", // simulates qemu/docker host-loopback case
 	}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -101,6 +102,17 @@ func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 	want := "gateway.envoyproxy.io/gatewayclass-controller"
 	if gcOut != want {
 		t.Errorf("GatewayClass y-cluster.spec.controllerName = %q, want %q", gcOut, want)
+	}
+
+	// dns-hint-ip annotation landed: this is the contract ystack's
+	// y-k8s-ingress-hosts (and any future host-side resolver tool)
+	// reads to find the host-routable address without user-side
+	// config. Pinned because consumers cite the exact annotation key.
+	hintOut := kubectl(t, "get", "gatewayclass", "y-cluster",
+		"-o", "jsonpath={.metadata.annotations."+strings.ReplaceAll(envoygateway.DNSHintIPAnnotation, ".", "\\.")+"}")
+	if hintOut != "127.0.0.1" {
+		t.Errorf("GatewayClass y-cluster annotation %s = %q, want 127.0.0.1",
+			envoygateway.DNSHintIPAnnotation, hintOut)
 	}
 }
 

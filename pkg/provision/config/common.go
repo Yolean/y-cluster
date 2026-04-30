@@ -75,10 +75,13 @@ type CommonConfig struct {
 // GatewayClass" option. A consumer that wants to ship their own
 // GatewayClass should also ship their own controller install.
 //
-// override-ip is intentionally NOT a field here: it's derived from
-// PortForwards (loopback when guest:80 is bound to a host port)
-// and exposed to ystack consumers via a kube-system ConfigMap, not
-// via cluster config the user has to maintain.
+// The host-side dial address (where /etc/hosts on the developer
+// machine should resolve gateway hostnames to) is intentionally NOT
+// a field here. It's derived from PortForwards via HostRoutableIP
+// and exposed to consumers as the yolean.se/dns-hint-ip annotation
+// on the GatewayClass. No user-facing knob -- the value is a
+// physical fact about the host/guest port-forward layer, not a
+// preference.
 type GatewayConfig struct {
 	// Skip omits the entire Envoy Gateway install (CRDs, controller,
 	// GatewayClass). Useful for test clusters that don't need HTTP
@@ -128,6 +131,29 @@ func (c CommonConfig) EffectiveGatewayClassName() string {
 type PortForward struct {
 	Host  string `yaml:"host"  json:"host"  jsonschema:"description=Host port. Empty string lets the provider pick (qemu: SLIRP-assigned; docker: docker-assigned)."`
 	Guest string `yaml:"guest" json:"guest" jsonschema:"description=Guest port to forward to."`
+}
+
+// HostRoutableIP returns the IP at which the host reaches the
+// cluster's HTTP ingress (Envoy Gateway). Today the only providers
+// y-cluster supports (qemu SLIRP, docker port-forwards) bind ingress
+// on the host loopback, so the value is "127.0.0.1" whenever guest:80
+// is in PortForwards. Empty means "no host-side dial address" --
+// either no guest:80 forward, or a future provisioner topology that
+// doesn't tunnel through the host (multi-VM bridged, cloud LB).
+//
+// The provisioner publishes this value to the cluster as the
+// yolean.se/dns-hint-ip annotation on the y-cluster GatewayClass,
+// so consumer tooling like ystack's y-k8s-ingress-hosts can read it
+// without any user-side configuration. The value derives entirely
+// from PortForwards -- there is no config field that lets the user
+// influence it directly.
+func (c CommonConfig) HostRoutableIP() string {
+	for _, pf := range c.PortForwards {
+		if pf.Guest == "80" {
+			return "127.0.0.1"
+		}
+	}
+	return ""
 }
 
 // HostAPIPort returns the host-side port mapped to guest 6443.

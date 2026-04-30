@@ -50,6 +50,17 @@ type Options struct {
 	// (default "y-cluster"); test calls can leave it empty to skip
 	// the apply.
 	GatewayClassName string
+	// DNSHintIP, when non-empty, surfaces on the applied GatewayClass
+	// as the yolean.se/dns-hint-ip annotation so consumer tooling
+	// (ystack's y-k8s-ingress-hosts) can read the host-side dial IP
+	// without any user-supplied config. Provision-driven calls fill
+	// this from CommonConfig.HostRoutableIP (derived from
+	// PortForwards). Empty means: don't set the annotation -- the
+	// natural state for cluster topologies that don't tunnel ingress
+	// through the host (multi-VM bridged, cloud LB).
+	//
+	// Ignored when GatewayClassName is empty (no GatewayClass apply).
+	DNSHintIP string
 }
 
 // Install resolves the per-version install.yaml from cache
@@ -131,8 +142,9 @@ func Install(ctx context.Context, opts Options) error {
 	if opts.GatewayClassName != "" {
 		logger.Info("applying default GatewayClass",
 			zap.String("name", opts.GatewayClassName),
+			zap.String("dnsHintIP", opts.DNSHintIP),
 		)
-		if err := kubectlApplyStdin(ctx, opts.ContextName, GatewayClassYAML(opts.GatewayClassName)); err != nil {
+		if err := kubectlApplyStdin(ctx, opts.ContextName, GatewayClassYAML(opts.GatewayClassName, opts.DNSHintIP)); err != nil {
 			return fmt.Errorf("apply GatewayClass: %w", err)
 		}
 	}
