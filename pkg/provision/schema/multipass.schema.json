@@ -1,59 +1,5 @@
 {
   "$defs": {
-    "CommonConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "default": "local",
-          "description": "kubeconfig context name to write.",
-          "type": "string"
-        },
-        "cpus": {
-          "default": "4",
-          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
-          "type": "string"
-        },
-        "gateway": {
-          "$ref": "#/$defs/GatewayConfig",
-          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs"
-        },
-        "k3s": {
-          "$ref": "#/$defs/K3sConfig",
-          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
-        },
-        "memory": {
-          "default": "8192",
-          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
-          "type": "string"
-        },
-        "name": {
-          "default": "y-cluster",
-          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
-          "type": "string"
-        },
-        "portForwards": {
-          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
-          "items": {
-            "$ref": "#/$defs/PortForward"
-          },
-          "type": "array"
-        },
-        "provider": {
-          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
-          "enum": [
-            "docker",
-            "multipass",
-            "qemu"
-          ],
-          "type": "string"
-        },
-        "registries": {
-          "$ref": "#/$defs/Registries",
-          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
-        }
-      },
-      "type": "object"
-    },
     "GatewayConfig": {
       "additionalProperties": false,
       "properties": {
@@ -87,6 +33,64 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "MultipassConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "default": "local",
+          "description": "kubeconfig context name to write.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": "4",
+          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
+          "type": "string"
+        },
+        "gateway": {
+          "$ref": "#/$defs/GatewayConfig",
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs"
+        },
+        "image": {
+          "default": "24.04",
+          "description": "Multipass image alias passed as the launch positional argument. LTS aliases (24.04",
+          "type": "string"
+        },
+        "k3s": {
+          "$ref": "#/$defs/K3sConfig",
+          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
+        },
+        "memory": {
+          "default": "8192",
+          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
+          "type": "string"
+        },
+        "name": {
+          "default": "y-cluster",
+          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
+          "type": "string"
+        },
+        "portForwards": {
+          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
+          "items": {
+            "$ref": "#/$defs/PortForward"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "const": "multipass",
+          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
+          "type": "string"
+        },
+        "registries": {
+          "$ref": "#/$defs/Registries",
+          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
+        }
+      },
+      "required": [
+        "provider"
+      ],
       "type": "object"
     },
     "PortForward": {
@@ -206,7 +210,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/common-config",
-  "$ref": "#/$defs/CommonConfig",
+  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/multipass-config",
+  "$ref": "#/$defs/MultipassConfig",
   "$schema": "https://json-schema.org/draft/2020-12/schema"
 }

@@ -16,20 +16,28 @@ import (
 //
 // Heuristic, top to bottom:
 //
-//	1. Linux + /dev/kvm + qemu-system-x86_64    -> qemu
-//	2. docker CLI present + `docker info` OK    -> docker
+//	1. multipass CLI present + daemon reachable -> multipass
+//	2. Linux + /dev/kvm + qemu-system-x86_64    -> qemu
+//	3. docker CLI present + `docker info` OK    -> docker
+//
+// multipass wins ahead of qemu/docker because:
+//
+//   - On macOS, multipass is the only path to a real VM; the qemu
+//     provisioner errors out without /dev/kvm.
+//   - On Linux, multipass isn't installed by default — the user has
+//     explicitly chosen it, so honouring that choice is the least
+//     surprising thing.
 //
 // qemu wins over docker on Linux because it has the full
 // disk-and-appliance feature surface (cloud-init seed,
 // persistent disk, snapshots) that the docker provisioner
-// doesn't implement. If the host can run a VM, that's the
-// default; if it can only run docker, that's the default.
+// doesn't implement.
 //
 // 100 % test coverage is impractical because the inputs are
-// kernel-level (/dev/kvm) and external commands (`docker
-// info`). The function is deliberately a flat sequence of
-// probes you can read top to bottom; each probe lives in its
-// own helper. Tests that need to control the outcome (e.g.
+// kernel-level (/dev/kvm) and external commands (`multipass
+// version`, `docker info`). The function is deliberately a flat
+// sequence of probes you can read top to bottom; each probe lives
+// in its own helper. Tests that need to control the outcome (e.g.
 // "what does LoadProvision do when discovery returns empty?")
 // override the package-level DiscoverProviderFn.
 func DiscoverProvider() string { return DiscoverProviderFn() }
@@ -41,6 +49,9 @@ func DiscoverProvider() string { return DiscoverProviderFn() }
 var DiscoverProviderFn = defaultDiscoverProvider
 
 func defaultDiscoverProvider() string {
+	if multipassReachable() {
+		return ProviderMultipass
+	}
 	if runtime.GOOS == "linux" && hasKVM() && hasBinary("qemu-system-x86_64") {
 		return ProviderQEMU
 	}
@@ -76,4 +87,17 @@ func dockerReachable() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return exec.CommandContext(ctx, "docker", "info").Run() == nil
+}
+
+// multipassReachable reports whether `multipass version` returns
+// successfully within 2 s. Same shape as dockerReachable -- short-
+// circuit when the binary is absent so we don't pay the daemon
+// round-trip on hosts where multipass isn't installed.
+func multipassReachable() bool {
+	if !hasBinary("multipass") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "multipass", "version").Run() == nil
 }

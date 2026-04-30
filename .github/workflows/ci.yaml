@@ -71,6 +71,35 @@ jobs:
           cache: true
       - run: go test -tags "e2e,docker" -count=1 -timeout=20m ./e2e/
 
+  e2e-multipass:
+    # Real Multipass + real k3s + real envoy-gateway rollout, plus
+    # detect/ctr/crictl/images-load coverage and the pod-to-
+    # apiserver curl smoke test (regression guard for the
+    # --node-external-ip class of bug).
+    #
+    # Gated on the `e2e-cluster` PR label rather than running on
+    # every push -- multipass adds ~30 s of VM boot per test and
+    # the snap install adds ~1 min on a cold runner, so we only
+    # pay the cost when a PR explicitly opts in. Pushes to main /
+    # tags / workflow_dispatch run it unconditionally because
+    # those branches are never label-driven.
+    runs-on: ubuntu-latest
+    needs: test
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e-cluster')
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: sudo snap install multipass
+      - run: |
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          touch "$KUBECONFIG"
+          go test -tags "e2e,multipass" -count=1 -timeout=30m ./e2e/
+
   generate-drift:
     # `go generate` regenerates the provisioner schema files from
     # struct tags + pkg/provision/config/k3s.yaml. If the

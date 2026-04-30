@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -49,14 +50,19 @@ func PushFixtureImage(t *testing.T, reg *Registry, repo, tag string) (digestRef 
 // Used by the `images load` arbitrary-OCI tests so they don't
 // require a running registry.
 //
-// The image is stamped linux/amd64 in its config; without it,
-// containerd's `ctr image import` filters the image out as
-// platform-less and the load is silently a no-op.
+// The image is stamped linux/<runtime.GOARCH> in its config;
+// without a platform, containerd's `ctr image import` filters
+// the image out as platform-less and the load is silently a no-op.
+// GOARCH (rather than a hardcoded amd64) is correct because each
+// provisioner runs the guest at the host's architecture: docker
+// uses host kernel, qemu uses -cpu host on KVM, multipass uses the
+// host hypervisor's native arch. So whatever GOARCH the test
+// process compiles for is also what kubelet inside the VM expects.
 func SaveFixtureArchive(t *testing.T, archivePath, repo, tag string) {
 	t.Helper()
 	img := mutate.ConfigMediaType(empty.Image, "application/vnd.docker.container.image.v1+json")
 	img, err := mutate.ConfigFile(img, &v1.ConfigFile{
-		Architecture: "amd64",
+		Architecture: runtime.GOARCH,
 		OS:           "linux",
 	})
 	if err != nil {

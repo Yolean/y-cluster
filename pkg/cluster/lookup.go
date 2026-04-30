@@ -16,10 +16,11 @@
 // probed first (cheapest), QEMU second (pidfile lookup). The
 // first hit wins.
 //
-// Supported backends are docker (k3s in a privileged container)
-// and qemu (k3s in a VM); ystack's multipass / lima / k3d paths
-// are intentionally not supported — y-cluster doesn't provision
-// those, so it can't reliably detect them either.
+// Supported backends are docker (k3s in a privileged container),
+// qemu (k3s in a VM via QEMU/KVM), and multipass (k3s in a
+// Multipass-managed VM); ystack's lima / k3d paths are intentionally
+// not supported -- y-cluster doesn't provision those, so it can't
+// reliably detect them either.
 package cluster
 
 import (
@@ -30,9 +31,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
+	"github.com/Yolean/y-cluster/pkg/multipassexec"
 )
 
 // DefaultContext is the kubeconfig context name we assume when
@@ -45,14 +48,23 @@ const DefaultContext = "local"
 type Backend string
 
 const (
-	BackendDocker Backend = "docker"
-	BackendQEMU   Backend = "qemu"
+	BackendDocker    Backend = "docker"
+	BackendQEMU      Backend = "qemu"
+	BackendMultipass Backend = "multipass"
 )
+
+// AllBackends is the canonical list of probed backends. Mirrors
+// config.AllProviders so call sites that need to enumerate every
+// known backend (test helpers, error messages) read from one place
+// and a fourth provisioner only edits this slice plus the constants
+// above. Sorted alphabetically.
+var AllBackends = []Backend{BackendDocker, BackendMultipass, BackendQEMU}
 
 // LookupResult is what Lookup returns when it finds a running
 // cluster matching a kubectl context. The Backend-specific
-// fields (ContainerName for docker; SSH* for qemu) are populated
-// only when the corresponding backend matches.
+// fields (ContainerName for docker; SSH* for qemu; MultipassName
+// for multipass) are populated only when the corresponding
+// backend matches.
 type LookupResult struct {
 	Backend     Backend
 	Context     string // kubectl context name we resolved
@@ -66,13 +78,16 @@ type LookupResult struct {
 	SSHHost string
 	SSHPort string
 	SSHUser string
+
+	// Multipass-only.
+	MultipassName string
 }
 
 // ErrNotFound is the user-facing error for "the kubeconfig
-// context exists but no docker or qemu cluster is running with
-// that cluster name". Wrapped with the cluster + context names
-// so the message is actionable.
-var ErrNotFound = errors.New("no running docker or qemu cluster matches the kubeconfig context")
+// context exists but no docker, qemu, or multipass cluster is
+// running with that cluster name". Wrapped with the cluster +
+// context names so the message is actionable.
+var ErrNotFound = errors.New("no running docker, qemu, or multipass cluster matches the kubeconfig context")
 
 // Lookup resolves the kubectl `contextName` (defaults to
 // DefaultContext when empty) to a running cluster runtime.
@@ -125,7 +140,36 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		}, nil
 	}
 
+	if multipassRunning(ctx, clusterName) {
+		return &LookupResult{
+			Backend:       BackendMultipass,
+			Context:       contextName,
+			ClusterName:   clusterName,
+			MultipassName: clusterName,
+		}, nil
+	}
+
 	return nil, fmt.Errorf("%w (cluster=%q, context=%q)", ErrNotFound, clusterName, contextName)
+}
+
+// multipassRunning reports whether a Multipass VM with the given
+// name exists and is in the Running state. Probed last in Lookup
+// because it's a CLI shellout (slower than the docker daemon API
+// and the qemu pidfile read), but still fast enough for an
+// interactive command (~50 ms when multipass is installed; the
+// short-circuit in multipassexec.Reachable keeps cost zero on
+// hosts without multipass).
+func multipassRunning(ctx context.Context, name string) bool {
+	if !multipassexec.Reachable(2 * time.Second) {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	running, err := multipassexec.IsRunning(probeCtx, name)
+	if err != nil {
+		return false
+	}
+	return running
 }
 
 // readClusterName resolves contextName to its cluster entry name

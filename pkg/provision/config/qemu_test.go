@@ -17,7 +17,7 @@ func TestQEMU_ApplyDefaults_Empty(t *testing.T) {
 	if c.Name != "y-cluster" {
 		t.Errorf("Name: %q", c.Name)
 	}
-	if c.DiskSize != "40G" {
+	if c.DiskSize != "10G" {
 		t.Errorf("DiskSize: %q", c.DiskSize)
 	}
 	if c.Memory != "8192" {
@@ -101,7 +101,7 @@ func TestQEMU_Load_HappyPath(t *testing.T) {
 		t.Fatalf("Memory: %q", c.Memory)
 	}
 	// Defaults filled
-	if c.DiskSize != "40G" {
+	if c.DiskSize != "10G" {
 		t.Fatalf("DiskSize default missing: %q", c.DiskSize)
 	}
 	// Pin-driven default
@@ -175,7 +175,7 @@ func TestSchemaIsCanonical(t *testing.T) {
 	if !strings.Contains(str, K3sDefaultVersion()) {
 		t.Fatal("schema missing k3s tag default")
 	}
-	if !strings.Contains(str, `"default": "40G"`) {
+	if !strings.Contains(str, `"default": "10G"`) {
 		t.Fatal("schema missing diskSize default")
 	}
 	// Image is no longer a schema field — it's derived at runtime.
@@ -197,6 +197,7 @@ func TestSchemaIsCanonical(t *testing.T) {
 	// schema (we replace it with const during post-processing).
 	if strings.Contains(str, `"enum": [
             "docker",
+            "multipass",
             "qemu"
           ]`) {
 		t.Fatal("per-provider schema still has the all-providers enum")
@@ -224,13 +225,38 @@ func TestCommonSchemaIsCanonical(t *testing.T) {
 	}
 	str := string(have)
 	// Common schema accepts any known provider value.
-	if !strings.Contains(str, `"docker"`) || !strings.Contains(str, `"qemu"`) {
-		t.Fatal("common.schema.json missing provider enum values")
+	for _, want := range []string{`"docker"`, `"qemu"`, `"multipass"`} {
+		if !strings.Contains(str, want) {
+			t.Fatalf("common.schema.json missing provider enum value %s", want)
+		}
 	}
 	// Per-provider-only fields must NOT appear in the common schema.
-	for _, k := range []string{`"diskSize"`, `"sshPort"`, `"cacheDir"`} {
+	for _, k := range []string{`"diskSize"`, `"sshPort"`, `"cacheDir"`, `"image"`} {
 		if strings.Contains(str, k) {
 			t.Fatalf("common.schema.json must not include provider-specific field %s", k)
+		}
+	}
+
+	// `provider` is required in per-provider schemas but optional
+	// in the common schema -- the runtime auto-discovers it via
+	// DiscoverProvider when a common-shape config omits the field.
+	// We parse the JSON tree rather than string-grep because the
+	// schema also contains a PortForward definition with its own
+	// required: [host, guest], and we don't want to confuse the
+	// two.
+	var doc map[string]any
+	if err := json.Unmarshal(have, &doc); err != nil {
+		t.Fatalf("schema does not parse: %v", err)
+	}
+	defs, _ := doc["$defs"].(map[string]any)
+	cc, _ := defs["CommonConfig"].(map[string]any)
+	if cc == nil {
+		t.Fatal("common schema missing $defs.CommonConfig")
+	}
+	required, _ := cc["required"].([]any)
+	for _, item := range required {
+		if name, _ := item.(string); name == "provider" {
+			t.Fatalf("common.schema.json must NOT mark provider as required (auto-discovery covers the omitted case); required: %v", required)
 		}
 	}
 }

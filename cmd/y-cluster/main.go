@@ -17,6 +17,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
@@ -313,16 +314,21 @@ func provisionCmd() *cobra.Command {
 		Short: "Create a local Kubernetes cluster",
 		Long: `Create a local Kubernetes cluster from y-cluster-provision.yaml in
 the -c directory. The config's 'provider:' field selects the
-backend (qemu or docker). When 'provider:' is omitted, y-cluster
-runs a runtime probe and picks one:
+backend (qemu, docker, or multipass). When 'provider:' is omitted,
+y-cluster runs a runtime probe and picks one:
 
+  multipass CLI + daemon reachable         -> multipass
   Linux + /dev/kvm + qemu-system-x86_64    -> qemu
   docker CLI + 'docker info' OK            -> docker
+
+multipass wins ahead of qemu/docker because it's the only macOS
+path to a real VM, and on Linux it isn't installed by default --
+its presence means the user explicitly chose it.
 
 qemu wins over docker on Linux because it has the full
 disk-and-appliance feature surface (cloud-init seed, persistent
 disk, snapshots) that the docker provisioner doesn't implement.
-On a host where neither probe matches, provision errors with a
+On a host where no probe matches, provision errors with a
 message naming what was checked.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := loggerFromContext(cmd.Context())
@@ -350,6 +356,15 @@ message naming what was checked.`,
 				}
 				logger.Info("cluster ready",
 					zap.String("docker", fmt.Sprintf("docker exec -it %s sh", v.Name)),
+				)
+				return nil
+			case *config.MultipassConfig:
+				rt := multipass.FromConfig(v)
+				if _, err := multipass.Provision(cmd.Context(), rt, logger); err != nil {
+					return err
+				}
+				logger.Info("cluster ready",
+					zap.String("multipass", fmt.Sprintf("multipass shell %s", rt.Name)),
 				)
 				return nil
 			default:
@@ -392,13 +407,15 @@ func teardownCmd() *cobra.Command {
 					return (&dockerNamedTeardown{name: v.Name, ctx: v.Context, logger: logger}).run()
 				}
 				return cluster.Teardown(false)
+			case *config.MultipassConfig:
+				return multipass.TeardownConfig(multipass.FromConfig(v), keepDisk, logger)
 			default:
 				return fmt.Errorf("provider %T not supported by teardown", v)
 			}
 		},
 	}
 	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
-	cmd.Flags().BoolVar(&keepDisk, "keep-disk", false, "preserve disk image for faster re-provision (qemu only)")
+	cmd.Flags().BoolVar(&keepDisk, "keep-disk", false, "preserve disk image / VM for faster re-provision (qemu, multipass)")
 	if err := cmd.MarkFlagRequired("config"); err != nil {
 		panic(err)
 	}

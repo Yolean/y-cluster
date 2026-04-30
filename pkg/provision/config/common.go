@@ -36,14 +36,15 @@ package config
 // the enum, and per-provider schema post-processing replaces it
 // with a const constraint.
 const (
-	ProviderQEMU   = "qemu"
-	ProviderDocker = "docker"
+	ProviderQEMU      = "qemu"
+	ProviderDocker    = "docker"
+	ProviderMultipass = "multipass"
 )
 
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
 // supported values.
-var AllProviders = []string{ProviderDocker, ProviderQEMU}
+var AllProviders = []string{ProviderDocker, ProviderMultipass, ProviderQEMU}
 
 // CommonConfig is the portable subset of `y-cluster-provision.yaml`.
 // Every provider config embeds it via `yaml:",inline"` so the keys
@@ -53,7 +54,7 @@ var AllProviders = []string{ProviderDocker, ProviderQEMU}
 // Per-provider Validate() must call validateCommon to enforce the
 // shared invariants (provider discriminator, k3s.version present).
 type CommonConfig struct {
-	Provider     string        `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Per-provider schemas narrow this to a single literal."`
+	Provider     string        `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -> multipass; Linux+/dev/kvm+qemu-system-x86_64 -> qemu; else reachable docker daemon -> docker). Per-provider schemas narrow this to a single literal and keep it required."`
 	Name         string        `yaml:"name,omitempty"         json:"name,omitempty"         jsonschema:"default=y-cluster,description=Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files."`
 	Context      string        `yaml:"context,omitempty"      json:"context,omitempty"      jsonschema:"default=local,description=kubeconfig context name to write."`
 	Memory       string        `yaml:"memory,omitempty"       json:"memory,omitempty"       jsonschema:"default=8192,description=Memory in MB. qemu allocates this to the VM; docker passes it to --memory."`
@@ -211,6 +212,12 @@ func (c *CommonConfig) applyCommonDefaults() {
 // validateCommon checks invariants every provider relies on. The
 // per-provider Validate methods call this first, then check their
 // own fields.
+//
+// PortForwards is *not* validated here: providers that tunnel through
+// the host (qemu SLIRP, docker port-forwards) need a guest:6443 entry
+// to reach the API server and enforce that in their own Validate;
+// providers that dial the guest directly (multipass, on its
+// hypervisor-managed network) have no use for PortForwards at all.
 func (c *CommonConfig) validateCommon(expected string) error {
 	if c.Provider != expected {
 		return errInvalid("provider must be %q, got %q", expected, c.Provider)
@@ -218,6 +225,14 @@ func (c *CommonConfig) validateCommon(expected string) error {
 	if c.K3s.Version == "" {
 		return errInvalid("k3s.version is empty; check pkg/provision/config/k3s.yaml")
 	}
+	return nil
+}
+
+// requireHostAPIPort enforces the guest:6443 PortForwards invariant
+// for host-tunneled providers. qemu and docker call this from their
+// own Validate; multipass does not because the host dials the VM IP
+// directly and PortForwards has no operational meaning there.
+func (c *CommonConfig) requireHostAPIPort() error {
 	if c.HostAPIPort() == "" {
 		return errInvalid("portForwards must include a guest:6443 entry to reach k3s from the host")
 	}

@@ -40,7 +40,7 @@
         },
         "provider": {
           "const": "docker",
-          "description": "Provisioner to use. Per-provider schemas narrow this to a single literal.",
+          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
           "type": "string"
         },
         "registries": {

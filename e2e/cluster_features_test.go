@@ -25,13 +25,14 @@ import (
 	"time"
 
 	"github.com/Yolean/y-cluster/e2e/cluster"
+	pkgcluster "github.com/Yolean/y-cluster/pkg/cluster"
 )
 
 // assertClusterFeatures runs detect / ctr / crictl against an
 // already-provisioned cluster reachable via `--context=ctxName`.
-// expectedBackend is "docker" or "qemu" depending on which
-// provisioner the calling test brought up. Fails the test on any
-// unexpected output or non-zero exit.
+// expectedBackend is one of pkg/cluster.AllBackends as a string,
+// naming whichever provisioner the calling test brought up. Fails
+// the test on any unexpected output or non-zero exit.
 //
 // The binary is taken from buildServeBinary (which builds the
 // whole y-cluster binary, not just serve) so we don't pay the
@@ -52,10 +53,21 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 		t.Fatalf("detect %s: got %q want up", expectedBackend, got)
 	}
 
-	// 3. `y-cluster detect <wrong-backend>` fails non-zero.
-	other := "qemu"
-	if expectedBackend == "qemu" {
-		other = "docker"
+	// 3. `y-cluster detect <wrong-backend>` fails non-zero. Pick any
+	// backend other than expectedBackend so this generalises across
+	// the full backend set without hardcoding pairs. Reads the
+	// canonical list from pkg/cluster so a fourth provisioner only
+	// edits cluster.AllBackends, not this test.
+	var other string
+	for _, b := range pkgcluster.AllBackends {
+		if string(b) != expectedBackend {
+			other = string(b)
+			break
+		}
+	}
+	if other == "" {
+		t.Fatalf("no other backend in cluster.AllBackends to use as wrong-backend probe; expectedBackend=%q AllBackends=%v",
+			expectedBackend, pkgcluster.AllBackends)
 	}
 	if _, err := runYClusterRaw(t, bin, "detect", "--context="+ctxName, other); err == nil {
 		t.Fatalf("detect %s should have errored on a %s cluster", other, expectedBackend)

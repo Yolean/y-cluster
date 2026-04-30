@@ -24,7 +24,7 @@ func TestFromConfig_AppliesDefaults(t *testing.T) {
 	if cfg.Name != "y-cluster" {
 		t.Fatalf("Name: %q", cfg.Name)
 	}
-	if cfg.DiskSize != "40G" {
+	if cfg.DiskSize != "10G" {
 		t.Fatalf("DiskSize: %q", cfg.DiskSize)
 	}
 	if cfg.Memory != "8192" {
