@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
+	"github.com/Yolean/y-cluster/pkg/multipassexec"
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
@@ -91,7 +92,7 @@ type Cluster struct {
 func CheckPrerequisites() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := multipassVersion(ctx); err != nil {
+	if err := multipassexec.Version(ctx); err != nil {
 		return fmt.Errorf("multipass not available: install Multipass from https://multipass.run: %w", err)
 	}
 	return nil
@@ -113,11 +114,11 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return nil, err
 	}
 
-	if _, err := multipassInfo(ctx, cfg.Name); err == nil {
+	if _, err := multipassexec.Info(ctx, cfg.Name); err == nil {
 		return nil, fmt.Errorf(
 			"multipass VM %q already exists; run `multipass delete --purge %s` to recover",
 			cfg.Name, cfg.Name)
-	} else if !errors.Is(err, errVMNotFound) {
+	} else if !errors.Is(err, multipassexec.ErrNotFound) {
 		return nil, err
 	}
 
@@ -162,13 +163,15 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	if cfg.Gateway.Skip {
 		logger.Info("envoy gateway install skipped (gateway.skip)")
 	} else {
-		// DNSHintIP intentionally left empty: multipass VMs publish
-		// a host-routable IP via k3s's ServiceLB on the Gateway's
-		// Service of type LoadBalancer, so consumers reading
-		// status.loadBalancer.ingress[0].ip get the right address
-		// without a y-cluster-supplied annotation. Revisit only if
-		// a downstream consumer needs the hint earlier in startup
-		// than the LB controller publishes its IP.
+		// DNSHintIP stays empty for multipass. The annotation exists
+		// to override Service status when ServiceLB would advertise
+		// an unreachable address (qemu SLIRP, docker container-internal
+		// IP). Multipass binds the VM on a hypervisor-managed network
+		// the host is part of, so the node's own IP is host-routable
+		// and ServiceLB's default advertisement is correct. Consumer
+		// tooling that wants the IP should read Service status (the
+		// non-tunnel-NAT path the CHANGE_REQUEST_HINT_IP migration
+		// names).
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:      cfg.Context,
 			GatewayClassName: cfg.Gateway.ClassName,
@@ -203,14 +206,14 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	defer cancel()
 
 	logger.Info("stopping multipass VM", zap.String("name", cfg.Name))
-	if err := multipassStop(ctx, cfg.Name); err != nil && !errors.Is(err, errVMNotFound) {
+	if err := multipassexec.Stop(ctx, cfg.Name); err != nil && !errors.Is(err, multipassexec.ErrNotFound) {
 		return err
 	}
 
 	if keepDisk {
 		logger.Info("teardown complete, VM preserved (keepDisk)", zap.String("name", cfg.Name))
 	} else {
-		if err := multipassDelete(ctx, cfg.Name, true); err != nil && !errors.Is(err, errVMNotFound) {
+		if err := multipassexec.Delete(ctx, cfg.Name, true); err != nil && !errors.Is(err, multipassexec.ErrNotFound) {
 			return err
 		}
 		logger.Info("teardown complete, VM deleted", zap.String("name", cfg.Name))
@@ -230,7 +233,7 @@ func (c *Cluster) Context() string { return c.cfg.Context }
 // stdin (when non-nil) is piped through so callers can stream OCI
 // tarballs into `ctr image import` on the node.
 func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader) ([]byte, error) {
-	return multipassExec(ctx, c.cfg.Name, command, stdin)
+	return multipassexec.Exec(ctx, c.cfg.Name, command, stdin)
 }
 
 // VMIP returns the VM's hypervisor-managed IPv4 address. Empty
@@ -288,7 +291,7 @@ func (c *Cluster) launch(ctx context.Context, seedPath string) error {
 		"--cloud-init", seedPath,
 		c.cfg.Image,
 	}
-	out, err := runMultipass(ctx, nil, args...)
+	out, err := multipassexec.Run(ctx, nil, args...)
 	if err != nil {
 		return fmt.Errorf("multipass launch: %s: %w", out, err)
 	}
@@ -302,9 +305,9 @@ func (c *Cluster) launch(ctx context.Context, seedPath string) error {
 func (c *Cluster) waitForVMIP(ctx context.Context) (string, error) {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
-		info, err := multipassInfo(ctx, c.cfg.Name)
+		info, err := multipassexec.Info(ctx, c.cfg.Name)
 		if err == nil {
-			if ip := firstIPv4(info); ip != "" {
+			if ip := multipassexec.FirstIPv4(info); ip != "" {
 				return ip, nil
 			}
 		}

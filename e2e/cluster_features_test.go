@@ -52,10 +52,15 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 		t.Fatalf("detect %s: got %q want up", expectedBackend, got)
 	}
 
-	// 3. `y-cluster detect <wrong-backend>` fails non-zero.
-	other := "qemu"
-	if expectedBackend == "qemu" {
-		other = "docker"
+	// 3. `y-cluster detect <wrong-backend>` fails non-zero. Pick any
+	// backend other than expectedBackend so this generalises across
+	// the qemu/docker/multipass set without hardcoding pairs.
+	var other string
+	for _, b := range []string{"docker", "qemu", "multipass"} {
+		if b != expectedBackend {
+			other = b
+			break
+		}
 	}
 	if _, err := runYClusterRaw(t, bin, "detect", "--context="+ctxName, other); err == nil {
 		t.Fatalf("detect %s should have errored on a %s cluster", other, expectedBackend)

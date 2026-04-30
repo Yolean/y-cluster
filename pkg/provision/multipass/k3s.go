@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/cache"
+	"github.com/Yolean/y-cluster/pkg/multipassexec"
 )
 
 // k3sReadyTimeout caps how long Provision waits for k3s to write
@@ -80,10 +81,10 @@ func (c *Cluster) installK3sAirgap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := multipassTransfer(ctx, c.cfg.Name, binPath, "/tmp/k3s"); err != nil {
+	if err := multipassexec.Transfer(ctx, c.cfg.Name, binPath, "/tmp/k3s"); err != nil {
 		return fmt.Errorf("transfer k3s binary: %w", err)
 	}
-	if err := multipassTransfer(ctx, c.cfg.Name, tarPath, "/tmp/k3s-airgap.tar.zst"); err != nil {
+	if err := multipassexec.Transfer(ctx, c.cfg.Name, tarPath, "/tmp/k3s-airgap.tar.zst"); err != nil {
 		return fmt.Errorf("transfer airgap tarball: %w", err)
 	}
 	for _, step := range []string{
