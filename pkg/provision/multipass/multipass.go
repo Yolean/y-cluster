@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
@@ -245,12 +246,26 @@ func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader)
 // before Provision has resolved it.
 func (c *Cluster) VMIP() string { return c.vmIP }
 
-// writeCloudInitSeed renders a minimal cloud-config file in
-// os.TempDir and returns its path along with a cleanup function.
-// multipass reads it via `--cloud-init` once at launch; we don't
-// keep it on disk afterwards. No SSH key plumbing -- `multipass
-// exec` runs as root over the daemon's IPC channel.
+// writeCloudInitSeed renders a minimal cloud-config file under
+// ~/.cache/y-cluster-multipass/ and returns its path along with a
+// cleanup function. multipass reads it via `--cloud-init` once at
+// launch; we don't keep it on disk afterwards. No SSH key plumbing
+// -- `multipass exec` runs as root over the daemon's IPC channel.
+//
+// The path matters: on Linux, multipass ships as a snap and the
+// daemon runs confined. /tmp is not visible inside the snap
+// sandbox; $HOME is, via the auto-connected `home` interface.
+// Writing to a $HOME-rooted cache dir works on snap-confined Linux,
+// macOS (.pkg install, no confinement), and any future packaging.
 func (c *Cluster) writeCloudInitSeed() (string, func(), error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", func() {}, fmt.Errorf("resolve home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".cache", "y-cluster-multipass")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", func() {}, fmt.Errorf("create %s: %w", dir, err)
+	}
 	body := fmt.Sprintf(`#cloud-config
 hostname: %s
 users:
@@ -259,7 +274,7 @@ users:
     shell: /bin/bash
 package_update: false
 `, c.cfg.Name)
-	f, err := os.CreateTemp("", c.cfg.Name+"-cloud-init-*.yaml")
+	f, err := os.CreateTemp(dir, c.cfg.Name+"-cloud-init-*.yaml")
 	if err != nil {
 		return "", func() {}, err
 	}
