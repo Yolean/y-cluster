@@ -71,7 +71,7 @@
           "type": "string"
         },
         "diskSize": {
-          "default": "10G",
+          "default": "20G",
           "description": "qcow2 disk size as a [num][KMGT] string.",
           "type": "string"
         },

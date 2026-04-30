@@ -17,7 +17,7 @@ func TestQEMU_ApplyDefaults_Empty(t *testing.T) {
 	if c.Name != "y-cluster" {
 		t.Errorf("Name: %q", c.Name)
 	}
-	if c.DiskSize != "10G" {
+	if c.DiskSize != "20G" {
 		t.Errorf("DiskSize: %q", c.DiskSize)
 	}
 	if c.Memory != "8192" {
@@ -101,7 +101,7 @@ func TestQEMU_Load_HappyPath(t *testing.T) {
 		t.Fatalf("Memory: %q", c.Memory)
 	}
 	// Defaults filled
-	if c.DiskSize != "10G" {
+	if c.DiskSize != "20G" {
 		t.Fatalf("DiskSize default missing: %q", c.DiskSize)
 	}
 	// Pin-driven default
@@ -175,7 +175,7 @@ func TestSchemaIsCanonical(t *testing.T) {
 	if !strings.Contains(str, K3sDefaultVersion()) {
 		t.Fatal("schema missing k3s tag default")
 	}
-	if !strings.Contains(str, `"default": "10G"`) {
+	if !strings.Contains(str, `"default": "20G"`) {
 		t.Fatal("schema missing diskSize default")
 	}
 	// Image is no longer a schema field — it's derived at runtime.
