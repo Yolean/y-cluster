@@ -56,6 +56,7 @@ type Config struct {
 	Kubeconfig   string
 	K3s          K3s
 	Registries   config.Registries
+	Gateway      config.GatewayConfig
 }
 
 // K3s carries the runtime view of K3sConfig: which version to
@@ -77,6 +78,22 @@ func (c Config) hostAPIPort() string {
 	for _, pf := range c.PortForwards {
 		if pf.Guest == "6443" {
 			return pf.Host
+		}
+	}
+	return ""
+}
+
+// hostRoutableIP returns the host-side IP at which the host reaches
+// the cluster's HTTP ingress. Same derivation as
+// config.CommonConfig.HostRoutableIP -- duplicated here because the
+// runtime Config already carries a translated PortForwards slice
+// and would otherwise need a back-reference to the on-disk config.
+// Empty string means no host-side override; the call site uses it
+// as the DNSHintIP option, which an empty value omits.
+func (c Config) hostRoutableIP() string {
+	for _, pf := range c.PortForwards {
+		if pf.Guest == "80" {
+			return "127.0.0.1"
 		}
 	}
 	return ""
@@ -121,6 +138,7 @@ func FromConfig(c *config.QEMUConfig) Config {
 			Install: c.K3s.Install,
 		},
 		Registries: c.Registries,
+		Gateway:    c.Gateway,
 	}
 }
 
@@ -261,14 +279,26 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// Install the bundled Envoy Gateway (CRDs + controller +
 	// default GatewayClass). Replaces the Traefik k3s would
 	// otherwise have run; --disable=traefik passed to k3s above
-	// keeps that one out of the picture.
-	if err := envoygateway.Install(ctx, envoygateway.Options{
-		ContextName: cfg.Context,
-		Logger:      logger,
-	}); err != nil {
-		return nil, fmt.Errorf("install envoy gateway: %w", err)
+	// keeps that one out of the picture. Skipped wholesale when
+	// gateway.skip is set in cluster config -- the cluster comes
+	// up with no ingress controller (k3s still has --disable=traefik
+	// so traefik doesn't sneak back in).
+	if cfg.Gateway.Skip {
+		logger.Info("envoy gateway install skipped (gateway.skip)")
+	} else {
+		if err := envoygateway.Install(ctx, envoygateway.Options{
+			ContextName:      cfg.Context,
+			GatewayClassName: cfg.Gateway.ClassName,
+			DNSHintIP:        cfg.hostRoutableIP(),
+			Logger:           logger,
+		}); err != nil {
+			return nil, fmt.Errorf("install envoy gateway: %w", err)
+		}
+		logger.Info("envoy gateway ready",
+			zap.String("version", envoygateway.Version),
+			zap.String("gatewayClass", cfg.Gateway.ClassName),
+		)
 	}
-	logger.Info("envoy gateway ready", zap.String("version", envoygateway.Version))
 
 	return c, nil
 }

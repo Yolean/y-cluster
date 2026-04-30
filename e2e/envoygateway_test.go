@@ -48,10 +48,12 @@ func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 	setupCluster(t)
 
 	if err := envoygateway.Install(context.Background(), envoygateway.Options{
-		ContextName:   contextName,
-		CacheOverride: sharedEnvoyGatewayCache(t),
-		Logger:        logger(t),
-		ReadyTimeout:  -1, // skip wait: kwok doesn't run the real controller
+		ContextName:      contextName,
+		CacheOverride:    sharedEnvoyGatewayCache(t),
+		Logger:           logger(t),
+		ReadyTimeout:     -1,          // skip wait: kwok doesn't run the real controller
+		GatewayClassName: "y-cluster", // matches the production default
+		DNSHintIP:        "127.0.0.1", // simulates qemu/docker host-loopback case
 	}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -95,41 +97,49 @@ func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 	}
 
 	// Default GatewayClass landed and points at EG's controller.
-	gcOut := kubectl(t, "get", "gatewayclass", "eg",
+	gcOut := kubectl(t, "get", "gatewayclass", "y-cluster",
 		"-o", "jsonpath={.spec.controllerName}")
 	want := "gateway.envoyproxy.io/gatewayclass-controller"
 	if gcOut != want {
-		t.Errorf("GatewayClass eg.spec.controllerName = %q, want %q", gcOut, want)
+		t.Errorf("GatewayClass y-cluster.spec.controllerName = %q, want %q", gcOut, want)
+	}
+
+	// dns-hint-ip annotation landed: this is the contract ystack's
+	// y-k8s-ingress-hosts (and any future host-side resolver tool)
+	// reads to find the host-routable address without user-side
+	// config. Pinned because consumers cite the exact annotation key.
+	hintOut := kubectl(t, "get", "gatewayclass", "y-cluster",
+		"-o", "jsonpath={.metadata.annotations."+strings.ReplaceAll(envoygateway.DNSHintIPAnnotation, ".", "\\.")+"}")
+	if hintOut != "127.0.0.1" {
+		t.Errorf("GatewayClass y-cluster annotation %s = %q, want 127.0.0.1",
+			envoygateway.DNSHintIPAnnotation, hintOut)
 	}
 }
 
-// TestEnvoyGateway_InstallSkipGatewayClass verifies the opt-out
-// for consumers that bring their own GatewayClass.
-func TestEnvoyGateway_InstallSkipGatewayClass(t *testing.T) {
+// TestEnvoyGateway_InstallEmptyClassNameSkipsApply verifies that
+// passing GatewayClassName="" makes Install skip the GatewayClass
+// apply (controller still installs). This is the test-only path
+// for "controller without a default GatewayClass"; the production
+// CommonConfig.GatewayConfig is all-or-nothing per cluster
+// config, but the underlying Options field stays expressive.
+func TestEnvoyGateway_InstallEmptyClassNameSkipsApply(t *testing.T) {
 	setupCluster(t)
-
-	// Apply the bundle without the default GatewayClass; if a
-	// previous run created one, remove it first so the assertion
-	// below isn't a stale-state false negative.
-	_ = exec.Command("kubectl", "--context="+contextName,
-		"delete", "gatewayclass", "eg-skip-test", "--ignore-not-found").Run()
 
 	if err := envoygateway.Install(context.Background(), envoygateway.Options{
 		ContextName:      contextName,
 		CacheOverride:    sharedEnvoyGatewayCache(t),
 		Logger:           logger(t),
 		ReadyTimeout:     -1,
-		SkipGatewayClass: true,
+		GatewayClassName: "", // explicit: do not apply a GatewayClass
 	}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
-	// The default `eg` GatewayClass may exist from a prior test;
-	// what we want to prove is that SkipGatewayClass doesn't
-	// create a NEW one. The TestEnvoyGateway_InstallAgainstKwok
-	// covers the create path; here we just check the option
-	// was wired (no panic, Install returned nil) -- the negative
-	// behaviour is hard to assert when tests share a cluster.
+	// Tests share the kwok cluster, so a previously-created
+	// GatewayClass may still be present from another test; we
+	// can't assert "no GatewayClass exists". What we can assert
+	// is that Install did not error -- proving the empty-name
+	// path is wired and doesn't crash on the missing resource.
 }
 
 // kubectl runs `kubectl --context=<setup> args...` and returns
