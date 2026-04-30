@@ -31,8 +31,12 @@ func (c *DockerConfig) ApplyDefaults() {
 }
 
 // Validate checks the discriminator and docker-specific invariants.
-// API port and any ingress ports are validated by validateCommon
-// against the shared PortForwards list.
+// docker tunnels the API server through a host port-forward, so a
+// guest:6443 entry in PortForwards is required for kubectl to reach
+// the cluster.
 func (c *DockerConfig) Validate() error {
-	return c.validateCommon(ProviderDocker)
+	if err := c.validateCommon(ProviderDocker); err != nil {
+		return err
+	}
+	return c.requireHostAPIPort()
 }

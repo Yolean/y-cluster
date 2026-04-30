@@ -197,6 +197,7 @@ func TestSchemaIsCanonical(t *testing.T) {
 	// schema (we replace it with const during post-processing).
 	if strings.Contains(str, `"enum": [
             "docker",
+            "multipass",
             "qemu"
           ]`) {
 		t.Fatal("per-provider schema still has the all-providers enum")
@@ -224,11 +225,13 @@ func TestCommonSchemaIsCanonical(t *testing.T) {
 	}
 	str := string(have)
 	// Common schema accepts any known provider value.
-	if !strings.Contains(str, `"docker"`) || !strings.Contains(str, `"qemu"`) {
-		t.Fatal("common.schema.json missing provider enum values")
+	for _, want := range []string{`"docker"`, `"qemu"`, `"multipass"`} {
+		if !strings.Contains(str, want) {
+			t.Fatalf("common.schema.json missing provider enum value %s", want)
+		}
 	}
 	// Per-provider-only fields must NOT appear in the common schema.
-	for _, k := range []string{`"diskSize"`, `"sshPort"`, `"cacheDir"`} {
+	for _, k := range []string{`"diskSize"`, `"sshPort"`, `"cacheDir"`, `"image"`} {
 		if strings.Contains(str, k) {
 			t.Fatalf("common.schema.json must not include provider-specific field %s", k)
 		}

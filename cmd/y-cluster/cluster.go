@@ -15,7 +15,7 @@ import (
 // y-cluster-local-detect:
 //
 //   - With no positional arg, prints the detected backend (one
-//     of: docker, qemu) on stdout.
+//     of: docker, qemu, multipass) on stdout.
 //   - With a positional arg matching the detected backend, prints
 //     "up" and exits 0. Any other arg exits non-zero — the bash
 //     equivalent script returned 1 to signal "the asked-about
@@ -29,10 +29,10 @@ func detectCmd() *cobra.Command {
 		Use:   "detect [backend]",
 		Short: "Detect which provisioner serves the cluster behind the kubeconfig context",
 		Long: `Reads the kubeconfig cluster name for --context (default "local") and
-probes each supported backend (docker, qemu) to find which one is
-running. Prints the backend on stdout, or — when called with a
-positional argument equal to the detected backend — prints "up" and
-exits 0. Any other positional value exits non-zero.
+probes each supported backend (docker, qemu, multipass) to find
+which one is running. Prints the backend on stdout, or — when
+called with a positional argument equal to the detected backend —
+prints "up" and exits 0. Any other positional value exits non-zero.
 
 Replaces ystack's y-cluster-local-detect.`,
 		Args: cobra.MaximumNArgs(1),
@@ -84,8 +84,9 @@ func nodeBinaryCmd(name string, run nodeRunFn) *cobra.Command {
 		Use:   name + " [-- args...]",
 		Short: "Run " + name + " on the local cluster's node",
 		Long: `Routes <args> to the cluster node's ` + name + `:
-  docker backend: docker exec -i <container> ` + name + ` <args>
-  qemu   backend: ssh ystack@127.0.0.1 sudo k3s ` + name + ` <args>
+  docker    backend: docker exec -i <container> ` + name + ` <args>
+  qemu      backend: ssh ystack@127.0.0.1 sudo k3s ` + name + ` <args>
+  multipass backend: multipass exec <vm> -- sudo k3s ` + name + ` <args>
 
 stdin / stdout / stderr are passthrough — pipes work end to end.
 --context defaults to "local". Use -- to forward flags that

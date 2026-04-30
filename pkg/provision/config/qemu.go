@@ -41,6 +41,9 @@ func (c *QEMUConfig) Validate() error {
 	if err := c.validateCommon(ProviderQEMU); err != nil {
 		return err
 	}
+	if err := c.requireHostAPIPort(); err != nil {
+		return err
+	}
 	if c.SSHPort == "" {
 		return errInvalid("sshPort must not be empty after defaults")
 	}

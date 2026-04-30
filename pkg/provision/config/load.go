@@ -49,9 +49,10 @@ func LoadProvision(dir string) (any, error) {
 		provider = DiscoverProvider()
 		if provider == "" {
 			return nil, fmt.Errorf(
-				"%s: provider unset and discovery found neither qemu "+
-					"(needs /dev/kvm + qemu-system-x86_64 on Linux) nor docker "+
-					"(needs `docker info` to succeed); set `provider:` in the config",
+				"%s: provider unset and discovery found none of multipass "+
+					"(needs `multipass version`), qemu (needs /dev/kvm + "+
+					"qemu-system-x86_64 on Linux), or docker (needs "+
+					"`docker info` to succeed); set `provider:` in the config",
 				path)
 		}
 	}
@@ -69,7 +70,13 @@ func LoadProvision(dir string) (any, error) {
 			return nil, err
 		}
 		return &c, nil
+	case ProviderMultipass:
+		var c MultipassConfig
+		if err := configfile.Load(dir, ProvisionFilename, &c); err != nil {
+			return nil, err
+		}
+		return &c, nil
 	default:
-		return nil, fmt.Errorf("%s: unknown provider %q (supported: qemu, docker)", path, hdr.Provider)
+		return nil, fmt.Errorf("%s: unknown provider %q (supported: docker, multipass, qemu)", path, hdr.Provider)
 	}
 }

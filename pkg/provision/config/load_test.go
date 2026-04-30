@@ -52,7 +52,7 @@ func TestLoadProvision_MissingProvider_DiscoveryFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error when discovery returns empty")
 	}
-	for _, want := range []string{"discovery", "qemu", "docker", "set `provider:`"} {
+	for _, want := range []string{"discovery", "qemu", "docker", "multipass", "set `provider:`"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error should mention %q, got %v", want, err)
 		}

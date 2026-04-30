@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
+	"github.com/Yolean/y-cluster/pkg/multipassexec"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -16,13 +17,17 @@ import (
 // import`) without buffering.
 //
 // Routing per backend:
-//   - docker: exec via the Docker daemon API (stdcopy demux);
-//     dockerexec.ExitError on non-zero exec exit.
-//   - qemu:   `sudo k3s ctr <args>` over an x/crypto/ssh session;
-//     *ssh.ExitError on non-zero remote exit.
+//   - docker:    exec via the Docker daemon API (stdcopy demux);
+//                dockerexec.ExitError on non-zero exec exit.
+//   - qemu:      `sudo k3s ctr <args>` over an x/crypto/ssh session;
+//                *ssh.ExitError on non-zero remote exit.
+//   - multipass: `multipass exec <name> -- sudo k3s ctr <args>`;
+//                exit status comes from the local multipass CLI.
 //
 // `ctr` rather than `k3s ctr` for docker because the rancher/k3s
-// container image puts ctr on PATH directly.
+// container image puts ctr on PATH directly. qemu and multipass
+// both wrap in `sudo k3s ctr` because that's how the binary is
+// surfaced on a k3s VM node.
 func RunCtr(ctx context.Context, lr *LookupResult, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	return runOnNode(ctx, lr, "ctr", args, stdin, stdout, stderr)
 }
@@ -48,6 +53,9 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 			Host: lr.SSHHost, Port: lr.SSHPort,
 			User: lr.SSHUser, KeyPath: lr.SSHKey,
 		}, buildQemuRemote(binary, args), stdin, stdout, stderr)
+	case BackendMultipass:
+		return multipassexec.ExecStream(ctx, lr.MultipassName,
+			buildVMNodeRemote(binary, args), stdin, stdout, stderr)
 	default:
 		return fmt.Errorf("unsupported backend %q", lr.Backend)
 	}
@@ -58,6 +66,13 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 // `k3s` so we always wrap in `sudo k3s <binary>`. Args are
 // shell-quoted because ssh executes the string under /bin/sh.
 func buildQemuRemote(binary string, args []string) string {
+	return buildVMNodeRemote(binary, args)
+}
+
+// buildVMNodeRemote is the shared shape used by qemu (over SSH) and
+// multipass (over `multipass exec`). Both run sh inside the VM and
+// k3s puts ctr/crictl behind `sudo k3s`.
+func buildVMNodeRemote(binary string, args []string) string {
 	return "sudo k3s " + binary + shellQuoteJoin(args)
 }
 
