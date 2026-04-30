@@ -92,6 +92,15 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: sudo snap install multipass
+        # The multipass daemon socket lands as 0660 root:multipass-admin
+        # and the GHA `runner` user isn't in that group. `multipass
+        # version` doesn't hit the socket so CheckPrerequisites passes,
+        # but the first call that does (`multipass info`) errors with
+        # "multipass socket access denied" and the test fails in ~10 s.
+        # chmod 666 is the standard CI crutch -- the runner is
+        # ephemeral, the socket isn't shared. usermod -aG would need
+        # `sg multipass-admin -c ...` wrapping every subsequent step.
+      - run: sudo chmod 666 /var/snap/multipass/common/multipass_socket
       - run: |
           export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
           touch "$KUBECONFIG"
