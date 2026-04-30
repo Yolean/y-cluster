@@ -151,6 +151,14 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		zap.String("memory", cfg.Memory),
 		zap.String("cpus", cfg.CPUs),
 	)
+	// ContainerCreate doesn't auto-pull (unlike `docker run`), so a
+	// fresh host -- CI runner, new developer machine -- would error
+	// out with "No such image". Pull first when the image isn't
+	// already on the daemon.
+	if err := dockerexec.PullIfMissing(ctx, cli, image); err != nil {
+		_ = cli.Close()
+		return nil, err
+	}
 	createRes, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: cfg.Name,
 		// moby's client rejects the request when both top-level

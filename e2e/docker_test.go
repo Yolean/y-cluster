@@ -97,6 +97,20 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 	// Clean any leftover container from a previous failed run.
 	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
 
+	// Cold-start regression guard: remove both candidate k3s images
+	// from the daemon so docker.Provision exercises the auto-pull
+	// path on every CI run, not just the first one. Without this,
+	// the test would pass on a host that already had the image and
+	// silently miss a regression of the "ContainerCreate doesn't
+	// auto-pull" bug. We don't fail on rmi errors -- the image may
+	// genuinely be absent on a fresh host.
+	for _, img := range []string{
+		config.MirrorImage(cfg.K3s.Version),
+		config.UpstreamImage(cfg.K3s.Version),
+	} {
+		_ = exec.Command("docker", "rmi", "-f", img).Run()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 

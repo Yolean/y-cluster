@@ -47,6 +47,34 @@ func Remove(ctx context.Context, cli *client.Client, name string) error {
 	return nil
 }
 
+// PullIfMissing fetches the named image from its registry when the
+// daemon doesn't already have it. ImageInspect returns a NotFound
+// error when the image is absent; that's the only case we pull,
+// keeping warm caches free of round trips. Errors during the pull
+// surface via ImagePullResponse.Wait so a flaky registry doesn't
+// silently produce a half-resolved image.
+//
+// `docker run` auto-pulls; ContainerCreate doesn't. The docker
+// provisioner is the only ContainerCreate caller in y-cluster, but
+// the helper lives here so anything else that takes the daemon-API
+// path inherits the same behaviour.
+func PullIfMissing(ctx context.Context, cli *client.Client, image string) error {
+	if _, err := cli.ImageInspect(ctx, image); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect %s: %w", image, err)
+	}
+	resp, err := cli.ImagePull(ctx, image, client.ImagePullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull %s: %w", image, err)
+	}
+	defer resp.Close()
+	if err := resp.Wait(ctx); err != nil {
+		return fmt.Errorf("pull %s: %w", image, err)
+	}
+	return nil
+}
+
 // IsRunning reports whether the container exists and is in the
 // Running state. Returns (false, nil) for "not found"; only
 // daemon-level errors propagate.
