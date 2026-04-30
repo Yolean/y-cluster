@@ -29,7 +29,7 @@ func TestLoadProvision_QEMU(t *testing.T) {
 	if c.Name != "foo" {
 		t.Fatalf("Name: %q", c.Name)
 	}
-	if c.DiskSize != "40G" {
+	if c.DiskSize != "10G" {
 		t.Fatalf("default DiskSize missing: %q", c.DiskSize)
 	}
 	if c.Dir == "" {

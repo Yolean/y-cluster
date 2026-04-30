@@ -6,7 +6,7 @@ package config
 type QEMUConfig struct {
 	CommonConfig `yaml:",inline" json:",inline"`
 
-	DiskSize string `yaml:"diskSize,omitempty"     json:"diskSize,omitempty"     jsonschema:"default=40G,description=qcow2 disk size as a [num][KMGT] string."`
+	DiskSize string `yaml:"diskSize,omitempty"     json:"diskSize,omitempty"     jsonschema:"default=10G,description=qcow2 disk size as a [num][KMGT] string."`
 	SSHPort  string `yaml:"sshPort,omitempty"      json:"sshPort,omitempty"      jsonschema:"default=2222,description=Host port forwarded to the VM's SSH server. Added on top of CommonConfig.PortForwards."`
 	CacheDir string `yaml:"cacheDir,omitempty"     json:"cacheDir,omitempty"     jsonschema:"description=Directory for VM disk and cloud image cache. Empty: $HOME/.cache/y-cluster-qemu."`
 

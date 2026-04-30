@@ -48,9 +48,9 @@ type Config struct {
 // diskSize is the multipass --disk argument. Hardcoded rather than
 // surfaced in MultipassConfig because the y-cluster baseline (k3s
 // + an Ubuntu rootfs + room for image pulls) fits comfortably under
-// 40G and no consumer has needed to override it. Promote to a
+// 10G and no consumer has needed to override it. Promote to a
 // MultipassConfig field when there's a real call site that wants to.
-const diskSize = "40G"
+const diskSize = "10G"
 
 // K3s mirrors qemu.K3s -- the runtime view of K3sConfig.
 type K3s struct {
