@@ -233,4 +233,27 @@ func TestCommonSchemaIsCanonical(t *testing.T) {
 			t.Fatalf("common.schema.json must not include provider-specific field %s", k)
 		}
 	}
+
+	// `provider` is required in per-provider schemas but optional
+	// in the common schema -- the runtime auto-discovers it via
+	// DiscoverProvider when a common-shape config omits the field.
+	// We parse the JSON tree rather than string-grep because the
+	// schema also contains a PortForward definition with its own
+	// required: [host, guest], and we don't want to confuse the
+	// two.
+	var doc map[string]any
+	if err := json.Unmarshal(have, &doc); err != nil {
+		t.Fatalf("schema does not parse: %v", err)
+	}
+	defs, _ := doc["$defs"].(map[string]any)
+	cc, _ := defs["CommonConfig"].(map[string]any)
+	if cc == nil {
+		t.Fatal("common schema missing $defs.CommonConfig")
+	}
+	required, _ := cc["required"].([]any)
+	for _, item := range required {
+		if name, _ := item.(string); name == "provider" {
+			t.Fatalf("common.schema.json must NOT mark provider as required (auto-discovery covers the omitted case); required: %v", required)
+		}
+	}
 }

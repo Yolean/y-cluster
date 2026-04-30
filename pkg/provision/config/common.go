@@ -53,7 +53,7 @@ var AllProviders = []string{ProviderDocker, ProviderQEMU}
 // Per-provider Validate() must call validateCommon to enforce the
 // shared invariants (provider discriminator, k3s.version present).
 type CommonConfig struct {
-	Provider     string        `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Per-provider schemas narrow this to a single literal."`
+	Provider     string        `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (Linux+/dev/kvm+qemu-system-x86_64 -> qemu; else reachable docker daemon -> docker). Per-provider schemas narrow this to a single literal and keep it required."`
 	Name         string        `yaml:"name,omitempty"         json:"name,omitempty"         jsonschema:"default=y-cluster,description=Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files."`
 	Context      string        `yaml:"context,omitempty"      json:"context,omitempty"      jsonschema:"default=local,description=kubeconfig context name to write."`
 	Memory       string        `yaml:"memory,omitempty"       json:"memory,omitempty"       jsonschema:"default=8192,description=Memory in MB. qemu allocates this to the VM; docker passes it to --memory."`

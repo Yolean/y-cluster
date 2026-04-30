@@ -171,7 +171,50 @@ func writeCommonSchema(outPath string, pin pinFile) error {
 	if err != nil {
 		return err
 	}
+	// `provider` is required in the per-provider schemas (and
+	// const-narrowed there), but optional in the common schema:
+	// `LoadProvision` calls `DiscoverProvider` to fill it when a
+	// common-shape config omits the field. Editors validating
+	// against common.schema.json would otherwise flag a perfectly
+	// portable config as invalid.
+	data, err = dropRequired(data, "CommonConfig", "provider")
+	if err != nil {
+		return fmt.Errorf("drop CommonConfig.provider from required: %w", err)
+	}
 	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+}
+
+// dropRequired removes a property from the `required` list of the
+// named definition under $defs. No-op when the property isn't
+// listed (an earlier hand-edit or schema-shape change shouldn't
+// fail the generator). Errors only on unparseable JSON or a
+// missing definition, both of which point at a real bug upstream.
+func dropRequired(data []byte, defName, prop string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	defs, ok := doc["$defs"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("$defs missing or wrong type")
+	}
+	def, ok := defs[defName].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("definition %q missing", defName)
+	}
+	required, _ := def["required"].([]any)
+	out := required[:0]
+	for _, item := range required {
+		if name, _ := item.(string); name != prop {
+			out = append(out, item)
+		}
+	}
+	if len(out) == 0 {
+		delete(def, "required")
+	} else {
+		def["required"] = out
+	}
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // reflectSchema runs invopop on the sample, applies pin
