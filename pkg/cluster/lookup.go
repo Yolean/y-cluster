@@ -53,6 +53,13 @@ const (
 	BackendMultipass Backend = "multipass"
 )
 
+// AllBackends is the canonical list of probed backends. Mirrors
+// config.AllProviders so call sites that need to enumerate every
+// known backend (test helpers, error messages) read from one place
+// and a fourth provisioner only edits this slice plus the constants
+// above. Sorted alphabetically.
+var AllBackends = []Backend{BackendDocker, BackendMultipass, BackendQEMU}
+
 // LookupResult is what Lookup returns when it finds a running
 // cluster matching a kubectl context. The Backend-specific
 // fields (ContainerName for docker; SSH* for qemu; MultipassName
