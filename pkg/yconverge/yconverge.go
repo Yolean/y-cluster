@@ -21,6 +21,27 @@ type Options struct {
 	PrintDeps    bool   // print dependency order and exit
 	SkipChecks   bool   // skip checks after apply
 
+	// Selector is a `kubectl apply -l <selector>` filter applied to
+	// every kubectl invocation in the apply phase. Empty (default)
+	// means "no filter": every resource the kustomize tree renders
+	// gets applied. Matches the syntax kubectl accepts directly --
+	// equality, set, and inequality forms ("app=foo",
+	// "app in (a,b)", "!app").
+	//
+	// The filter is ANDed with the converge-mode label routing in
+	// applyGroups, so a `-l app=foo` user run still picks the right
+	// apply strategy per resource: a `converge-mode=replace`,
+	// `app=foo` resource takes the replace path; an
+	// `app=foo` resource without a converge-mode label takes the
+	// default path; an `app=bar` resource is skipped entirely.
+	//
+	// Propagated to dependency recursion so a `-l app=foo` run on a
+	// target with deps applies only the matching subset of every
+	// dep too -- otherwise the user would get unfiltered apply on
+	// deps and a filtered apply on the target, which is incoherent
+	// when both sides should be a coherent slice of the system.
+	Selector string
+
 	// Stdout is where user-facing progress and forwarded kubectl
 	// output is written. nil -> os.Stdout. Tests pass a buffer to
 	// capture; the CLI leaves it nil. Distinct from the zap logger
@@ -147,7 +168,13 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				// Earlier this field was dropped, so deps re-applied
 				// even when the user only wanted a health check.
 				ChecksOnly: opts.ChecksOnly,
-				Stdout:     opts.Stdout,
+				// Selector propagates so a `-l app=foo` run on a
+				// target with deps filters every dep's apply by the
+				// same selector. Without propagation the deps would
+				// apply unfiltered while the target applied filtered,
+				// which is incoherent.
+				Selector: opts.Selector,
+				Stdout:   opts.Stdout,
 			}
 			if _, err := convergeSingle(ctx, depOpts, logger); err != nil {
 				return nil, fmt.Errorf("dependency %s: %w", userPath(step), err)

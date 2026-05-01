@@ -197,3 +197,103 @@ func TestApplyGroups_TolerateContract(t *testing.T) {
 		}
 	}
 }
+
+// findSelector returns the --selector=... arg from inv.args, or ""
+// if none. Used by the selector-composition tests below.
+func findSelector(args []string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, "--selector=") {
+			return strings.TrimPrefix(a, "--selector=")
+		}
+	}
+	return ""
+}
+
+// TestApplyGroups_UserSelectorANDsIntoEveryGroup pins the propagation
+// contract: a non-empty Options.Selector is appended to every group's
+// internal converge-mode selector via comma (kubectl's AND separator).
+// Without this, a -l app=foo run would route correctly per mode but
+// still apply foo-less resources -- defeating the user's filter.
+func TestApplyGroups_UserSelectorANDsIntoEveryGroup(t *testing.T) {
+	user := "app=foo"
+	groups := applyGroups(Options{
+		Context:      "local",
+		KustomizeDir: "/tmp/k",
+		Selector:     user,
+	})
+	wantSuffix := "," + user
+	for gi, g := range groups {
+		for ii, inv := range g.invocations {
+			sel := findSelector(inv.args)
+			if sel == "" {
+				t.Errorf("group %d (mode=%q) inv %d: no --selector arg: %v", gi, g.mode, ii, inv.args)
+				continue
+			}
+			if !strings.HasSuffix(sel, wantSuffix) {
+				t.Errorf("group %d (mode=%q) inv %d selector %q: missing suffix %q",
+					gi, g.mode, ii, sel, wantSuffix)
+			}
+		}
+	}
+}
+
+// TestApplyGroups_EmptySelectorLeavesInternalSelectorAlone is the
+// inverse: with no user selector, the internal converge-mode body is
+// emitted verbatim. Catches a regression where the user-selector
+// branch always appended a trailing comma.
+func TestApplyGroups_EmptySelectorLeavesInternalSelectorAlone(t *testing.T) {
+	groups := applyGroups(Options{Context: "local", KustomizeDir: "/tmp/k"})
+
+	// create's selector should be exactly the converge-mode body.
+	createSel := findSelector(groups[0].invocations[0].args)
+	want := ConvergeModeLabel + "=create"
+	if createSel != want {
+		t.Errorf("create selector: %q want %q", createSel, want)
+	}
+
+	// default's selector should not end with a stray comma.
+	defSel := findSelector(groups[4].invocations[0].args)
+	if strings.HasSuffix(defSel, ",") {
+		t.Errorf("default selector trailing comma: %q", defSel)
+	}
+}
+
+// TestApplyGroups_UserSelectorPreservesDefaultExclusions: combining a
+// user selector with the default group's negative converge-mode
+// selector must not clobber any of the four !=mode terms.
+func TestApplyGroups_UserSelectorPreservesDefaultExclusions(t *testing.T) {
+	groups := applyGroups(Options{
+		Context:      "local",
+		KustomizeDir: "/tmp/k",
+		Selector:     "app=foo",
+	})
+	defSel := findSelector(groups[4].invocations[0].args)
+	for _, mode := range []string{"create", "replace", "serverside", "serverside-force"} {
+		want := ConvergeModeLabel + "!=" + mode
+		if !strings.Contains(defSel, want) {
+			t.Errorf("default selector lost %q after user-selector AND: %q", want, defSel)
+		}
+	}
+	if !strings.Contains(defSel, "app=foo") {
+		t.Errorf("default selector missing user term app=foo: %q", defSel)
+	}
+}
+
+// TestApplyGroups_UserSelectorWithSetSyntax exercises kubectl's `in`
+// set form, which contains parentheses and spaces. yconverge composes
+// by literal `,` concat -- the body should be passed through
+// unmodified so kubectl's selector parser sees the same string the
+// user typed.
+func TestApplyGroups_UserSelectorWithSetSyntax(t *testing.T) {
+	user := "tier in (frontend, backend)"
+	groups := applyGroups(Options{
+		Context:      "local",
+		KustomizeDir: "/tmp/k",
+		Selector:     user,
+	})
+	got := findSelector(groups[0].invocations[0].args)
+	want := ConvergeModeLabel + "=create," + user
+	if got != want {
+		t.Errorf("create selector: %q want %q", got, want)
+	}
+}

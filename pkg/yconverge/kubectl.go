@@ -211,7 +211,23 @@ func applyGroups(opts Options) []applyGroup {
 	}
 	ctxFlag := "--context=" + opts.Context
 	dirFlag := []string{"-k", opts.KustomizeDir}
-	sel := func(eq string) string { return "--selector=" + ConvergeModeLabel + "=" + eq }
+
+	// withUser ANDs the optional user selector (opts.Selector) onto
+	// an internal selector body. Empty user selector means
+	// "no extra filter" and the body is returned untouched. Comma is
+	// kubectl's selector AND separator, so a body like
+	// "yolean.se/converge-mode=create" combined with "app=foo"
+	// becomes "yolean.se/converge-mode=create,app=foo" and only
+	// matches resources that satisfy both halves.
+	withUser := func(body string) string {
+		if opts.Selector == "" {
+			return body
+		}
+		return body + "," + opts.Selector
+	}
+	sel := func(eq string) string {
+		return "--selector=" + withUser(ConvergeModeLabel+"="+eq)
+	}
 
 	withDryRun := func(args ...string) []string {
 		out := append([]string(nil), args...)
@@ -283,10 +299,11 @@ func applyGroups(opts Options) []applyGroup {
 			invocations: []applyStep{
 				{
 					args: withDryRun(ctxFlag, "apply",
-						"--selector="+ConvergeModeLabel+"!=create,"+
-							ConvergeModeLabel+"!=replace,"+
-							ConvergeModeLabel+"!=serverside,"+
-							ConvergeModeLabel+"!=serverside-force"),
+						"--selector="+withUser(
+							ConvergeModeLabel+"!=create,"+
+								ConvergeModeLabel+"!=replace,"+
+								ConvergeModeLabel+"!=serverside,"+
+								ConvergeModeLabel+"!=serverside-force")),
 					stderrTolerate: []string{"no objects passed to apply"},
 				},
 			},
