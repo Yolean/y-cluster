@@ -1,14 +1,23 @@
 name: e2e Release
 
 # Validates that an actually-published y-cluster release asset works
-# end-to-end on the platforms we support. Runs on release publication
-# and can be re-run manually against any published tag. The asset shape
-# is the raw-binary convention from ci.yaml:
+# end-to-end on the platforms we support. The asset shape is the
+# raw-binary convention from ci.yaml:
 # y-cluster_<tag>_<os>_<arch> plus y-cluster_<tag>_checksums.txt.
+#
+# Trigger is the upstream `CI` workflow's completion rather than
+# the `release: published` event. Reason: when a maintainer creates
+# the GitHub Release object via the UI (or `gh release create`
+# without files), `release: published` fires before CI's
+# release-assets job has uploaded anything, and the validator races
+# in to find no assets. Waiting for CI to finish guarantees the
+# release-assets job has run and the binaries + checksums are
+# attached to the release.
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,6 +26,18 @@ on:
 
 jobs:
   serve:
+    # Only run on:
+    #   - workflow_dispatch (manual re-run against any tag)
+    #   - workflow_run completion that was a successful CI on a tag
+    #     (head_branch is the ref name; for tag pushes that's the
+    #     tag itself, e.g. "v0.3.5"). PR/main runs of CI are
+    #     filtered out because they wouldn't have published any
+    #     release assets to validate.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     strategy:
       fail-fast: false
       matrix:
@@ -35,10 +56,10 @@ jobs:
         id: tag
         shell: bash
         run: |
-          if [ -n "${{ github.event.release.tag_name }}" ]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-          else
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
             echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Download release asset and verify checksum
