@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bar-create
+  labels:
+    app: bar
+    yolean.se/converge-mode: create
+data:
+  marker: "target-bar-create"

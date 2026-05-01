@@ -221,6 +221,26 @@ func convergeSingle(ctx context.Context, opts Options, logger *zap.Logger) (*Res
 
 	// Apply (unless checks-only)
 	if !opts.ChecksOnly {
+		// Bail when a non-empty user selector matches nothing in
+		// the kustomize tree. Without this the apply would silently
+		// succeed via the "no objects passed" tolerance baked into
+		// every group's invocation -- a user typo in -l or a stale
+		// label would skip the entire apply with no visible signal.
+		// The cost is one client-side dry-run per converge step
+		// (~100 ms); the benefit is loud failure on intent
+		// mismatches. CHECK_ONLY skips this for the same reason it
+		// skips the apply: nothing to bail on if no apply happens.
+		if opts.Selector != "" {
+			n, err := preflightSelectorMatches(ctx, opts)
+			if err != nil {
+				return nil, fmt.Errorf("preflight selector: %w", err)
+			}
+			if n == 0 {
+				return nil, fmt.Errorf(
+					"selector %q matched no resources in %s; refusing to apply (a silent no-op is a likely user typo)",
+					opts.Selector, userPath(absDir))
+			}
+		}
 		if err := runApply(ctx, opts, logger); err != nil {
 			return nil, fmt.Errorf("apply %s: %w", opts.KustomizeDir, err)
 		}

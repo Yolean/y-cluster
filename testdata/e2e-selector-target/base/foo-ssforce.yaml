@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo-ssforce
+  labels:
+    app: foo
+    yolean.se/converge-mode: serverside-force
+data:
+  marker: "target-foo-ssforce"

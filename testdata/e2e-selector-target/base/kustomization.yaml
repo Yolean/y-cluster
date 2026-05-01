@@ -3,3 +3,11 @@ kind: Kustomization
 resources:
 - foo-target.yaml
 - bar-target.yaml
+- foo-create.yaml
+- bar-create.yaml
+- foo-replace.yaml
+- bar-replace.yaml
+- foo-ssforce.yaml
+- bar-ssforce.yaml
+- foo-serverside.yaml
+- bar-serverside.yaml
