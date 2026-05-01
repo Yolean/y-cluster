@@ -91,7 +91,28 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: sudo snap install multipass
+      - name: Install multipass (with snap-store retry)
+        # snapcraft.io has occasional outages that surface as "unable
+        # to contact snap store" and fail the install after ~40 s. A
+        # bounded retry loop keeps the job green through transient
+        # outages without masking a real install failure (after
+        # MAX_ATTEMPTS the job still fails, with the last error
+        # visible in the log).
+        run: |
+          set -e
+          MAX_ATTEMPTS=4
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            if sudo snap install multipass; then
+              echo "multipass installed on attempt $i"
+              exit 0
+            fi
+            if [ "$i" -lt "$MAX_ATTEMPTS" ]; then
+              echo "snap install attempt $i failed; retrying in 30s"
+              sleep 30
+            fi
+          done
+          echo "snap install failed after $MAX_ATTEMPTS attempts" >&2
+          exit 1
         # The multipass daemon socket lands as 0660 root:multipass-admin
         # and the GHA `runner` user isn't in that group. `multipass
         # version` doesn't hit the socket so CheckPrerequisites passes,
