@@ -1,0 +1,97 @@
+package docker
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/Yolean/y-cluster/pkg/provision/config"
+)
+
+// fakeKubectlOnPATH writes an executable shell script named `kubectl`
+// to a fresh temp dir and prepends that dir to $PATH for the test.
+// pollHostAPIServerReadyz exec's `kubectl` by name, so the resolved
+// binary is the script rather than any real kubectl on the system.
+// `body` is the shell body (no shebang); use `exit 0` for the
+// success case and `exit 1` (with a stderr message) for failure.
+func fakeKubectlOnPATH(t *testing.T, body string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake kubectl shim is /bin/sh-only")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "kubectl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func newProbeTestCluster() *Cluster {
+	return &Cluster{
+		cfg: config.DockerConfig{
+			CommonConfig: config.CommonConfig{Context: "unit-test-ctx"},
+		},
+		logger: zap.NewNop(),
+	}
+}
+
+// First-call success: a kubectl that exits 0 returns nil immediately.
+func TestPollHostAPIServerReadyz_Success(t *testing.T) {
+	fakeKubectlOnPATH(t, "exit 0")
+	c := newProbeTestCluster()
+	if err := c.pollHostAPIServerReadyz(context.Background(), time.Second, 10*time.Millisecond); err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+}
+
+// Always-failing kubectl: deadline trips, the wrapped "never returned
+// 200" error is returned (not ctx.Err()) and carries the context name.
+func TestPollHostAPIServerReadyz_DeadlineHonored(t *testing.T) {
+	fakeKubectlOnPATH(t, `echo 'connection refused' >&2; exit 1`)
+	c := newProbeTestCluster()
+	start := time.Now()
+	err := c.pollHostAPIServerReadyz(context.Background(), 100*time.Millisecond, 20*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected deadline error, got nil")
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("expected wrapped readiness error, got ctx error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/readyz never returned 200") {
+		t.Fatalf("expected readiness deadline message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unit-test-ctx") {
+		t.Fatalf("expected context name in error, got: %v", err)
+	}
+	// Sanity: we shouldn't have run anywhere near the production 60s.
+	if elapsed > 5*time.Second {
+		t.Fatalf("loop ran far longer than the test timeout: %s", elapsed)
+	}
+}
+
+// Caller-cancelled ctx: the loop returns ctx.Err() rather than the
+// readiness deadline message. Guards against a refactor that drops
+// the select { <-ctx.Done() } branch and silently makes the wait
+// non-cancellable.
+func TestPollHostAPIServerReadyz_ContextCanceled(t *testing.T) {
+	fakeKubectlOnPATH(t, `echo failing >&2; exit 1`)
+	c := newProbeTestCluster()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := c.pollHostAPIServerReadyz(ctx, 10*time.Second, 5*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected ctx error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got: %v", err)
+	}
+}
