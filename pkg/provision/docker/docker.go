@@ -205,6 +205,20 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	if err := kubecfg.Import(rawKubeconfig); err != nil {
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
+
+	// k3s.yaml landing in the container doesn't mean the host can
+	// reach the apiserver yet -- the docker port-forward to the
+	// host-mapped 6443 is bound a moment later, and the very next
+	// step (envoygateway.Install -> kubectl apply --server-side)
+	// would otherwise race against it with "dial tcp 127.0.0.1:
+	// 6443: connect: connection refused". Probe the host endpoint
+	// through the merged kubeconfig until /readyz succeeds before
+	// declaring readiness.
+	if err := c.waitForHostAPIServer(ctx); err != nil {
+		dlogs, _ := dockerexec.Logs(ctx, cli, cfg.Name, "100")
+		return nil, fmt.Errorf("wait for host apiserver: %w\ncontainer logs:\n%s", err, dlogs)
+	}
+
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
 
 	// Install the bundled Envoy Gateway (CRDs + controller +
@@ -337,8 +351,11 @@ func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader)
 }
 
 // waitForKubeconfig polls until the k3s-managed kubeconfig appears
-// inside the container. k3s writes /etc/rancher/k3s/k3s.yaml after
-// the apiserver is ready to accept connections.
+// inside the container. k3s writes /etc/rancher/k3s/k3s.yaml when
+// the in-container apiserver socket is bound; the host-side port
+// forward and full apiserver readiness lag behind, so the host
+// must additionally probe via waitForHostAPIServer before any
+// kubectl call against the merged kubeconfig.
 func (c *Cluster) waitForKubeconfig(ctx context.Context) error {
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
@@ -353,6 +370,40 @@ func (c *Cluster) waitForKubeconfig(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// waitForHostAPIServer polls `kubectl get --raw=/readyz` against
+// the merged context until the apiserver responds with a 200. Two
+// host-side concerns lag behind kubeconfig-in-container readiness:
+// docker's userland port forward to 127.0.0.1:HostAPIPort needs a
+// moment to bind, and the apiserver itself takes a beat to advance
+// from "listening" to "ready". /readyz covers both -- a connection
+// refused, a 503 from a still-starting apiserver, or a transport
+// error are all retried.
+func (c *Cluster) waitForHostAPIServer(ctx context.Context) error {
+	deadline := time.Now().Add(60 * time.Second)
+	var lastErr error
+	for {
+		probe := exec.CommandContext(ctx, "kubectl",
+			"--context="+c.cfg.Context,
+			"get", "--raw=/readyz",
+		)
+		// Discard noisy intermediate failures; surface only the
+		// final state via lastErr if we time out.
+		out, err := probe.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		if time.Now().After(deadline) {
+			return fmt.Errorf("apiserver /readyz never returned 200 within 60s on context %q: %v", c.cfg.Context, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
 		}
 	}
 }
