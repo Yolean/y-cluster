@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -131,13 +131,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 
 	c := &Cluster{cfg: cfg, logger: logger, Kubeconfig: kubecfg}
 
-	seedPath, cleanupSeed, err := c.writeCloudInitSeed()
-	if err != nil {
-		return nil, fmt.Errorf("write cloud-init seed: %w", err)
-	}
-	defer cleanupSeed()
-
-	if err := c.launch(ctx, seedPath); err != nil {
+	if err := c.launch(ctx); err != nil {
 		return nil, err
 	}
 
@@ -245,13 +239,11 @@ func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader)
 // before Provision has resolved it.
 func (c *Cluster) VMIP() string { return c.vmIP }
 
-// writeCloudInitSeed renders a minimal cloud-config file in
-// os.TempDir and returns its path along with a cleanup function.
-// multipass reads it via `--cloud-init` once at launch; we don't
-// keep it on disk afterwards. No SSH key plumbing -- `multipass
-// exec` runs as root over the daemon's IPC channel.
-func (c *Cluster) writeCloudInitSeed() (string, func(), error) {
-	body := fmt.Sprintf(`#cloud-config
+// cloudInitBody is the minimal cloud-config we hand to
+// `multipass launch`. No SSH key plumbing -- `multipass exec`
+// runs as root over the daemon's IPC channel.
+func (c *Cluster) cloudInitBody() string {
+	return fmt.Sprintf(`#cloud-config
 hostname: %s
 users:
   - name: ystack
@@ -259,27 +251,21 @@ users:
     shell: /bin/bash
 package_update: false
 `, c.cfg.Name)
-	f, err := os.CreateTemp("", c.cfg.Name+"-cloud-init-*.yaml")
-	if err != nil {
-		return "", func() {}, err
-	}
-	if _, err := f.WriteString(body); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", func() {}, err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", func() {}, err
-	}
-	path := f.Name()
-	return path, func() { _ = os.Remove(path) }, nil
 }
 
 // launch invokes `multipass launch` with the configured shape.
 // Memory takes the qemu/docker convention of plain MB, which we
 // convert to multipass's `<n>M` form.
-func (c *Cluster) launch(ctx context.Context, seedPath string) error {
+//
+// cloud-init is piped via stdin (`--cloud-init -`) rather than
+// referenced as a file path. The snap-packaged multipass on Linux
+// runs the daemon under AppArmor confinement: the auto-connected
+// `home` interface grants the daemon access to `$HOME/*` but not
+// to hidden dotfiles or directories, and `/tmp` is private to the
+// snap. Avoiding the path entirely sidesteps the whole class of
+// confinement issues and works identically on macOS where there is
+// no confinement.
+func (c *Cluster) launch(ctx context.Context) error {
 	c.logger.Info("launching multipass VM",
 		zap.String("name", c.cfg.Name),
 		zap.String("image", c.cfg.Image),
@@ -293,10 +279,10 @@ func (c *Cluster) launch(ctx context.Context, seedPath string) error {
 		"--cpus", c.cfg.CPUs,
 		"--memory", c.cfg.Memory + "M",
 		"--disk", diskSize,
-		"--cloud-init", seedPath,
+		"--cloud-init", "-",
 		c.cfg.Image,
 	}
-	out, err := multipassexec.Run(ctx, nil, args...)
+	out, err := multipassexec.Run(ctx, strings.NewReader(c.cloudInitBody()), args...)
 	if err != nil {
 		return fmt.Errorf("multipass launch: %s: %w", out, err)
 	}
