@@ -374,6 +374,11 @@ func (c *Cluster) waitForKubeconfig(ctx context.Context) error {
 	}
 }
 
+const (
+	hostAPIServerReadyTimeout  = 60 * time.Second
+	hostAPIServerReadyInterval = time.Second
+)
+
 // waitForHostAPIServer polls `kubectl get --raw=/readyz` against
 // the merged context until the apiserver responds with a 200. Two
 // host-side concerns lag behind kubeconfig-in-container readiness:
@@ -388,8 +393,16 @@ func (c *Cluster) waitForKubeconfig(ctx context.Context) error {
 // the same way -- using kubectl here keeps the readiness probe on
 // the same code path that the very next caller will use.
 func (c *Cluster) waitForHostAPIServer(ctx context.Context) error {
+	return c.pollHostAPIServerReadyz(ctx, hostAPIServerReadyTimeout, hostAPIServerReadyInterval)
+}
+
+// pollHostAPIServerReadyz is the parameterised body of
+// waitForHostAPIServer; the timeout and interval are arguments so
+// tests can drive the loop with a fake kubectl on $PATH at sub-second
+// resolution.
+func (c *Cluster) pollHostAPIServerReadyz(ctx context.Context, timeout, interval time.Duration) error {
 	c.logger.Info("waiting for host apiserver", zap.String("context", c.cfg.Context))
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
 		probe := exec.CommandContext(ctx, "kubectl",
@@ -404,12 +417,12 @@ func (c *Cluster) waitForHostAPIServer(ctx context.Context) error {
 		}
 		lastErr = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 		if time.Now().After(deadline) {
-			return fmt.Errorf("apiserver /readyz never returned 200 within 60s on context %q: %v", c.cfg.Context, lastErr)
+			return fmt.Errorf("apiserver /readyz never returned 200 within %s on context %q: %v", timeout, c.cfg.Context, lastErr)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(interval):
 		}
 	}
 }
