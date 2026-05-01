@@ -382,7 +382,13 @@ func (c *Cluster) waitForKubeconfig(ctx context.Context) error {
 // from "listening" to "ready". /readyz covers both -- a connection
 // refused, a 503 from a still-starting apiserver, or a transport
 // error are all retried.
+//
+// We shell out to kubectl rather than dialing the apiserver
+// directly because envoygateway.Install drives the host kubeconfig
+// the same way -- using kubectl here keeps the readiness probe on
+// the same code path that the very next caller will use.
 func (c *Cluster) waitForHostAPIServer(ctx context.Context) error {
+	c.logger.Info("waiting for host apiserver", zap.String("context", c.cfg.Context))
 	deadline := time.Now().Add(60 * time.Second)
 	var lastErr error
 	for {
