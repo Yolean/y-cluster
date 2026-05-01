@@ -78,6 +78,44 @@ func TestPollHostAPIServerReadyz_DeadlineHonored(t *testing.T) {
 	}
 }
 
+// Every PortBinding emitted by buildHostConfig must have a valid
+// HostIP. The zero value of netip.Addr is `invalid`, which moby
+// v1.54+ marshals to an empty JSON string and the Docker Engine
+// daemon (28.x on ubuntu-latest) silently drops -- the container
+// starts but NetworkSettings.Ports comes back as `{}` and the host
+// cannot reach the apiserver. Regression guard for the
+// silent-drop bug surfaced via Yolean/ystack PR 76.
+func TestBuildHostConfig_PortBindingsHaveValidHostIP(t *testing.T) {
+	cfg := config.DockerConfig{
+		CommonConfig: config.CommonConfig{
+			PortForwards: []config.PortForward{
+				{Host: "6443", Guest: "6443"},
+				{Host: "80", Guest: "80"},
+				{Host: "443", Guest: "443"},
+				{Host: "8944", Guest: "8944"},
+			},
+		},
+	}
+	hc, err := buildHostConfig(cfg)
+	if err != nil {
+		t.Fatalf("buildHostConfig: %v", err)
+	}
+	if got, want := len(hc.PortBindings), 4; got != want {
+		t.Fatalf("PortBindings length: got %d, want %d", got, want)
+	}
+	for guest, bindings := range hc.PortBindings {
+		if len(bindings) == 0 {
+			t.Errorf("PortBindings[%s] empty", guest)
+			continue
+		}
+		for _, b := range bindings {
+			if !b.HostIP.IsValid() {
+				t.Errorf("PortBindings[%s][HostPort=%s] HostIP %v is invalid -- docker daemon will silently drop this binding", guest, b.HostPort, b.HostIP)
+			}
+		}
+	}
+}
+
 // Caller-cancelled ctx: the loop returns ctx.Err() rather than the
 // readiness deadline message. Guards against a refactor that drops
 // the select { <-ctx.Done() } branch and silently makes the wait
