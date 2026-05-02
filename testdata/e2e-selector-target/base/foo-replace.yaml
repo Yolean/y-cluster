@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo-replace
+  labels:
+    app: foo
+    yolean.se/converge-mode: replace
+data:
+  marker: "target-foo-replace"

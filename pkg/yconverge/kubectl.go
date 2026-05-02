@@ -96,6 +96,47 @@ func runApplyInvocation(ctx context.Context, step applyStep, out io.Writer) erro
 	return fmt.Errorf("kubectl %s: %w", argSummary(step.args), err)
 }
 
+// preflightSelectorMatches counts the resources `kubectl apply -k`
+// would produce under opts.KustomizeDir, narrowed by opts.Selector.
+// Used by convergeSingle to refuse a no-op apply when the user's
+// selector matches nothing in the kustomize tree -- silent success
+// is the kind of surprise users tend to read as "everything's fine"
+// rather than "the selector typo skipped the apply".
+//
+// --dry-run=client renders the kustomize tree and applies the
+// selector locally (no apiserver round-trip), so the preflight is
+// fast even on slow connections. `-o name` prints `<kind>/<name>`
+// per matched resource -- one line each, easy to count.
+//
+// kubectl's behaviour on a zero-match selector: it exits 1 and
+// writes "no objects passed to apply" on stderr. We catch that
+// shape here and return (0, nil) -- the caller bails with a clear
+// message. Any other non-zero exit propagates.
+func preflightSelectorMatches(ctx context.Context, opts Options) (int, error) {
+	args := []string{
+		"--context=" + opts.Context,
+		"apply", "--dry-run=client",
+		"-k", opts.KustomizeDir,
+		"-l", opts.Selector,
+		"-o", "name",
+	}
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(stderr.String(), "no objects passed to apply") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("kubectl %s: %s: %w", argSummary(args), strings.TrimSpace(stderr.String()), err)
+	}
+	trimmed := strings.TrimSpace(stdout.String())
+	if trimmed == "" {
+		return 0, nil
+	}
+	return strings.Count(trimmed, "\n") + 1, nil
+}
+
 // argSummary returns a short description of an argv for error
 // messages. The full argv can be long (kustomize paths, jsonpath
 // specs); we keep the first three meaningful entries so the
@@ -211,7 +252,23 @@ func applyGroups(opts Options) []applyGroup {
 	}
 	ctxFlag := "--context=" + opts.Context
 	dirFlag := []string{"-k", opts.KustomizeDir}
-	sel := func(eq string) string { return "--selector=" + ConvergeModeLabel + "=" + eq }
+
+	// withUser ANDs the optional user selector (opts.Selector) onto
+	// an internal selector body. Empty user selector means
+	// "no extra filter" and the body is returned untouched. Comma is
+	// kubectl's selector AND separator, so a body like
+	// "yolean.se/converge-mode=create" combined with "app=foo"
+	// becomes "yolean.se/converge-mode=create,app=foo" and only
+	// matches resources that satisfy both halves.
+	withUser := func(body string) string {
+		if opts.Selector == "" {
+			return body
+		}
+		return body + "," + opts.Selector
+	}
+	sel := func(eq string) string {
+		return "--selector=" + withUser(ConvergeModeLabel+"="+eq)
+	}
 
 	withDryRun := func(args ...string) []string {
 		out := append([]string(nil), args...)
@@ -283,10 +340,11 @@ func applyGroups(opts Options) []applyGroup {
 			invocations: []applyStep{
 				{
 					args: withDryRun(ctxFlag, "apply",
-						"--selector="+ConvergeModeLabel+"!=create,"+
-							ConvergeModeLabel+"!=replace,"+
-							ConvergeModeLabel+"!=serverside,"+
-							ConvergeModeLabel+"!=serverside-force"),
+						"--selector="+withUser(
+							ConvergeModeLabel+"!=create,"+
+								ConvergeModeLabel+"!=replace,"+
+								ConvergeModeLabel+"!=serverside,"+
+								ConvergeModeLabel+"!=serverside-force")),
 					stderrTolerate: []string{"no objects passed to apply"},
 				},
 			},

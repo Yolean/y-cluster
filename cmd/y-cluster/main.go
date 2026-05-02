@@ -193,6 +193,11 @@ Subcommands of the yconverge primitive:
   --skip-checks     apply but don't verify (useful in
                     --dry-run=server)
   --dry-run=server  validate against the apiserver, no mutation
+  -l, --selector    kubectl label selector applied to every apply
+                    invocation. ANDed with the converge-mode label
+                    routing so a -l app=foo run still picks the right
+                    apply strategy per resource. Propagates to deps so
+                    a filtered run is filtered everywhere.
 
 Define checks in yconverge.cue:
 
@@ -234,6 +239,8 @@ Symlink the binary as kubectl-yconverge for kubectl-plugin use.`,
 	cmd.Flags().BoolVar(&opts.ChecksOnly, "checks-only", false, "run checks without applying")
 	cmd.Flags().BoolVar(&opts.PrintDeps, "print-deps", false, "print dependency order and exit")
 	cmd.Flags().BoolVar(&opts.SkipChecks, "skip-checks", false, "skip checks after apply")
+	cmd.Flags().StringVarP(&opts.Selector, "selector", "l", "",
+		"label selector (kubectl -l form) applied to every kubectl invocation; propagates to dependencies")
 
 	if err := cmd.MarkFlagRequired("context"); err != nil {
 		panic(err)

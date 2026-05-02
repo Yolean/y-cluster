@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bar-serverside
+  labels:
+    app: bar
+    yolean.se/converge-mode: serverside
+data:
+  marker: "target-bar-serverside"

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo-serverside
+  labels:
+    app: foo
+    yolean.se/converge-mode: serverside
+data:
+  marker: "target-foo-serverside"

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo-create
+  labels:
+    app: foo
+    yolean.se/converge-mode: create
+data:
+  marker: "target-foo-create"
