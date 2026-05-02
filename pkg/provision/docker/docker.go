@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -288,10 +289,19 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse guest port %q: %w", pf.Guest, err)
 		}
-		// HostIP zero value binds 0.0.0.0 (Docker's default for
-		// `-p <host>:<container>` without a host IP). HostPort
-		// empty lets docker pick a free port.
-		bindings[guest] = append(bindings[guest], network.PortBinding{HostPort: pf.Host})
+		// HostIP must be set explicitly to a valid netip.Addr.
+		// The zero value is `invalid IP`, which moby v1.54+
+		// renders as an empty JSON string and the Docker Engine
+		// daemon (28.x) silently drops the binding from
+		// NetworkSettings.Ports -- the container starts but
+		// nothing is published to the host, so kubectl can't
+		// reach the apiserver. Mirroring `docker run -p ...`
+		// semantics, IPv4Unspecified ("0.0.0.0") binds on every
+		// interface. HostPort empty lets docker pick a free port.
+		bindings[guest] = append(bindings[guest], network.PortBinding{
+			HostIP:   netip.IPv4Unspecified(),
+			HostPort: pf.Host,
+		})
 	}
 	hc := &container.HostConfig{
 		Privileged: true,
