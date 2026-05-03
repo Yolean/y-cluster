@@ -140,7 +140,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	}
 	kubecfg.CleanupStale()
 
-	hostConfig, err := buildHostConfig(cfg)
+	hostConfig, exposedPorts, err := buildHostConfig(cfg)
 	if err != nil {
 		_ = cli.Close()
 		return nil, err
@@ -171,6 +171,16 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 			// Gateway as the ingress controller; two of them
 			// would fight over host:80/:443.
 			Cmd: []string{"server", "--tls-san=127.0.0.1", "--disable=traefik"},
+			// ExposedPorts must list every guest port carried by
+			// HostConfig.PortBindings. The Docker CLI auto-fills
+			// this when you `-p`; the moby SDK does not. Engine
+			// 28+ silently drops bindings that lack an
+			// ExposedPorts entry in some request shapes (issue
+			// #16: NetworkSettings.Ports == {} on ubuntu-latest
+			// when invoked via the released binary from bash,
+			// despite the in-process e2e succeeding on the same
+			// runner).
+			ExposedPorts: exposedPorts,
 		},
 		HostConfig: hostConfig,
 	})
@@ -275,33 +285,46 @@ func writeRegistriesToContainer(ctx context.Context, cli *client.Client, contain
 }
 
 // buildHostConfig translates the YAML-shaped DockerConfig into
-// the moby HostConfig. Encapsulated so the Provision code path
-// stays linear.
+// the moby HostConfig + the matching Config.ExposedPorts set.
+// Both are required for the daemon to publish bindings:
+//
+//   - HostConfig.PortBindings tells the daemon "publish these
+//     guest ports on these host ports."
+//   - Config.ExposedPorts declares the same guest ports as the
+//     container's exposed surface. The Docker CLI's `docker run
+//     -p ...` auto-fills both; the SDK's ContainerCreate does
+//     NOT and Engine 28+ silently drops bindings when ExposedPorts
+//     is missing in some request shapes -- the container starts
+//     but NetworkSettings.Ports comes back as `{}` and the host
+//     never sees a forward (issue #16).
 //
 // PortBindings come straight from cfg.PortForwards, which is
 // where the API port (6443) and any ingress ports (80/443/...)
 // are declared. Validation in CommonConfig guarantees a 6443
 // entry exists, so the host's kubectl can reach the API server.
-func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, error) {
+func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.PortSet, error) {
 	bindings := network.PortMap{}
+	exposed := network.PortSet{}
 	for _, pf := range cfg.PortForwards {
 		guest, err := network.ParsePort(pf.Guest)
 		if err != nil {
-			return nil, fmt.Errorf("parse guest port %q: %w", pf.Guest, err)
+			return nil, nil, fmt.Errorf("parse guest port %q: %w", pf.Guest, err)
 		}
 		// HostIP must be set explicitly to a valid netip.Addr.
 		// The zero value is `invalid IP`, which moby v1.54+
 		// renders as an empty JSON string and the Docker Engine
 		// daemon (28.x) silently drops the binding from
-		// NetworkSettings.Ports -- the container starts but
-		// nothing is published to the host, so kubectl can't
-		// reach the apiserver. Mirroring `docker run -p ...`
+		// NetworkSettings.Ports. Mirroring `docker run -p ...`
 		// semantics, IPv4Unspecified ("0.0.0.0") binds on every
 		// interface. HostPort empty lets docker pick a free port.
 		bindings[guest] = append(bindings[guest], network.PortBinding{
 			HostIP:   netip.IPv4Unspecified(),
 			HostPort: pf.Host,
 		})
+		// Same guest port lands in ExposedPorts; the daemon
+		// requires the pair for `docker run -p`-equivalent
+		// publish semantics on Engine 28+.
+		exposed[guest] = struct{}{}
 	}
 	hc := &container.HostConfig{
 		Privileged: true,
@@ -314,7 +337,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, error) {
 	if cfg.Memory != "" {
 		mb, err := atoi(cfg.Memory)
 		if err != nil {
-			return nil, fmt.Errorf("parse memory %q: %w", cfg.Memory, err)
+			return nil, nil, fmt.Errorf("parse memory %q: %w", cfg.Memory, err)
 		}
 		hc.Memory = int64(mb) * 1024 * 1024
 	}
@@ -323,11 +346,11 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, error) {
 		// use-case and would need float parsing.
 		n, err := atoi(cfg.CPUs)
 		if err != nil {
-			return nil, fmt.Errorf("parse cpus %q: %w", cfg.CPUs, err)
+			return nil, nil, fmt.Errorf("parse cpus %q: %w", cfg.CPUs, err)
 		}
 		hc.NanoCPUs = int64(n) * 1_000_000_000
 	}
-	return hc, nil
+	return hc, exposed, nil
 }
 
 // Teardown removes the container. keepDisk is ignored -- k3s state
