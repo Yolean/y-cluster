@@ -96,7 +96,7 @@ func TestBuildHostConfig_PortBindingsHaveValidHostIP(t *testing.T) {
 			},
 		},
 	}
-	hc, err := buildHostConfig(cfg)
+	hc, _, err := buildHostConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildHostConfig: %v", err)
 	}
@@ -112,6 +112,52 @@ func TestBuildHostConfig_PortBindingsHaveValidHostIP(t *testing.T) {
 			if !b.HostIP.IsValid() {
 				t.Errorf("PortBindings[%s][HostPort=%s] HostIP %v is invalid -- docker daemon will silently drop this binding", guest, b.HostPort, b.HostIP)
 			}
+		}
+	}
+}
+
+// TestBuildHostConfig_ExposedPortsMirrorBindings is the
+// regression guard for issue #16: ExposedPorts must list every
+// guest port that PortBindings carries. The Docker CLI's
+// `docker run -p ...` auto-fills both; the moby SDK's
+// ContainerCreate does not. Engine 28+ silently drops bindings
+// when ExposedPorts is missing in some request shapes -- the
+// container starts but NetworkSettings.Ports comes back `{}`
+// and the host can't reach the apiserver, despite the
+// in-process go-test path succeeding on the same runner.
+//
+// Both fields must agree key-by-key. Drift here = the bug
+// reappears, possibly in a way that's only visible when the
+// released binary runs under bash on a fresh ubuntu-latest.
+func TestBuildHostConfig_ExposedPortsMirrorBindings(t *testing.T) {
+	cfg := config.DockerConfig{
+		CommonConfig: config.CommonConfig{
+			PortForwards: []config.PortForward{
+				{Host: "6443", Guest: "6443"},
+				{Host: "80", Guest: "80"},
+				{Host: "443", Guest: "443"},
+				{Host: "8944", Guest: "8944"},
+			},
+		},
+	}
+	hc, exposed, err := buildHostConfig(cfg)
+	if err != nil {
+		t.Fatalf("buildHostConfig: %v", err)
+	}
+	if got, want := len(exposed), len(hc.PortBindings); got != want {
+		t.Fatalf("ExposedPorts length %d != PortBindings length %d", got, want)
+	}
+	for guest := range hc.PortBindings {
+		if _, ok := exposed[guest]; !ok {
+			t.Errorf("ExposedPorts missing guest %s carried by PortBindings; Engine 28+ silently drops bindings without a matching ExposedPorts entry", guest)
+		}
+	}
+	// And the inverse: no extra ExposedPorts entries that
+	// don't appear in PortBindings (would mean we're declaring
+	// surface area we don't intend to publish).
+	for guest := range exposed {
+		if _, ok := hc.PortBindings[guest]; !ok {
+			t.Errorf("ExposedPorts has guest %s not carried by PortBindings; declares surface y-cluster doesn't intend to publish", guest)
 		}
 	}
 }
