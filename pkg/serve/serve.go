@@ -67,6 +67,14 @@ func Run(ctx context.Context, opts Options) error {
 	return startBackground(ctx, cfgs, paths, opts)
 }
 
+// DaemonVersion is logged at daemon startup so `serve logs` can
+// report which y-cluster build is running. Set by main.go from
+// versionString() before any serve subcommand executes; pkg/serve
+// itself can't compute the user-facing release tag because that
+// lives in cmd/y-cluster's `var version` (overridable via ldflags
+// at release time).
+var DaemonVersion = "unknown"
+
 // EnsureAction describes what Ensure had to do.
 type EnsureAction int
 
@@ -102,7 +110,8 @@ func (a EnsureAction) String() string {
 // actually changed.
 type EnsureResult struct {
 	Action EnsureAction
-	Ports  []int // every port the daemon now listens on
+	Ports  []int  // every port the daemon now listens on
+	Digest string // sha256 hex of the running daemon's normalized config set
 }
 
 // Ensure launches or restarts the daemon so that the configured
@@ -128,7 +137,13 @@ func Ensure(ctx context.Context, opts Options) (EnsureResult, error) {
 	want := Digest(cfgs)
 	have, healthy := inspectRunning(paths, cfgs)
 	if healthy && have == want {
-		return EnsureResult{Action: EnsureNoop, Ports: ports}, nil
+		// Surface the digest so an operator who suspects the
+		// running daemon is on stale config can compare against
+		// what they expect (the digest of the current `-c`
+		// directories' YAML state). `noop` was the right answer;
+		// the digest tells them WHY -- the new request was
+		// byte-identical to the running config.
+		return EnsureResult{Action: EnsureNoop, Ports: ports, Digest: want}, nil
 	}
 	// Anything we have to clean up before launching counts as a
 	// restart from the operator's view. That includes a stale
@@ -145,7 +160,7 @@ func Ensure(ctx context.Context, opts Options) (EnsureResult, error) {
 	if err := startBackground(ctx, cfgs, paths, opts); err != nil {
 		return EnsureResult{}, err
 	}
-	return EnsureResult{Action: action, Ports: ports}, nil
+	return EnsureResult{Action: action, Ports: ports, Digest: want}, nil
 }
 
 // pidfilePresent is the "is there state on disk to clean up?"
@@ -358,6 +373,24 @@ func runAsDaemon(parent context.Context, cfgs []*Config, paths StatePaths) (retE
 	logger := newJSONLogger()
 	defer func() { _ = logger.Sync() }()
 
+	digest := Digest(cfgs)
+	configDirs := make([]string, len(cfgs))
+	for i, c := range cfgs {
+		configDirs[i] = c.Dir
+	}
+	// Log the binary version + config dirs + digest at startup
+	// so `y-cluster serve logs` answers "what version is running"
+	// and "which -c paths is it serving" without the operator
+	// having to grep state files. These are the questions we
+	// hit when an unexpected `noop` made us doubt the daemon
+	// was on the config we thought it was on.
+	logger.Info("y-cluster serve daemon start",
+		zap.String("version", DaemonVersion),
+		zap.Int("pid", os.Getpid()),
+		zap.Strings("configDirs", configDirs),
+		zap.String("digest", digest),
+	)
+
 	if err := WritePidfile(paths.Pid, os.Getpid()); err != nil {
 		logger.Error("write pidfile", zap.Error(err))
 		return err
@@ -366,7 +399,7 @@ func runAsDaemon(parent context.Context, cfgs []*Config, paths StatePaths) (retE
 		_ = os.Remove(paths.Pid)
 	}()
 
-	snap := map[string]string{"digest": Digest(cfgs)}
+	snap := map[string]string{"digest": digest}
 	data, _ := json.Marshal(snap)
 	if err := os.WriteFile(paths.Config, data, 0o600); err != nil {
 		logger.Error("write config snapshot", zap.Error(err))

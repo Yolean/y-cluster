@@ -233,6 +233,13 @@ func TestEnsure_FirstStartAndNoop(t *testing.T) {
 	if len(res.Ports) != 1 || res.Ports[0] != port {
 		t.Fatalf("ports=%v want [%d]", res.Ports, port)
 	}
+	// Digest is the sha256 hex of the normalized config -- 64
+	// chars. The CLI truncates to 12 for display, but the
+	// EnsureResult carries the full string so callers that want
+	// to compare programmatically can.
+	if len(res.Digest) != 64 {
+		t.Errorf("digest length: got %d, want 64 (full sha256 hex)", len(res.Digest))
+	}
 
 	res2, err := Ensure(context.Background(), Options{
 		ConfigDirs: []string{cfgDir},
@@ -244,6 +251,12 @@ func TestEnsure_FirstStartAndNoop(t *testing.T) {
 	}
 	if res2.Action != EnsureNoop {
 		t.Fatalf("second ensure: action=%s want noop", res2.Action)
+	}
+	// Same config, same digest -- the noop branch must
+	// surface the same value the started branch did, so an
+	// operator who compares the two outputs sees a match.
+	if res2.Digest != res.Digest {
+		t.Errorf("digest noop=%q started=%q; should be identical for same config", res2.Digest, res.Digest)
 	}
 }
 

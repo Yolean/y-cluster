@@ -19,6 +19,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
+	"github.com/Yolean/y-cluster/pkg/serve"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
 
@@ -86,6 +87,13 @@ func versionString() string {
 }
 
 func main() {
+	// Surface the binary's version to pkg/serve so the daemon
+	// startup log reports it. The daemon process is a re-exec
+	// of THIS binary, so main() runs again on the daemon side
+	// and this assignment is what makes `serve logs` answer
+	// "which y-cluster build is running".
+	serve.DaemonVersion = versionString()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
