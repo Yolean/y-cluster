@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
 
 // e2eDockerConfig builds a defaults-applied DockerConfig. The
@@ -176,5 +178,142 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 		if !strings.Contains(string(regOut), want) {
 			t.Fatalf("registries.yaml missing %q.\nGot:\n%s", want, regOut)
 		}
+	}
+}
+
+// TestDocker_Stop is the regression guard for pkg/provision/docker.Stop.
+// Stop is documented to terminate the container while preserving it
+// (no remove) so a follow-up `docker container start` could resume the
+// same instance -- the docker half of the appliance lifecycle that
+// qemu's TestQemu_StopStart already exercises.
+//
+// The Stop function shipped in PR #19 with no e2e gate. This proves:
+//   - the call returns nil for a normally-running container
+//   - the container exists with State.Status == "exited" afterwards
+//     (NOT removed; that's Teardown's job)
+//   - kubectl through the merged context fails to reach the apiserver
+//     because the host port forward is gone
+func TestDocker_Stop(t *testing.T) {
+	skipIfNoDocker(t)
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eDockerConfig("y-cluster-e2e-stop", "36444", "y-cluster-e2e-stop")
+
+	kcfgPath := os.Getenv("KUBECONFIG")
+	if kcfgPath == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+
+	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cluster, err := docker.Provision(ctx, *cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Teardown removes the container even after Stop -- ContainerRemove
+	// is force=true. Cleanup is unconditional so a Stop-without-Teardown
+	// regression doesn't leak a stopped container into the next test.
+	t.Cleanup(func() { _ = cluster.Teardown(false) })
+
+	// Stop the running container. docker.Stop preserves the container
+	// for a follow-up start; it should NOT remove it.
+	if err := docker.Stop(ctx, cfg.Name, logger); err != nil {
+		t.Fatalf("docker.Stop: %v", err)
+	}
+
+	// Container exists and is exited (not removed).
+	statusOut, err := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{.State.Status}}", cfg.Name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect after Stop: %s: %v", statusOut, err)
+	}
+	if got := strings.TrimSpace(string(statusOut)); got != "exited" {
+		t.Fatalf("State.Status after Stop: got %q, want %q (container should be preserved-but-stopped)", got, "exited")
+	}
+
+	// kubectl through the merged context cannot reach the apiserver --
+	// the host port forward dies with the container. We accept any
+	// non-zero exit; the message is daemon-version-specific.
+	kc := exec.CommandContext(ctx, "kubectl", "--context="+cluster.Context(),
+		"--request-timeout=3s", "get", "nodes")
+	kc.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+	if out, err := kc.CombinedOutput(); err == nil {
+		t.Fatalf("kubectl get nodes succeeded after Stop; expected failure.\nOutput:\n%s", out)
+	}
+}
+
+// TestDocker_ApplianceStateful converges the testdata/appliance-stateful
+// fixture against a real docker-provisioned cluster and asserts the
+// StatefulSet rolls out and its PVC binds. Closes the localstorage gap
+// in PR #19: install_test.go covers the install function; nothing
+// otherwise verifies that converging a stateful workload through
+// kubectl-yconverge actually produces a Bound PVC and a Ready pod
+// against k3s's bundled local-path provisioner.
+//
+// Doubles as the only consumer of testdata/appliance-stateful/, which
+// the PR ships referenced only by an export.go comment otherwise.
+func TestDocker_ApplianceStateful(t *testing.T) {
+	skipIfNoDocker(t)
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eDockerConfig("y-cluster-e2e-appstate", "36445", "y-cluster-e2e-appstate")
+
+	kcfgPath := os.Getenv("KUBECONFIG")
+	if kcfgPath == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+
+	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	cluster, err := docker.Provision(ctx, *cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cluster.Teardown(false) })
+
+	// Resolve testdata path relative to this test file.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	kustomizeDir := filepath.Join(wd, "..", "testdata", "appliance-stateful", "base")
+	if _, err := os.Stat(kustomizeDir); err != nil {
+		t.Fatalf("testdata path %s: %v", kustomizeDir, err)
+	}
+
+	// yconverge.Run resolves the namespace dep first (per the cue
+	// file's _dep_ns import), applies the base, and runs the cue
+	// rollout check on the StatefulSet (180s timeout in the fixture).
+	// A non-nil error here means either dep ordering broke, kustomize
+	// rendering broke, or the StatefulSet didn't roll out within 180s.
+	if _, err := yconverge.Run(ctx, yconverge.Options{
+		Context:      cluster.Context(),
+		KustomizeDir: kustomizeDir,
+	}, logger); err != nil {
+		t.Fatalf("yconverge.Run: %v", err)
+	}
+
+	// The fixture's cue file checks rollout but not PVC binding. k3s's
+	// local-path provisioner is dynamic, so an unbound PVC would block
+	// pod scheduling and rollout would already have failed -- but
+	// asserting Bound directly catches a regression where, say, a
+	// future provisioner change leaves PVCs Pending while pods are
+	// somehow Ready against an emptyDir fallback. Belt-and-braces.
+	pvc := exec.CommandContext(ctx, "kubectl", "--context="+cluster.Context(),
+		"-n", "appliance-stateful", "get", "pvc", "data-versitygw-0",
+		"-o", "jsonpath={.status.phase}")
+	pvc.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+	pvcOut, err := pvc.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kubectl get pvc: %s: %v", pvcOut, err)
+	}
+	if got := strings.TrimSpace(string(pvcOut)); got != "Bound" {
+		t.Fatalf("PVC data-versitygw-0 phase: got %q, want %q", got, "Bound")
 	}
 }
