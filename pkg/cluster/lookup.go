@@ -192,7 +192,7 @@ func multipassRunning(ctx context.Context, name string) bool {
 // needs the cluster name without first finding a running cluster
 // (the cluster is, by definition, stopped at start time).
 func ResolveClusterName(kubeconfigPath, contextName string) (string, error) {
-	return readClusterName(nil, kubeconfigPath, contextName)
+	return readClusterName(context.TODO(), kubeconfigPath, contextName)
 }
 
 // readClusterName resolves contextName to its cluster entry name

@@ -428,7 +428,7 @@ func Stop(ctx context.Context, name string, logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("docker daemon: %w", err)
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	logger.Info("stopping docker container", zap.String("name", name))
 	return dockerexec.Stop(ctx, cli, name, dockerStopTimeoutSecs)
 }

@@ -205,7 +205,8 @@ func Export(ctx context.Context, opts ExportOptions) error {
 		zap.String("src", diskSrc),
 		zap.String("dst", diskDst),
 	)
-	if opts.Format == FormatOVA {
+	switch opts.Format {
+	case FormatOVA:
 		// writeOVA owns its own qemu-img convert (always
 		// streamOptimized -- the only VMDK subformat the OVF
 		// disk-format URI references) plus the OVF descriptor
@@ -214,7 +215,7 @@ func Export(ctx context.Context, opts ExportOptions) error {
 		if err := writeOVA(ctx, diskSrc, diskDst, cfg); err != nil {
 			return fmt.Errorf("write ova: %w", err)
 		}
-	} else if opts.Format == FormatGCPTar {
+	case FormatGCPTar:
 		// writeGCPTar pipes qemu-img convert -O raw straight
 		// into a gzip writer wrapping a tar writer that emits
 		// a single member literally named `disk.raw`. The
@@ -223,7 +224,7 @@ func Export(ctx context.Context, opts ExportOptions) error {
 		if err := writeGCPTar(ctx, diskSrc, diskDst); err != nil {
 			return fmt.Errorf("write gcp-tar: %w", err)
 		}
-	} else {
+	default:
 		convertArgs := append([]string{"convert", "-f", "qcow2"}, qemuImgConvertArgs(opts.Format, opts.VMDKSubformat)...)
 		convertArgs = append(convertArgs, diskSrc, diskDst)
 		cmd := exec.CommandContext(ctx, "qemu-img", convertArgs...)
