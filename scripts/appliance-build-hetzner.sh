@@ -162,6 +162,7 @@ context: $NAME
 sshPort: "$APP_SSH_PORT"
 memory: "4096"
 cpus: "2"
+diskSize: "40G"
 portForwards:
   - host: "$APP_API_PORT"
     guest: "6443"

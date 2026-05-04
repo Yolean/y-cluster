@@ -297,6 +297,7 @@ context: $KUBECTX
 sshPort: "$APP_SSH_PORT"
 memory: "4096"
 cpus: "2"
+diskSize: "40G"
 portForwards:
   - host: "$APP_API_PORT"
     guest: "6443"
@@ -507,7 +508,7 @@ gcloud compute instances create "$VM_NAME" \
     --machine-type="$GCP_MACHINE_TYPE" \
     --image="$IMAGE_NAME" \
     --image-project="$GCP_PROJECT" \
-    --boot-disk-size=20GB \
+    --boot-disk-size=40GB \
     --disk="name=$GCP_DATADIR_DISK,device-name=datadir,mode=rw,boot=no" \
     --tags=y-cluster-appliance \
     >/dev/null
