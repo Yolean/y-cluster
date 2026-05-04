@@ -1,0 +1,680 @@
+#!/usr/bin/env bash
+# Build a y-cluster appliance interactively, ship it to GCP.
+#
+# Stages (this is the appliance contract -- the disk you verify
+# locally is the disk that boots in GCP):
+#
+#   1. Provision local qemu cluster (k3s + Envoy Gateway).
+#   2. PROMPT 1: drop into a hands-on window where the
+#      operator applies their custom workloads via kubectl /
+#      yconverge against context $NAME, tests them, and
+#      confirms when satisfied.
+#   3. y-cluster stop -> y-cluster prepare-export (virt-sysprep
+#      identity reset + timesyncd flip + netplan generic match).
+#   4. y-cluster export --format=gcp-tar -- packs the qcow2
+#      into <name>.tar.gz containing a single disk.raw, the
+#      shape Compute Engine custom images expect.
+#   5. PROMPT 2: confirm before any GCP-side write happens.
+#   6. Upload tarball to GCS (creates bucket on first run).
+#   7. gcloud compute images create from the GCS object
+#      (direct, no Cloud Build).
+#   8. gcloud compute firewall-rules create (idempotent) for
+#      tcp:80 + tcp:443 on tagged instances.
+#   9. gcloud compute instances create from the new image,
+#      tagged for the firewall rule.
+#  10. Wait for ssh + probe HTTP. Print connection details.
+#
+# Aborting at PROMPT 1 leaves the local cluster running.
+# Aborting at PROMPT 2 leaves the local bundle written but
+# nothing in GCP.
+#
+# Every gcloud invocation passes --project=$GCP_PROJECT
+# explicitly. Auth is the service-account JSON pointed at by
+# $GOOGLE_APPLICATION_CREDENTIALS (created by
+# scripts/gcp-bootstrap-credentials.sh).
+
+[ -z "$DEBUG" ] || set -x
+set -eo pipefail
+
+YHELP='appliance-qemu-to-gcp.sh - local provision -> hands-on -> export -> ship to GCP
+
+Usage:
+  appliance-qemu-to-gcp.sh                            build + ship to GCP
+  appliance-qemu-to-gcp.sh teardown                   delete VM + image + GCS object
+  appliance-qemu-to-gcp.sh teardown --delete-data-disk
+                                                      also delete the persistent
+                                                      /data/yolean disk (DESTRUCTIVE)
+
+Teardown reads GCP_PROJECT / GCP_ZONE / GCP_BUCKET / VM_NAME /
+GCP_DATADIR_DISK / NAME from the same env vars as the build
+flow. Custom images and GCS objects are deleted by NAME prefix
+(so different NAMEs in the same project do not clobber each
+other). The persistent data disk, the bucket itself, and the
+firewall rule are preserved unless --delete-data-disk is set.
+Local cluster cleanup (if KEEP_LOCAL was set) is separate:
+y-cluster teardown -c \$CFG_DIR.
+
+Environment:
+  GCP_PROJECT       GCP project (set in .env or shell env; required)
+  GCP_REGION        GCP region (default: europe-north2 -- Stockholm)
+  GCP_ZONE          GCP zone (default: europe-north2-a)
+  GCP_BUCKET        GCS bucket for image tarballs
+                    (default: <project>-appliance-images)
+  GCP_MACHINE_TYPE  Compute Engine machine type (default: e2-medium)
+  GCP_IMAGE_FAMILY  Image family tag (default: y-cluster-appliance)
+  GCP_DATADIR_DISK  Persistent disk for /data/yolean
+                    (default: appliance-gcp-datadir; preserved on teardown)
+  GCP_DATADIR_SIZE  Persistent disk size (default: 10GB; only used on create)
+  GCP_KEY           Service account JSON (set in .env or shell env; required)
+  NAME              Local cluster name (default: appliance-gcp-build).
+                    Used as the prefix for the deliverable directory.
+  KUBECTX           kubectl context name (default: local). Script
+                    bails if a context with this name already
+                    exists in your kubeconfig -- set KUBECTX to
+                    something else, or delete the existing one.
+  IMAGE_NAME        Custom image name in GCE (default: <NAME>-<UTC>)
+  VM_NAME           Compute Engine VM name (default: $NAME)
+  APP_HTTP_PORT     Local host port -> guest 80 (default: 39080)
+  APP_API_PORT      Local host port -> guest 6443 (default: 39443)
+  APP_SSH_PORT     Local host port -> guest 22 (default: 2229)
+  Y_CLUSTER         Path to dev binary (default: ./dist/y-cluster)
+  CACHE_DIR         Where y-cluster keeps its qcow2 (default: ~/.cache/y-cluster-qemu)
+  KEEP_LOCAL        Set to keep the local cluster after upload (default: tear down)
+  KEEP_BUNDLE       Set to keep the local export bundle (default: keep -- bundle path printed)
+  ASSUME_YES        Skip BOTH confirmations and proceed end-to-end
+
+Dependencies:
+  go, qemu-system-x86_64, qemu-img, kubectl, ssh, ssh-keygen, curl,
+  virt-sysprep, gcloud
+'
+
+case "${1:-}" in
+  help) echo "$YHELP"; exit 0 ;;
+  --help) echo "$YHELP"; exit 0 ;;
+  -h) echo "$YHELP"; exit 0 ;;
+esac
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    set -o allexport; . "$REPO_ROOT/.env"; set +o allexport
+fi
+
+: "${GCP_PROJECT:?set GCP_PROJECT in .env or shell env}"
+: "${GCP_KEY:?set GCP_KEY in .env or shell env}"
+
+GCP_REGION="${GCP_REGION:-europe-north2}"
+GCP_ZONE="${GCP_ZONE:-europe-north2-a}"
+GCP_BUCKET="${GCP_BUCKET:-${GCP_PROJECT}-appliance-images}"
+GCP_MACHINE_TYPE="${GCP_MACHINE_TYPE:-e2-medium}"
+GCP_IMAGE_FAMILY="${GCP_IMAGE_FAMILY:-y-cluster-appliance}"
+GCP_DATADIR_DISK="${GCP_DATADIR_DISK:-appliance-gcp-datadir}"
+GCP_DATADIR_SIZE="${GCP_DATADIR_SIZE:-10GB}"
+
+NAME="${NAME:-appliance-gcp-build}"
+KUBECTX="${KUBECTX:-local}"
+IMAGE_NAME="${IMAGE_NAME:-${NAME}-$(date -u +%Y%m%d-%H%M%S)}"
+VM_NAME="${VM_NAME:-$NAME}"
+APP_HTTP_PORT="${APP_HTTP_PORT:-39080}"
+APP_API_PORT="${APP_API_PORT:-39443}"
+APP_SSH_PORT="${APP_SSH_PORT:-2229}"
+
+Y_CLUSTER="${Y_CLUSTER:-$REPO_ROOT/dist/y-cluster}"
+CACHE_DIR="${CACHE_DIR:-$HOME/.cache/y-cluster-qemu}"
+CFG_DIR="${CFG_DIR:-$HOME/.cache/y-cluster-appliance-build/$NAME}"
+# Top-level deliverable dir. Holds two per-format subdirs --
+# `gcp-tar/` (uploaded to Compute Engine here) and `ova/`
+# (handed to a customer for VirtualBox / VMware Import
+# Appliance). Both subdirs are byte-equivalent disk states;
+# the only differences are the on-the-wire format and the
+# README boot instructions.
+BUNDLE_DIR="${BUNDLE_DIR:-$REPO_ROOT/dist/appliance/$NAME-$(date -u +%Y%m%dT%H%M%SZ)}"
+
+stage() { printf '\n=== %s ===\n' "$*"; }
+confirm() {
+    local prompt=$1
+    if [[ -n "${ASSUME_YES:-}" ]]; then
+        echo "ASSUME_YES set; proceeding ($prompt)"
+        return 0
+    fi
+    read -r -p "$prompt [y/N] " answer
+    case "${answer,,}" in
+        y|yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# do_teardown deletes GCP resources owned by this script's
+# NAME prefix in the configured project + zone. Reads the
+# same env vars as the build flow so a teardown after a
+# customised build (e.g., NAME=customer-foo) cleans up
+# exactly that customer's resources without touching other
+# NAMEs that share the same project.
+do_teardown() {
+    local delete_data_disk=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delete-data-disk) delete_data_disk=1 ;;
+            *) echo "unknown teardown flag: $1" >&2; exit 2 ;;
+        esac
+        shift
+    done
+
+    stage "inventory in $GCP_PROJECT / $GCP_ZONE"
+    local vm images objects disk
+    vm=$(gcloud compute instances describe "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        --format='value(name)' 2>/dev/null) \
+        || true # y-script-lint:disable=or-true # missing VM is not an error
+    images=$(gcloud compute images list \
+        --project="$GCP_PROJECT" \
+        --no-standard-images \
+        --filter="name~^${NAME}-" \
+        --format='value(name)' 2>/dev/null) \
+        || true # y-script-lint:disable=or-true # empty list is not an error
+    objects=$(gcloud storage ls "gs://$GCP_BUCKET/${NAME}-*.tar.gz" \
+        --project="$GCP_PROJECT" 2>/dev/null) \
+        || true # y-script-lint:disable=or-true # missing bucket / no objects is not an error
+    disk=$(gcloud compute disks describe "$GCP_DATADIR_DISK" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        --format='value(name)' 2>/dev/null) \
+        || true # y-script-lint:disable=or-true # missing disk is not an error
+
+    echo
+    echo "Will DELETE:"
+    [[ -n "$vm" ]] && echo "  VM:                 $VM_NAME ($GCP_ZONE)"
+    if [[ -n "$images" ]]; then
+        echo "$images" | sed 's/^/  Image:              /'
+    fi
+    if [[ -n "$objects" ]]; then
+        echo "$objects" | sed 's|^|  GCS object:         |'
+    fi
+    if [[ $delete_data_disk -eq 1 && -n "$disk" ]]; then
+        echo "  Data disk:          $GCP_DATADIR_DISK (PERSISTENT DATA WILL BE LOST)"
+    fi
+    echo
+    echo "Will PRESERVE:"
+    if [[ $delete_data_disk -eq 0 && -n "$disk" ]]; then
+        echo "  Data disk:          $GCP_DATADIR_DISK (--delete-data-disk to also remove)"
+    fi
+    echo "  GCS bucket:         gs://$GCP_BUCKET (objects matching $NAME-* deleted above)"
+    echo "  Firewall rule:      y-cluster-appliance-public (tag-based, shared)"
+    echo
+
+    if [[ -z "$vm" && -z "$images" && -z "$objects" ]] \
+            && { [[ $delete_data_disk -eq 0 ]] || [[ -z "$disk" ]]; }; then
+        echo "Nothing to delete."
+        exit 0
+    fi
+
+    confirm "Proceed with teardown?" \
+        || { echo "aborted; nothing deleted."; exit 0; }
+
+    if [[ -n "$vm" ]]; then
+        stage "deleting VM $VM_NAME"
+        gcloud compute instances delete "$VM_NAME" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+    fi
+    if [[ -n "$images" ]]; then
+        stage "deleting custom images ($(echo "$images" | wc -l))"
+        # shellcheck disable=SC2086
+        echo "$images" | xargs -r -I{} \
+            gcloud compute images delete {} --project="$GCP_PROJECT" --quiet
+    fi
+    if [[ -n "$objects" ]]; then
+        stage "deleting GCS objects ($(echo "$objects" | wc -l))"
+        # shellcheck disable=SC2086
+        echo "$objects" | xargs -r \
+            gcloud storage rm --project="$GCP_PROJECT"
+    fi
+    if [[ $delete_data_disk -eq 1 && -n "$disk" ]]; then
+        stage "deleting persistent data disk $GCP_DATADIR_DISK"
+        gcloud compute disks delete "$GCP_DATADIR_DISK" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+    fi
+
+    stage "teardown complete"
+}
+
+# Minimal pre-checks shared by build and teardown: gcloud
+# binary + GCP key + activation. The build flow does
+# additional tool checks below the dispatch.
+command -v gcloud >/dev/null \
+    || { echo "missing required tool: gcloud" >&2; exit 1; }
+
+if [[ ! -f "$GCP_KEY" ]]; then
+    echo "missing GCP key: $GCP_KEY" >&2
+    echo "create it with: scripts/gcp-bootstrap-credentials.sh on a machine with gcloud Owner access" >&2
+    exit 1
+fi
+export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY"
+
+# Acknowledge parallel composite uploads up front. The setting
+# both turns on multi-stream uploads (which is what we want for
+# 1.5+ GiB tarballs) AND silences the WARNING stanza gcloud
+# would otherwise emit on every `storage cp`. Env-var form so
+# we don't mutate the operator's gcloud config.
+export CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=True
+
+stage "activating GCP service account ($GCP_KEY)"
+gcloud auth activate-service-account --key-file="$GCP_KEY" --project="$GCP_PROJECT" >/dev/null
+
+# Subcommand dispatch. Teardown only needs gcloud + GCP_KEY,
+# both verified above; doesn't need go / qemu-img / etc. so
+# the build-flow tool check below stays out of its path.
+if [[ "${1:-}" = "teardown" ]]; then
+    shift
+    do_teardown "$@"
+    exit 0
+fi
+
+# Build-flow tool check (additional to gcloud above).
+for tool in go qemu-system-x86_64 qemu-img kubectl ssh ssh-keygen curl virt-sysprep; do
+    command -v "$tool" >/dev/null \
+        || { echo "missing required tool: $tool" >&2; exit 1; }
+done
+
+# virt-sysprep needs to read /boot/vmlinuz-* (libguestfs supermin).
+if ! [ -r /boot/vmlinuz-"$(uname -r)" ]; then
+    cat >&2 <<EOF
+/boot/vmlinuz-$(uname -r) is not readable; virt-sysprep will fail.
+Fix one of:
+  sudo chmod +r /boot/vmlinuz-*
+  sudo dpkg-statoverride --update --add root root 0644 /boot/vmlinuz-$(uname -r)
+EOF
+    exit 1
+fi
+
+# === Stage 1: build dev binary + provision local qemu ===
+stage "building dev binary -> $Y_CLUSTER"
+mkdir -p "$(dirname "$Y_CLUSTER")"
+( cd "$REPO_ROOT" && go build -o "$Y_CLUSTER" ./cmd/y-cluster )
+
+mkdir -p "$CFG_DIR"
+cat > "$CFG_DIR/y-cluster-provision.yaml" <<EOF
+provider: qemu
+name: $NAME
+context: $KUBECTX
+sshPort: "$APP_SSH_PORT"
+memory: "4096"
+cpus: "2"
+portForwards:
+  - host: "$APP_API_PORT"
+    guest: "6443"
+  - host: "$APP_HTTP_PORT"
+    guest: "80"
+EOF
+
+stage "tearing down any leftover $NAME cluster"
+"$Y_CLUSTER" teardown -c "$CFG_DIR" || true # y-script-lint:disable=or-true # idempotent re-entry: missing cluster is not an error
+
+# Bail-out guard: our own teardown above would have removed
+# the kubectl context THIS script registered on a previous
+# run. A surviving "$KUBECTX" entry means something else owns
+# it (e.g., a parallel y-cluster cluster, or the operator's
+# personal "local" dev cluster). We refuse to clobber.
+if kubectl config get-contexts -o name 2>/dev/null | grep -Fxq "$KUBECTX"; then
+    echo "kubectl context '$KUBECTX' already exists and is not owned by this script." >&2
+    echo "  Either remove it:    kubectl config delete-context $KUBECTX" >&2
+    echo "  Or pick a new name:  KUBECTX=appliance-qa $0" >&2
+    exit 1
+fi
+
+stage "provisioning $NAME (k3s + Envoy Gateway)"
+"$Y_CLUSTER" provision -c "$CFG_DIR"
+
+# Echo is what creates the Gateway listener (not just the
+# Envoy Gateway controller -- the actual Gateway resource that
+# binds :80). Without it, any HTTPRoute the operator applies
+# in the hands-on window has nothing to attach to and curl
+# returns "connection refused" both locally and on the eventual
+# GCP VM. Auto-install so the Gateway listener is up by default;
+# operators can still delete + replace echo with their own
+# workload (the Gateway listener stays, the routing changes).
+stage "installing echo workload (Gateway listener + baseline route)"
+"$Y_CLUSTER" echo render \
+    | kubectl --context="$KUBECTX" apply --server-side --field-manager=appliance-build -f -
+kubectl --context="$KUBECTX" -n y-cluster wait \
+    --for=condition=Available deployment/echo --timeout=180s
+
+# === Stage 2: hands-on prompt ===
+SSH_KEY="$CACHE_DIR/$NAME-ssh"
+cat <<EOF
+
+================================================================
+Local cluster $NAME is up. Echo is already serving on :80.
+
+  Echo route (baseline, already up):
+    curl -sf http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo
+
+  Kubernetes API:   https://127.0.0.1:$APP_API_PORT
+  kubectl context:  $KUBECTX
+
+Optional: apply more workloads before the disk gets sealed.
+The Gateway listener echo brought up is shared, so HTTPRoutes
+in any namespace can attach to it.
+
+  # S3 backend example (VersityGW StatefulSet on local-path PV):
+  $Y_CLUSTER yconverge --context=$KUBECTX -k $REPO_ROOT/testdata/appliance-stateful/base
+  curl -sf http://127.0.0.1:$APP_HTTP_PORT/s3/health
+
+  # Re-apply echo (e.g., after editing the manifest):
+  $Y_CLUSTER echo render | kubectl --context=$KUBECTX apply -f -
+
+  # Your own workloads:
+  kubectl --context=$KUBECTX apply -f my-workload.yaml
+  $Y_CLUSTER yconverge --context=$KUBECTX -k path/to/kustomize-base
+
+SSH into the local VM (passwordless sudo as ystack):
+  ssh -i $SSH_KEY -p $APP_SSH_PORT \\
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+      ystack@127.0.0.1
+
+Once you confirm, the local cluster will be stopped, the disk
+will be sealed (prepare-export), packed as a GCE-custom-image
+tarball, uploaded to GCS, and a VM will be created from it in
+$GCP_PROJECT/$GCP_ZONE.
+
+(KEEP_LOCAL=1 to keep the local cluster running after upload.)
+================================================================
+
+EOF
+
+confirm "Proceed to export + GCP deploy?" \
+    || { echo "aborted; local cluster left running. Teardown with: $Y_CLUSTER teardown -c $CFG_DIR"; exit 0; }
+
+# === Stage 3: stop + prepare-export + export gcp-tar ===
+stage "stopping cluster ($NAME)"
+"$Y_CLUSTER" stop --context="$KUBECTX"
+
+stage "prepare-export ($NAME)"
+"$Y_CLUSTER" prepare-export --context="$KUBECTX"
+
+# Dual export to per-format subdirs of the deliverable.
+# Both reads come from the same prepare-export'd qcow2 so
+# the disk state is byte-identical; the only differences are
+# the on-the-wire packaging (tar.gz with disk.raw vs OVF +
+# streamOptimized VMDK in tar) and the per-format README.
+# The SSH keypair `<name>-ssh{,.pub}` lands in both subdirs;
+# the pair is identical (one keypair was generated at
+# provision time, both export passes copy from the same
+# source under $CACHE_DIR).
+mkdir -p "$BUNDLE_DIR"
+
+stage "exporting Compute Engine image format -> $BUNDLE_DIR/gcp-tar"
+"$Y_CLUSTER" export --context="$KUBECTX" --format=gcp-tar "$BUNDLE_DIR/gcp-tar"
+
+stage "exporting OVA (VirtualBox / VMware Import Appliance) -> $BUNDLE_DIR/ova"
+"$Y_CLUSTER" export --context="$KUBECTX" --format=ova "$BUNDLE_DIR/ova"
+
+ls -lh "$BUNDLE_DIR"/*/
+TARBALL="$BUNDLE_DIR/gcp-tar/$NAME.tar.gz"
+
+# === Stage 4: confirm before any GCP write ===
+cat <<EOF
+
+================================================================
+Local export ready: $TARBALL
+  size: $(stat -c '%s' "$TARBALL" | numfmt --to=iec-i --suffix=B 2>/dev/null || stat -c '%s' "$TARBALL")
+
+Next: upload to gs://$GCP_BUCKET/$IMAGE_NAME.tar.gz, create a
+GCE custom image, ensure firewall opens tcp:80 + tcp:443 on
+tagged VMs, create $VM_NAME ($GCP_MACHINE_TYPE in $GCP_ZONE)
+from the image. Aborting now leaves the bundle on local disk
+unchanged.
+================================================================
+
+EOF
+
+confirm "Upload $TARBALL to GCS and create VM in $GCP_PROJECT?" \
+    || { echo "aborted; bundle preserved at $BUNDLE_DIR."; exit 0; }
+
+# === Stage 5: GCS bucket (idempotent) ===
+stage "ensuring GCS bucket gs://$GCP_BUCKET (location $GCP_REGION)"
+if ! gcloud storage buckets describe "gs://$GCP_BUCKET" --project="$GCP_PROJECT" >/dev/null 2>&1; then
+    gcloud storage buckets create "gs://$GCP_BUCKET" \
+        --project="$GCP_PROJECT" \
+        --location="$GCP_REGION" \
+        --uniform-bucket-level-access
+else
+    echo "  bucket exists"
+fi
+
+# === Stage 6: upload tarball ===
+stage "uploading $TARBALL -> gs://$GCP_BUCKET/$IMAGE_NAME.tar.gz"
+gcloud storage cp "$TARBALL" "gs://$GCP_BUCKET/$IMAGE_NAME.tar.gz" --project="$GCP_PROJECT"
+
+# === Stage 7: create custom image ===
+stage "creating GCE custom image $IMAGE_NAME (family $GCP_IMAGE_FAMILY)"
+gcloud compute images create "$IMAGE_NAME" \
+    --project="$GCP_PROJECT" \
+    --source-uri="gs://$GCP_BUCKET/$IMAGE_NAME.tar.gz" \
+    --family="$GCP_IMAGE_FAMILY" \
+    --architecture=X86_64 \
+    >/dev/null
+
+# === Stage 8: firewall rule (idempotent) ===
+FIREWALL_RULE="y-cluster-appliance-public"
+stage "ensuring firewall rule $FIREWALL_RULE (tcp:80,443 -> y-cluster-appliance tag)"
+if ! gcloud compute firewall-rules describe "$FIREWALL_RULE" --project="$GCP_PROJECT" >/dev/null 2>&1; then
+    gcloud compute firewall-rules create "$FIREWALL_RULE" \
+        --project="$GCP_PROJECT" \
+        --direction=INGRESS \
+        --network=default \
+        --action=ALLOW \
+        --rules=tcp:80,tcp:443 \
+        --target-tags=y-cluster-appliance \
+        --source-ranges=0.0.0.0/0 \
+        >/dev/null
+else
+    echo "  rule exists"
+fi
+
+# === Stage 8.5: ensure persistent data disk ===
+# Persistent disk attached to the VM and mounted at /data/yolean
+# (the bundled local-path-provisioner's default storage root).
+# Survives instance redeploys: tear down the VM, redeploy with a
+# fresh image, the same /data/yolean comes back. Disk auto-delete
+# is OFF when attaching an existing disk via --disk=name=, so
+# `instances delete` won't wipe it.
+stage "ensuring persistent data disk $GCP_DATADIR_DISK (size only used on create: $GCP_DATADIR_SIZE)"
+if gcloud compute disks describe "$GCP_DATADIR_DISK" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
+    echo "  disk exists -- reusing (data preserved from previous deploy)"
+else
+    gcloud compute disks create "$GCP_DATADIR_DISK" \
+        --project="$GCP_PROJECT" \
+        --zone="$GCP_ZONE" \
+        --size="$GCP_DATADIR_SIZE" \
+        --type=pd-balanced \
+        >/dev/null
+    echo "  disk created (fresh; will be ext4-formatted on first mount)"
+fi
+
+# === Stage 9: create VM (delete first if exists for idempotency) ===
+stage "creating $VM_NAME ($GCP_MACHINE_TYPE in $GCP_ZONE) from image $IMAGE_NAME"
+if gcloud compute instances describe "$VM_NAME" --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
+    echo "  $VM_NAME exists, deleting first"
+    gcloud compute instances delete "$VM_NAME" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+fi
+# device-name=datadir is what GCE writes after the
+# `scsi-0Google_PersistentDisk_` prefix in /dev/disk/by-id/
+# inside the VM; the SSH-side mount block uses that stable path
+# regardless of /dev/sd* enumeration order.
+gcloud compute instances create "$VM_NAME" \
+    --project="$GCP_PROJECT" \
+    --zone="$GCP_ZONE" \
+    --machine-type="$GCP_MACHINE_TYPE" \
+    --image="$IMAGE_NAME" \
+    --image-project="$GCP_PROJECT" \
+    --boot-disk-size=20GB \
+    --disk="name=$GCP_DATADIR_DISK,device-name=datadir,mode=rw,boot=no" \
+    --tags=y-cluster-appliance \
+    >/dev/null
+
+PUBLIC_IP=$(gcloud compute instances describe "$VM_NAME" \
+    --project="$GCP_PROJECT" \
+    --zone="$GCP_ZONE" \
+    --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+echo "  public ip: $PUBLIC_IP"
+
+# === Stage 10: wait for ssh + probe ===
+# SSH_KEY (from CACHE_DIR) was used by the local cluster but is
+# wiped by `y-cluster teardown` at the end of this flow. The
+# bundle-dir copy is what the operator can reach the GCP VM
+# with afterwards. Switch to the bundle path BEFORE teardown
+# runs so subsequent prints reference the path that'll exist.
+SSH_KEY="$BUNDLE_DIR/gcp-tar/$NAME-ssh"
+SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5"
+echo "  waiting for ssh on $PUBLIC_IP:22 (cloud-init can take 30-90s on first boot)"
+ssh_up=0
+for i in $(seq 1 60); do
+    # shellcheck disable=SC2086
+    if ssh $SSH_OPTS -p 22 ystack@"$PUBLIC_IP" 'true' 2>/dev/null; then
+        echo "  ssh up after $i attempt(s)"
+        ssh_up=1
+        break
+    fi
+    echo "  ssh attempt $i/60: not yet"
+    sleep 5
+done
+if [[ $ssh_up -eq 0 ]]; then
+    echo "ssh on $PUBLIC_IP never came up; VM left running for diagnosis" >&2
+    echo "  delete with: gcloud compute instances delete $VM_NAME --project=$GCP_PROJECT --zone=$GCP_ZONE" >&2
+    exit 1
+fi
+
+# === Stage 10.5: mount the persistent disk at /data/yolean ===
+# The appliance disk doesn't carry GCE guest-tools and our
+# prepare_inguest pinned cloud-init to NoCloud only, so we can't
+# mount via cloud-init mounts/ or via google-startup-scripts.
+# We SSH in and do it directly:
+#   - format the disk if it has no filesystem (fresh disk)
+#   - persist the mount via fstab UUID for subsequent reboots
+#   - mount now
+#   - restart k3s so it re-discovers /data/yolean (k3s started
+#     before the mount existed; existing PVs would have mapped
+#     to empty paths on the root FS until restart)
+stage "mounting $GCP_DATADIR_DISK at /data/yolean and restarting k3s"
+# shellcheck disable=SC2087
+ssh $SSH_OPTS ystack@"$PUBLIC_IP" 'sudo bash -s' <<'REMOTE'
+set -eu
+# /dev/disk/by-id/google-<device-name> requires google-guest-agent,
+# which only ships in Google's own GCE images. Our appliance is
+# built from the upstream Ubuntu cloud image, so we get the
+# kernel-provided SCSI udev path instead:
+#   /dev/disk/by-id/scsi-0Google_PersistentDisk_<device-name>
+# `<device-name>` is what we passed to `gcloud --disk=device-name=datadir`,
+# so the path is fully deterministic. We try both shapes -- SCSI
+# first (matches the current appliance) and the guest-agent shape
+# as a fallback for a future build that does install the agent.
+MOUNT=/data/yolean
+DEVICE=""
+for cand in /dev/disk/by-id/scsi-0Google_PersistentDisk_datadir /dev/disk/by-id/google-datadir; do
+    for _ in $(seq 1 30); do
+        if [ -b "$cand" ]; then
+            DEVICE="$cand"
+            break 2
+        fi
+        sleep 1
+    done
+done
+[ -n "$DEVICE" ] || { echo "datadir disk never appeared at any expected /dev/disk/by-id/ path" >&2; exit 1; }
+echo "datadir: $DEVICE"
+
+# Format with the label that matches the appliance's pre-baked
+# fstab entry (LABEL=y-cluster-data /data/yolean ext4 ...).
+# Using a different label, or adding a UUID-based fstab line,
+# would either skip the pre-bake mount or duplicate it -- we
+# want the LABEL line to be the one that fires at boot.
+if ! blkid "$DEVICE" >/dev/null 2>&1; then
+    mkfs.ext4 -F -L y-cluster-data "$DEVICE"
+fi
+# Idempotent label enforcement: re-running this script against a
+# data disk that was formatted by a PREVIOUS version of the script
+# (with a different label, e.g. `data-yolean`) would skip mkfs
+# above (blkid finds an existing FS) and leave the wrong label in
+# place. The appliance's pre-baked /etc/fstab matches by LABEL, so
+# a wrong label means the boot-time mount silently no-ops and the
+# seed gate fails. e2label is a no-op when the label is already
+# correct, so applying it unconditionally is cheap insurance.
+e2label "$DEVICE" y-cluster-data
+
+install -d -m 0755 "$MOUNT"
+if ! mountpoint -q "$MOUNT"; then
+    mount "$MOUNT"
+fi
+
+# At first boot the seed unit ran before this disk was formatted
+# and mounted, so it failed the mount-required gate and k3s.service
+# stayed down on its Requires=. Now that /data/yolean is a real
+# mountpoint, restart the seed unit so it extracts the seed onto
+# the customer's volume, then k3s.
+systemctl reset-failed y-cluster-data-seed.service k3s.service
+systemctl restart y-cluster-data-seed.service
+systemctl restart k3s.service
+REMOTE
+
+probe() {
+    local what=$1 url=$2 attempts=${3:-60}
+    for i in $(seq 1 "$attempts"); do
+        if curl -fsS --max-time 8 -o /dev/null -w "  $what HTTP %{http_code}\n" "$url"; then
+            return 0
+        fi
+        echo "  $what attempt $i/$attempts: no answer yet"
+        sleep 10
+    done
+    return 1
+}
+
+stage "probing http://$PUBLIC_IP -- whatever you applied locally"
+# We don't know the operator's routes a priori; try the
+# y-cluster-shipped echo path as a baseline. If their workload
+# replaced echo, this fails and the operator curls their own
+# route.
+probe echo "http://$PUBLIC_IP/q/envoy/echo" 30 || \
+    echo "  (no echo route -- expected if your workload replaced y-cluster echo)"
+
+if [[ -z "${KEEP_LOCAL:-}" ]]; then
+    stage "tearing down local cluster (set KEEP_LOCAL=1 to keep it)"
+    "$Y_CLUSTER" teardown -c "$CFG_DIR" 2>/dev/null || true # y-script-lint:disable=or-true # cleanup best-effort
+fi
+
+cat <<EOF
+
+================================================================
+Appliance live in GCP.
+
+  Project:       $GCP_PROJECT
+  Zone:          $GCP_ZONE
+  VM:            $VM_NAME ($GCP_MACHINE_TYPE)
+  Public IP:     $PUBLIC_IP
+  Image:         $IMAGE_NAME (family $GCP_IMAGE_FAMILY)
+  Data disk:     $GCP_DATADIR_DISK -> /data/yolean (persistent)
+  Deliverable:   $BUNDLE_DIR
+                 ├── gcp-tar/  (uploaded to GCE, used for the
+                 │              live $VM_NAME above)
+                 └── ova/      (hand to a customer for VirtualBox /
+                                VMware -- same disk state)
+
+Connect:
+  ssh -i $SSH_KEY ystack@$PUBLIC_IP
+  curl http://$PUBLIC_IP/<your-route>
+
+kubectl from your laptop (apiserver not externally exposed):
+  ssh -L 6443:127.0.0.1:6443 -N -i $SSH_KEY ystack@$PUBLIC_IP &
+  ssh -i $SSH_KEY ystack@$PUBLIC_IP sudo cat /etc/rancher/k3s/k3s.yaml \\
+    > k3s-$VM_NAME.yaml
+  KUBECONFIG=k3s-$VM_NAME.yaml kubectl get nodes
+
+Teardown when done:
+  gcloud compute instances delete $VM_NAME --project=$GCP_PROJECT --zone=$GCP_ZONE
+  gcloud compute images delete $IMAGE_NAME --project=$GCP_PROJECT
+  gcloud storage rm gs://$GCP_BUCKET/$IMAGE_NAME.tar.gz --project=$GCP_PROJECT
+
+Persistent data disk is PRESERVED on teardown so PVC data
+survives across redeploys. Re-running this script reuses the
+same /data/yolean. Delete it manually when you're truly done:
+  gcloud compute disks delete $GCP_DATADIR_DISK --project=$GCP_PROJECT --zone=$GCP_ZONE
+================================================================
+EOF
