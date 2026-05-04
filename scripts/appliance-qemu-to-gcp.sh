@@ -74,7 +74,7 @@ Environment:
                     something else, or delete the existing one.
   IMAGE_NAME        Custom image name in GCE (default: <NAME>-<UTC>)
   VM_NAME           Compute Engine VM name (default: $NAME)
-  APP_HTTP_PORT     Local host port -> guest 80 (default: 39080)
+  APP_HTTP_PORT     Local host port -> guest 80 (default: 80)
   APP_API_PORT      Local host port -> guest 6443 (default: 39443)
   APP_SSH_PORT     Local host port -> guest 22 (default: 2229)
   Y_CLUSTER         Path to dev binary (default: ./dist/y-cluster)
@@ -114,7 +114,7 @@ NAME="${NAME:-appliance-gcp-build}"
 KUBECTX="${KUBECTX:-local}"
 IMAGE_NAME="${IMAGE_NAME:-${NAME}-$(date -u +%Y%m%d-%H%M%S)}"
 VM_NAME="${VM_NAME:-$NAME}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-39080}"
+APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
 APP_API_PORT="${APP_API_PORT:-39443}"
 APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 

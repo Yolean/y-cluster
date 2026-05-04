@@ -32,7 +32,7 @@ Positional:
 
 Environment:
   NAME             Appliance name (default: appliance-virtualbox)
-  APP_HTTP_PORT    Host port -> guest 80 (default: 39080)
+  APP_HTTP_PORT    Host port -> guest 80 (default: 80)
   APP_API_PORT     Host port -> guest 6443 (default: 39443)
   APP_SSH_PORT     Host port -> guest 22 (default: 2229)
   Y_CLUSTER        Path to dev binary (default: ./dist/y-cluster)
@@ -53,7 +53,7 @@ case "${1:-}" in
 esac
 
 NAME="${NAME:-appliance-virtualbox}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-39080}"
+APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
 APP_API_PORT="${APP_API_PORT:-39443}"
 APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 
