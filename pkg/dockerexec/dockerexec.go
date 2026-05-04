@@ -47,6 +47,24 @@ func Remove(ctx context.Context, cli *client.Client, name string) error {
 	return nil
 }
 
+// Stop sends SIGTERM to the named container's PID 1 and waits
+// up to timeoutSecs for it to exit; after that the daemon
+// escalates to SIGKILL. NotFound (container missing or already
+// stopped) is treated as success.
+//
+// Docker's default timeout is 10s, which is too short for a
+// k3s-in-container to flush its containerd snapshot writes;
+// callers should pass a more generous value (60s+) when the
+// container hosts a stateful workload.
+func Stop(ctx context.Context, cli *client.Client, name string, timeoutSecs int) error {
+	t := timeoutSecs
+	_, err := cli.ContainerStop(ctx, name, client.ContainerStopOptions{Timeout: &t})
+	if err != nil && !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("stop %s: %w", name, err)
+	}
+	return nil
+}
+
 // PullIfMissing fetches the named image from its registry when the
 // daemon doesn't already have it. ImageInspect returns a NotFound
 // error when the image is absent; that's the only case we pull,

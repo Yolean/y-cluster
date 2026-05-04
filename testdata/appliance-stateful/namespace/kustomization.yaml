@@ -1,0 +1,12 @@
+# Namespace module for the appliance-stateful fixture.
+# Split out from base/ so yconverge can apply + verify the
+# namespace before the StatefulSet that lives in it. Without
+# this dep edge, kubectl-apply-with-mixed-resources races:
+# the StatefulSet validates against an apiserver that hasn't
+# observed the namespace yet, and the rollout-status check
+# can fall through "namespace not found" before the controller
+# catches up.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml

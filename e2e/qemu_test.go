@@ -279,3 +279,102 @@ func TestQemu_ExportImport(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestQemu_StopStart provisions, stops the VM, asserts disk +
+// state sidecar are preserved while the pidfile is gone, then
+// starts the VM and asserts kubectl still works against the
+// merged context.
+//
+// This is the regression guard for the appliance lifecycle: a
+// stop/start round-trip must produce an indistinguishable cluster
+// (same kubeconfig context, same workloads in etcd, same node
+// IP from the host's perspective).
+func TestQemu_StopStart(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("QEMU tests require /dev/kvm")
+	}
+	if err := qemu.CheckPrerequisites(); err != nil {
+		t.Skip(err)
+	}
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eQEMURuntime()
+	cfg.Name = "y-cluster-e2e-stopstart"
+	cfg.Context = "y-cluster-e2e-stopstart"
+	cfg.CacheDir = t.TempDir()
+	cfg.Memory = "4096"
+	cfg.CPUs = "2"
+	cfg.SSHPort = "2226"
+	cfg.PortForwards = e2eUniqueForwards("26446")
+	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
+	if cfg.Kubeconfig == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", cfg.CacheDir)
+
+	ctx := context.Background()
+
+	cluster, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cluster.Teardown(false) })
+
+	// Sanity: kubectl works against the freshly-provisioned cluster.
+	assertNodeReady(t, cfg.Context, cfg.Kubeconfig)
+
+	// Sidecar landed at provision time -- start needs it.
+	if _, err := os.Stat(filepath.Join(cfg.CacheDir, cfg.Name+".json")); err != nil {
+		t.Fatalf("state sidecar missing after Provision: %v", err)
+	}
+
+	// Stop. Pidfile should be gone, disk + sidecar preserved.
+	vmPid := readPid(t, cfg.CacheDir, cfg.Name)
+	if err := qemu.Stop(cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.CacheDir, cfg.Name+".pid")); !os.IsNotExist(err) {
+		t.Fatalf("pidfile should be gone after Stop; stat err=%v", err)
+	}
+	if _, err := os.Stat(cluster.DiskPath()); err != nil {
+		t.Fatalf("disk should be preserved after Stop: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.CacheDir, cfg.Name+".json")); err != nil {
+		t.Fatalf("state sidecar should be preserved after Stop: %v", err)
+	}
+	assertPidGone(t, vmPid)
+
+	// Start from the saved sidecar. Should not need cfg passed in
+	// -- everything required is on disk under cfg.CacheDir.
+	cluster2, err := qemu.Start(ctx, cfg.CacheDir, cfg.Name, logger)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// kubectl works again. The cluster came back with all workloads
+	// intact (etcd is on the qcow2 disk, not in RAM).
+	assertNodeReady(t, cfg.Context, cfg.Kubeconfig)
+
+	// SSH still works against the freshly-resumed VM.
+	if out, err := cluster2.SSH(ctx, "hostname"); err != nil {
+		t.Fatalf("SSH after Start: %s: %v", out, err)
+	}
+}
+
+// assertNodeReady polls `kubectl get nodes` against ctx until at
+// least one Ready node is reported, up to 2 minutes. Shared by
+// the lifecycle e2e legs.
+func assertNodeReady(t *testing.T, ctxName, kcfgPath string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		kc := exec.Command("kubectl", "--context="+ctxName, "get", "nodes", "--no-headers")
+		kc.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+		out, err := kc.CombinedOutput()
+		if err == nil && strings.Contains(string(out), "Ready") {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("node never reached Ready within 2 minutes")
+}

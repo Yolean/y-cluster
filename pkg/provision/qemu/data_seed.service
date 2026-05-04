@@ -1,0 +1,17 @@
+[Unit]
+Description=y-cluster appliance data-dir first-boot seed
+DefaultDependencies=no
+RequiresMountsFor=/data/yolean
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=k3s.service
+ConditionPathExists=/var/lib/y-cluster/data-seed.tar.zst
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/y-cluster-data-seed-check
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,208 @@
+# y-cluster bundled local-path-provisioner.
+#
+# Replaces k3s's stock local-storage addon (we pass
+# --disable=local-storage to k3s install) so y-cluster owns the
+# StorageClass, the ConfigMap, and the Deployment. The reasons
+# k3s's bundled version isn't enough on its own:
+#
+#   - k3s's deploy controller reconciles the local-path-config
+#     ConfigMap back to its template on every restart, so our
+#     pathPattern override would silently revert.
+#   - k3s's StorageClass uses reclaimPolicy: Delete; the appliance
+#     wants Retain so a stray PVC delete doesn't wipe customer
+#     data.
+#   - k3s's nodePathMap default is /var/lib/rancher/k3s/storage;
+#     the appliance wants /data/yolean (or whatever the operator
+#     mounts a separate disk at).
+#
+# Rendered by pkg/provision/localstorage.Render. Three Options
+# fields land via Go text/template:
+#
+#   .Path          default /data/yolean
+#   .Pattern       default is the PVC namespace_name template
+#                  (the local-path-provisioner re-evaluates the
+#                  string verbatim at runtime, so it stays a
+#                  literal in the rendered ConfigMap)
+#   .ReclaimPolicy default Retain
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: local-path-provisioner-service-account
+  namespace: local-path-storage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: local-path-provisioner-role
+  namespace: local-path-storage
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: local-path-provisioner-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumeclaims", "configmaps", "pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: local-path-provisioner-bind
+  namespace: local-path-storage
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: local-path-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: local-path-provisioner-service-account
+    namespace: local-path-storage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: local-path-provisioner-bind
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: local-path-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: local-path-provisioner-service-account
+    namespace: local-path-storage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-path-provisioner
+  namespace: local-path-storage
+  labels:
+    app.kubernetes.io/name: local-path-provisioner
+    app.kubernetes.io/managed-by: y-cluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-path-provisioner
+  template:
+    metadata:
+      labels:
+        app: local-path-provisioner
+    spec:
+      serviceAccountName: local-path-provisioner-service-account
+      containers:
+        - name: local-path-provisioner
+          image: docker.io/rancher/local-path-provisioner:v0.0.35@sha256:34ff0847cc47ebf69656ba44a3de9324596d0036b66ffd323b21614dd8221530
+          imagePullPolicy: IfNotPresent
+          command:
+            - local-path-provisioner
+            - start
+            - --config
+            - /etc/config/config.json
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config/
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CONFIG_MOUNT_PATH
+              value: /etc/config/
+      volumes:
+        - name: config-volume
+          configMap:
+            name: local-path-config
+---
+# StorageClass marked default so PVCs without an explicit
+# storageClassName resolve here. ReclaimPolicy is rendered from
+# CommonConfig.Storage.ReclaimPolicy (default Retain).
+#
+# pathPattern is a StorageClass parameter (NOT a ConfigMap
+# field, despite some online examples to the contrary). The
+# upstream provisioner enforces a "must start with
+# namespace/name/" safety check on any pattern that doesn't
+# carry allowUnsafePathPattern=true; we set the latter so the
+# appliance default underscore form (namespace_name) is
+# accepted. The escape hatch is "unsafe" only against the
+# namespace-name safety guard upstream codifies; per-PV
+# directory isolation is preserved as long as the rendered
+# pattern includes both
+# namespace and name (the appliance defaults do).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  labels:
+    app.kubernetes.io/managed-by: y-cluster
+provisioner: rancher.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: {{.ReclaimPolicy}}
+parameters:
+  pathPattern: "{{.Pattern}}"
+  allowUnsafePathPattern: "true"
+---
+# ConfigMap config.json -- the local-path-provisioner reads this
+# at startup AND watches it for changes (no Deployment restart
+# required to repoint the path). pathPattern lives on the
+# StorageClass parameters above, NOT here.
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: local-path-config
+  namespace: local-path-storage
+data:
+  config.json: |-
+    {
+        "nodePathMap": [
+            {
+                "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                "paths": ["{{.Path}}"]
+            }
+        ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+      - name: helper-pod
+        image: busybox
+        imagePullPolicy: IfNotPresent

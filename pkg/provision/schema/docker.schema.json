@@ -46,6 +46,10 @@
         "registries": {
           "$ref": "#/$defs/Registries",
           "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig",
+          "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
         }
       },
       "required": [
@@ -81,7 +85,7 @@
           "type": "string"
         },
         "version": {
-          "default": "v1.35.4-rc3+k3s1",
+          "default": "v1.35.4+k3s1",
           "description": "k3s release version e.g. vX.Y.Z+k3sN.",
           "type": "string"
         }
@@ -199,6 +203,31 @@
         },
         "key_file": {
           "description": "Path to client key file on the node.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "StorageConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "/data/yolean",
+          "description": "Root directory under which local-path-provisioner allocates one subdirectory per PV. Customers who attach a separate data disk should mount it here.",
+          "type": "string"
+        },
+        "pathPattern": {
+          "default": "{{ .PVC.Namespace }}_{{ .PVC.Name }}",
+          "description": "Per-PV subdirectory template (Go text/template; vars: .PVName",
+          "type": "string"
+        },
+        "reclaimPolicy": {
+          "default": "Retain",
+          "description": "Reclaim policy on the y-cluster StorageClass. Retain preserves PV directories on PVC delete; Delete (the upstream k3s default) wipes them.",
+          "enum": [
+            "Retain",
+            "Delete"
+          ],
           "type": "string"
         }
       },

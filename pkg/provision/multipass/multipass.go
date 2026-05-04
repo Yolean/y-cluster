@@ -26,6 +26,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
+	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 )
 
@@ -44,6 +45,7 @@ type Config struct {
 	K3s        K3s
 	Registries config.Registries
 	Gateway    config.GatewayConfig
+	Storage    config.StorageConfig
 }
 
 // diskSize is the multipass --disk argument. Hardcoded rather than
@@ -80,6 +82,7 @@ func FromConfig(c *config.MultipassConfig) Config {
 		},
 		Registries: c.Registries,
 		Gateway:    c.Gateway,
+		Storage:    c.Storage,
 	}
 }
 
@@ -111,6 +114,18 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		logger = zap.NewNop()
 	}
 	if err := CheckPrerequisites(); err != nil {
+		return nil, err
+	}
+
+	// Cross-provisioner preflight: only the kubeconfig context
+	// matters here. Multipass binds on the hypervisor bridge, not
+	// on host ports, so HostPorts is empty.
+	pf := provision.Preflight{
+		ContextName:    cfg.Context,
+		ContextCluster: cfg.Name,
+		KubeconfigPath: os.Getenv("KUBECONFIG"),
+	}
+	if err := pf.Run(); err != nil {
 		return nil, err
 	}
 
@@ -165,6 +180,19 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
 
+	// Install the bundled local-path-provisioner (replaces k3s's
+	// disabled local-storage addon) before any workload install
+	// so the StorageClass exists when consumer PVCs land.
+	if err := localstorage.Install(ctx, localstorage.Options{
+		ContextName:   cfg.Context,
+		Path:          cfg.Storage.Path,
+		Pattern:       cfg.Storage.PathPattern,
+		ReclaimPolicy: cfg.Storage.ReclaimPolicy,
+		Logger:        logger,
+	}); err != nil {
+		return nil, fmt.Errorf("install local-path-provisioner: %w", err)
+	}
+
 	if cfg.Gateway.Skip {
 		logger.Info("envoy gateway install skipped (gateway.skip)")
 	} else {
@@ -190,6 +218,27 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		)
 	}
 	return c, nil
+}
+
+// Stop gracefully shuts down the multipass VM via `multipass
+// stop`, which sends ACPI poweroff to the guest and waits for
+// shutdown to complete. multipass's behaviour is already
+// graceful by design (no SIGTERM-too-fast issue analogous to
+// what bit qemu); this wrapper just plumbs `multipass stop`
+// into the y-cluster stopCmd path so docker / qemu / multipass
+// are equivalent at that surface.
+//
+// VM disk is preserved for a follow-up `multipass start`.
+// NotFound is treated as success.
+func Stop(ctx context.Context, name string, logger *zap.Logger) error {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	logger.Info("stopping multipass VM", zap.String("name", name))
+	if err := multipassexec.Stop(ctx, name); err != nil && !errors.Is(err, multipassexec.ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 // Teardown stops and (unless keepDisk) deletes/purges the VM, then

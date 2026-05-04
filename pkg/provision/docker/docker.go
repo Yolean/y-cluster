@@ -27,6 +27,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
+	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 )
 
@@ -108,6 +109,22 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+
+	// Cross-provisioner preflight: host ports + kubeconfig context.
+	// Container reuse via dockerexec.Remove is idempotent so we
+	// don't preflight the container name; ports are the bit that
+	// fails in a non-obvious way (the docker daemon error message
+	// names the port but not what to change in y-cluster's config).
+	pf := provision.Preflight{
+		HostPorts:      dockerHostPorts(cfg),
+		ContextName:    cfg.Context,
+		ContextCluster: cfg.Name,
+		KubeconfigPath: os.Getenv("KUBECONFIG"),
+	}
+	if err := pf.Run(); err != nil {
+		return nil, err
+	}
+
 	kubecfg, err := kubeconfig.New(cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err
@@ -170,7 +187,17 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 			// --disable=traefik because y-cluster bundles Envoy
 			// Gateway as the ingress controller; two of them
 			// would fight over host:80/:443.
-			Cmd: []string{"server", "--tls-san=127.0.0.1", "--disable=traefik"},
+			// --disable=local-storage because y-cluster ships
+			// its own local-path-provisioner via
+			// pkg/provision/localstorage with the appliance-
+			// shape defaults (path /data/yolean, PVC
+			// namespace_name pattern, Retain reclaim).
+			Cmd: []string{
+				"server",
+				"--tls-san=127.0.0.1",
+				"--disable=traefik",
+				"--disable=local-storage",
+			},
 			// ExposedPorts must list every guest port carried by
 			// HostConfig.PortBindings. The Docker CLI auto-fills
 			// this when you `-p`; the moby SDK does not. Engine
@@ -232,6 +259,19 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
 
+	// Install the bundled local-path-provisioner (replaces k3s's
+	// disabled local-storage addon) before any workload install
+	// so the StorageClass exists when consumer PVCs land.
+	if err := localstorage.Install(ctx, localstorage.Options{
+		ContextName:   cfg.Context,
+		Path:          cfg.Storage.Path,
+		Pattern:       cfg.Storage.PathPattern,
+		ReclaimPolicy: cfg.Storage.ReclaimPolicy,
+		Logger:        logger,
+	}); err != nil {
+		return nil, fmt.Errorf("install local-path-provisioner: %w", err)
+	}
+
 	// Install the bundled Envoy Gateway (CRDs + controller +
 	// default GatewayClass). Replaces Traefik, which we disabled
 	// in the k3s server cmd above. Skipped wholesale when
@@ -282,6 +322,19 @@ func writeRegistriesToContainer(ctx context.Context, cli *client.Client, contain
 		return fmt.Errorf("copy %s into container: %w", registries.Path, err)
 	}
 	return nil
+}
+
+// dockerHostPorts gathers every host port docker.Provision will
+// bind. Empty Host entries are skipped (docker daemon picks a
+// free port); the preflight only checks what the user pinned.
+func dockerHostPorts(cfg config.DockerConfig) []string {
+	ports := make([]string, 0, len(cfg.PortForwards))
+	for _, pf := range cfg.PortForwards {
+		if pf.Host != "" {
+			ports = append(ports, pf.Host)
+		}
+	}
+	return ports
 }
 
 // buildHostConfig translates the YAML-shaped DockerConfig into
@@ -352,6 +405,38 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 	}
 	return hc, exposed, nil
 }
+
+// Stop gracefully shuts down the docker container. The Docker
+// daemon sends SIGTERM to PID 1 (k3s) and waits up to 60s for
+// the guest to exit before escalating to SIGKILL. 60s vs the
+// CLI default of 10s because k3s + containerd's overlayfs
+// snapshot writes can take longer to flush than the default
+// allows; on a faster timeout we'd see the same "exec format
+// error" crash loops on next start that we hit on qemu when
+// SIGTERM exited the qemu process in 200ms.
+//
+// Container is preserved for a follow-up `docker container
+// start` (the y-cluster equivalent isn't wired yet for the
+// docker backend; this is the lower half of that lifecycle).
+//
+// NotFound is treated as success.
+func Stop(ctx context.Context, name string, logger *zap.Logger) error {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	cli, err := dockerexec.New()
+	if err != nil {
+		return fmt.Errorf("docker daemon: %w", err)
+	}
+	defer cli.Close()
+	logger.Info("stopping docker container", zap.String("name", name))
+	return dockerexec.Stop(ctx, cli, name, dockerStopTimeoutSecs)
+}
+
+// dockerStopTimeoutSecs is the SIGTERM-to-SIGKILL grace the
+// Stop function passes to the Docker daemon. Tunable via the
+// var so tests can shorten it.
+var dockerStopTimeoutSecs = 60
 
 // Teardown removes the container. keepDisk is ignored -- k3s state
 // lives entirely inside the container, so there is no persistent

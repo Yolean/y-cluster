@@ -1,0 +1,20 @@
+# Headless service so StatefulSet pod DNS works
+# (versitygw-0.versitygw.appliance-stateful), plus a stable
+# port mapping for the HTTPRoute.
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw
+  namespace: appliance-stateful
+  labels:
+    app.kubernetes.io/name: versitygw
+    app.kubernetes.io/part-of: appliance-stateful
+spec:
+  selector:
+    app.kubernetes.io/name: versitygw
+  ports:
+    - name: s3
+      port: 7070
+      targetPort: s3
+  # Headless: required by StatefulSet for stable pod DNS.
+  clusterIP: None

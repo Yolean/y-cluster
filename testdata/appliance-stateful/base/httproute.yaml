@@ -1,0 +1,43 @@
+# HTTPRoute exposes versitygw via the y-cluster Gateway under a
+# /s3 prefix; URLRewrite strips the prefix so requests reach
+# versitygw at its native paths (/health, /<bucket>/<key>, ...).
+#
+# Why a prefix instead of a separate Gateway listener: keeps the
+# appliance to one inbound port (80) for the customer's external
+# proxy / load balancer, and lets the e2e smoketest use the same
+# host:port pair the echo workload already exposes
+# (curl http://<gateway>/s3/health vs http://<gateway>/q/envoy/echo).
+#
+# parentRefs targets the y-cluster Gateway in the y-cluster
+# namespace -- created by `y-cluster echo deploy` (or any consumer
+# kustomization that ships the same Gateway), and reachable
+# cross-namespace via the listener's `allowedRoutes.namespaces.from:
+# All` config.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: versitygw
+  namespace: appliance-stateful
+  labels:
+    app.kubernetes.io/name: versitygw
+    app.kubernetes.io/part-of: appliance-stateful
+spec:
+  parentRefs:
+    - name: y-cluster
+      namespace: y-cluster
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /s3
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              # Strip the /s3 prefix so versitygw sees /health
+              # (or /<bucket> etc.) at its native root.
+              replacePrefixMatch: /
+      backendRefs:
+        - name: versitygw
+          port: 7070

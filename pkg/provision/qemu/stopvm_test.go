@@ -97,6 +97,52 @@ func TestStopVM_TerminatesOnSIGTERM(t *testing.T) {
 	}
 }
 
+// TestStop_FallsBackToSignalsWhenSSHUnreachable covers the
+// graceful-shutdown path's failure mode: when sshd isn't
+// reachable (no real qemu, port closed) Stop must still kill
+// the recorded pid via the SIGTERM/SIGKILL ladder. We simulate
+// this with a sleep process whose pidfile is what Stop reads,
+// and an unused SSH port so sshexec.Exec dial fails fast.
+func TestStop_FallsBackToSignalsWhenSSHUnreachable(t *testing.T) {
+	withGraceTimeouts(t, 2*time.Second, 1*time.Second)
+
+	// Shrink the graceful budget so the test doesn't sit on the
+	// production 60s.
+	prevGrace := gracefulShutdownGrace
+	gracefulShutdownGrace = 500 * time.Millisecond
+	t.Cleanup(func() { gracefulShutdownGrace = prevGrace })
+
+	cacheDir := t.TempDir()
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = cacheDir
+	cfg.SSHPort = "1" // privileged port, nothing listens; ssh dial fails fast
+	if err := saveState(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := startReapableChild(t, "sleep", "60")
+	pidFile := pidFilePath(cacheDir, cfg.Name)
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Leave a placeholder ssh key file so guestPoweroff doesn't
+	// fail at the file-read step (the dial is the failure we
+	// want to exercise).
+	if err := os.WriteFile(filepath.Join(cacheDir, cfg.Name+"-ssh"), []byte("not-a-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Stop(cacheDir, cfg.Name, nil); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if pidAlive(cmd.Process.Pid) {
+		t.Fatal("process should be dead after Stop fallback")
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("pidfile should be removed; stat err=%v", err)
+	}
+}
+
 // TestStopVM_EscalatesToSIGKILL covers the regression we're fixing:
 // a process that ignores SIGTERM must still be killed (and the
 // pidfile cleaned) by stopVM. The downstream agent saw qemu surviving

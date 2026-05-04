@@ -63,6 +63,51 @@ type CommonConfig struct {
 	PortForwards []PortForward `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
 	Registries   Registries    `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
 	Gateway      GatewayConfig `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs, controller, or GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
+	Storage      StorageConfig `yaml:"storage,omitempty"      json:"storage,omitempty"      jsonschema:"description=Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/<ns>_<pvc>) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."`
+}
+
+// StorageConfig controls the local-path-provisioner install that
+// y-cluster ships in place of k3s's bundled local-storage. Three
+// knobs, all with defaults that suit the per-customer appliance
+// model:
+//
+//   - Path (default /data/yolean): root directory for every PV
+//     directory. Predictable and namespace-friendly so customers
+//     can mount a separate disk at this path on import without
+//     digging through /var/lib/rancher/k3s/storage/. Override
+//     when a customer wants a different mountpoint convention.
+//   - PathPattern (default `{{ .PVC.Namespace }}_{{ .PVC.Name }}`):
+//     directory name for each PV beneath Path. The default omits
+//     the upstream `pvc-<uuid>_` prefix so the path is reachable
+//     by namespace+name alone -- which lets an appliance upgrade
+//     (a fresh appliance disk) rebind to the same data directory
+//     under the operator's mounted data disk just by re-creating
+//     the PVC with the same namespace+name. Combined with
+//     ReclaimPolicy=Retain, this is the appliance-upgrade
+//     migration story.
+//   - ReclaimPolicy (default Retain): PV reclaim policy on the
+//     y-cluster StorageClass. Retain keeps the directory on PVC
+//     delete; the customer's data outlives a stray
+//     `kubectl delete pvc` and a fresh appliance install picks
+//     up the same data on the next bind.
+//
+// All three knobs flow into pkg/provision/localstorage.Install
+// via the runtime Config translation in each provisioner.
+type StorageConfig struct {
+	// Path is the local-path-provisioner nodePathMap default
+	// path -- the directory that holds one subdirectory per PV.
+	Path string `yaml:"path,omitempty" json:"path,omitempty" jsonschema:"default=/data/yolean,description=Root directory under which local-path-provisioner allocates one subdirectory per PV. Customers who attach a separate data disk should mount it here."`
+
+	// PathPattern is the per-PV subdirectory naming template
+	// (Go text/template against the local-path-provisioner
+	// helper-pod variables: .PVName, .PVC.Namespace, .PVC.Name,
+	// .PVC.UID).
+	PathPattern string `yaml:"pathPattern,omitempty" json:"pathPattern,omitempty" jsonschema:"default={{ .PVC.Namespace }}_{{ .PVC.Name }},description=Per-PV subdirectory template (Go text/template; vars: .PVName, .PVC.Namespace, .PVC.Name, .PVC.UID). Drop .PVName for predictable upgrade rebinding; keep it if you need uniqueness across PVC delete+recreate cycles under Retain."`
+
+	// ReclaimPolicy is applied to the y-cluster StorageClass.
+	// Retain (default) preserves directories on PVC delete;
+	// Delete wipes them.
+	ReclaimPolicy string `yaml:"reclaimPolicy,omitempty" json:"reclaimPolicy,omitempty" jsonschema:"enum=Retain,enum=Delete,default=Retain,description=Reclaim policy on the y-cluster StorageClass. Retain preserves PV directories on PVC delete; Delete (the upstream k3s default) wipes them."`
 }
 
 // GatewayConfig controls the bundled Envoy Gateway install
@@ -207,6 +252,23 @@ func (c *CommonConfig) applyCommonDefaults() {
 		}
 	}
 	c.applyGatewayDefaults()
+	c.applyStorageDefaults()
+}
+
+// applyStorageDefaults fills the bundled-local-storage knobs.
+// All three values are independent: a user who only overrides
+// Path (e.g. customer-side disk mounted at /mnt/customer-data)
+// keeps the default pattern + reclaim policy.
+func (c *CommonConfig) applyStorageDefaults() {
+	if c.Storage.Path == "" {
+		c.Storage.Path = "/data/yolean"
+	}
+	if c.Storage.PathPattern == "" {
+		c.Storage.PathPattern = "{{ .PVC.Namespace }}_{{ .PVC.Name }}"
+	}
+	if c.Storage.ReclaimPolicy == "" {
+		c.Storage.ReclaimPolicy = "Retain"
+	}
 }
 
 // validateCommon checks invariants every provider relies on. The

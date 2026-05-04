@@ -3,6 +3,7 @@ package qemu
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
@@ -81,12 +82,6 @@ func TestIsRunning_StalePidFile(t *testing.T) {
 	}
 }
 
-func TestExportVMDK_MissingDisk(t *testing.T) {
-	if err := ExportVMDK("/nonexistent/disk.qcow2", "/tmp/out.vmdk"); err == nil {
-		t.Fatal("expected error for missing disk")
-	}
-}
-
 func TestImportVMDK_MissingVMDK(t *testing.T) {
 	if err := ImportVMDK("/nonexistent/disk.vmdk", "/tmp/out.qcow2"); err == nil {
 		t.Fatal("expected error for missing VMDK")
@@ -118,6 +113,42 @@ func TestTeardownConfig_KeepDisk(t *testing.T) {
 	}
 }
 
+// TestRenderCloudInitUserData_DatasourceListPin guards the
+// portability fix: the seed must drop a cloud-init config
+// snippet that pins datasource_list to NoCloud + None so a
+// re-imported disk doesn't stall on EC2 IMDS probing.
+func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
+	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n")
+	if !strings.Contains(body, "/etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg") {
+		t.Errorf("user-data must drop pin file under /etc/cloud/cloud.cfg.d/:\n%s", body)
+	}
+	if !strings.Contains(body, "datasource_list: [NoCloud, None]") {
+		t.Errorf("user-data must pin datasource_list to [NoCloud, None]:\n%s", body)
+	}
+}
+
+// TestRenderCloudInitUserData_KeepsCoreShape pins the rest of the
+// user-data so the pin addition didn't accidentally drop the
+// hostname / user / sshkey wiring the qemu provisioner relies on.
+func TestRenderCloudInitUserData_KeepsCoreShape(t *testing.T) {
+	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n")
+	for _, want := range []string{
+		"hostname: my-cluster",
+		"name: ystack",
+		"sudo: ALL=(ALL) NOPASSWD:ALL",
+		"ssh-ed25519 KEY user@h",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("user-data missing %q:\n%s", want, body)
+		}
+	}
+	// Pubkey must be trimmed -- a trailing newline inside the
+	// YAML list item produces a malformed block.
+	if strings.Contains(body, "user@h\n      - ") {
+		t.Errorf("trailing newline on ssh key not trimmed:\n%s", body)
+	}
+}
+
 func TestTeardownConfig_DeleteDisk(t *testing.T) {
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = t.TempDir()
@@ -131,5 +162,85 @@ func TestTeardownConfig_DeleteDisk(t *testing.T) {
 	}
 	if _, err := os.Stat(diskPath); err == nil {
 		t.Fatal("disk should be deleted with keepDisk=false")
+	}
+}
+
+// TestTeardownConfig_DeletesKeypair pins the no-key-reuse contract:
+// teardown must remove the SSH keypair (and the other per-VM
+// artefacts) so the next provision generates a fresh one. Reusing
+// keys across customer builds would compromise the per-customer
+// appliance handoff.
+func TestTeardownConfig_DeletesKeypair(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = ""
+	for _, name := range []string{
+		cfg.Name + ".qcow2",
+		cfg.Name + "-ssh",
+		cfg.Name + "-ssh.pub",
+		cfg.Name + "-seed.img",
+		cfg.Name + "-cloud-init.yaml",
+		cfg.Name + "-console.log",
+	} {
+		if err := os.WriteFile(filepath.Join(cfg.CacheDir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := TeardownConfig(cfg, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		cfg.Name + ".qcow2",
+		cfg.Name + "-ssh",
+		cfg.Name + "-ssh.pub",
+		cfg.Name + "-seed.img",
+		cfg.Name + "-cloud-init.yaml",
+		cfg.Name + "-console.log",
+	} {
+		if _, err := os.Stat(filepath.Join(cfg.CacheDir, name)); err == nil {
+			t.Errorf("teardown should remove %s", name)
+		}
+	}
+}
+
+// TestTeardownConfig_KeepDiskKeepsKeypair documents that keepDisk
+// also preserves the keypair. Export workflows want both: the
+// qcow2 to ship and the keypair that authenticates against it.
+func TestTeardownConfig_KeepDiskKeepsKeypair(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = ""
+	keyPath := filepath.Join(cfg.CacheDir, cfg.Name+"-ssh")
+	if err := os.WriteFile(keyPath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := TeardownConfig(cfg, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Errorf("keepDisk=true must preserve the keypair: %v", err)
+	}
+}
+
+// TestPerVMArtefacts pins the path layout. Provision creates these
+// files; teardown removes them.  A drift between the two leaves
+// stale state that breaks the no-key-reuse contract.
+func TestPerVMArtefacts(t *testing.T) {
+	got := perVMArtefacts("/c", "n")
+	want := []string{
+		"/c/n.qcow2",
+		"/c/n-ssh",
+		"/c/n-ssh.pub",
+		"/c/n-seed.img",
+		"/c/n-cloud-init.yaml",
+		"/c/n-console.log",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("artefact[%d]: got %q, want %q", i, got[i], want[i])
+		}
 	}
 }

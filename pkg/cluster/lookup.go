@@ -183,6 +183,18 @@ func multipassRunning(ctx context.Context, name string) bool {
 	return running
 }
 
+// ResolveClusterName resolves contextName to its cluster entry
+// name in the kubeconfig. Empty kubeconfigPath uses the
+// kubectl-style search ($KUBECONFIG, then ~/.kube/config). Returns
+// "" (no error) when the context does not exist.
+//
+// Used by Lookup, but also exported for `y-cluster start` which
+// needs the cluster name without first finding a running cluster
+// (the cluster is, by definition, stopped at start time).
+func ResolveClusterName(kubeconfigPath, contextName string) (string, error) {
+	return readClusterName(nil, kubeconfigPath, contextName)
+}
+
 // readClusterName resolves contextName to its cluster entry name
 // in the kubeconfig. Empty kubeconfigPath uses the kubectl-style
 // search ($KUBECONFIG, then ~/.kube/config). Returns "" (no error)
