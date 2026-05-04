@@ -33,7 +33,7 @@
 #   4. Smoketest from the host. Anything that's reachable on
 #      :80 of the local qemu's port-forward is reachable on
 #      :80 of the eventual GCE VM.
-#         curl http://127.0.0.1:39080/q/envoy/echo
+#         curl http://127.0.0.1:80/q/envoy/echo
 #
 #   5. Stop the cluster cleanly so the qcow2 is quiesced. The
 #      graceful-stop logic flushes containerd snapshot state.
@@ -127,7 +127,7 @@ GCP_BUCKET="${GCP_BUCKET:-${GCP_PROJECT}-appliance-images}"
 GCP_MACHINE_TYPE="${GCP_MACHINE_TYPE:-e2-medium}"
 
 NAME="${NAME:-appliance-gcp-e2e}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-39080}"
+APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
 APP_API_PORT="${APP_API_PORT:-39443}"
 APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 

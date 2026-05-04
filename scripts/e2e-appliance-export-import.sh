@@ -50,7 +50,7 @@ Usage: e2e-appliance-export-import.sh
 
 Environment:
   NAME             Appliance name (default: appliance-export-test)
-  APP_HTTP_PORT    Build-side host port -> guest 80 (default: 39080)
+  APP_HTTP_PORT    Build-side host port -> guest 80 (default: 80)
   APP_API_PORT     Build-side host port -> guest 6443 (default: 39443)
   APP_SSH_PORT     Build-side host port -> guest 22 (default: 2229)
   IMP_HTTP_PORT    Import-side host port -> guest 80 (default: 39180)
@@ -75,7 +75,7 @@ case "${1:-}" in
 esac
 
 NAME="${NAME:-appliance-export-test}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-39080}"
+APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
 APP_API_PORT="${APP_API_PORT:-39443}"
 APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 IMP_HTTP_PORT="${IMP_HTTP_PORT:-39180}"

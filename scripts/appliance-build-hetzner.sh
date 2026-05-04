@@ -30,7 +30,7 @@ Environment:
   ENV_FILE          Hetzner credentials file (set in .env or shell env; required)
   HCLOUD_TOKEN      Hetzner Cloud API token (sourced from ENV_FILE)
   NAME              Local cluster name (default: appliance-hetzner-build)
-  APP_HTTP_PORT     Local host port -> guest 80 (default: 39080)
+  APP_HTTP_PORT     Local host port -> guest 80 (default: 80)
   APP_API_PORT      Local host port -> guest 6443 (default: 39443)
   APP_SSH_PORT     Local host port -> guest 22 (default: 2229)
   SERVER_NAME       Hetzner server name (default: y-cluster-appliance)
@@ -60,7 +60,7 @@ fi
 : "${ENV_FILE:?set ENV_FILE in .env or shell env}"
 
 NAME="${NAME:-appliance-hetzner-build}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-39080}"
+APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
 APP_API_PORT="${APP_API_PORT:-39443}"
 APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 SERVER_NAME="${SERVER_NAME:-y-cluster-appliance}"
