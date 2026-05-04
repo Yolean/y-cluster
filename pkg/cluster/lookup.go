@@ -25,6 +25,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -123,19 +124,29 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		}, nil
 	}
 
-	if alive, sshKey := qemuRunning(clusterName); alive {
-		// SSH port and user track the qemu provisioner's defaults
-		// (pkg/provision/config.QEMUConfig.SSHPort default 2222;
-		// cloud-init creates user `ystack`). A user who set a
-		// non-default SSHPort needs to fall back to ssh directly
-		// — detect-via-config-file is a follow-up.
+	if alive, sshKey, sshPort := qemuRunning(clusterName); alive {
+		// sshPort comes from the provisioner-written state JSON
+		// (<cache>/<name>.json) so a cluster that was provisioned
+		// with a non-default sshPort is still reachable. Falling
+		// back to "2222" -- the qemu provisioner's hardcoded
+		// default in pkg/provision/config.QEMUConfig -- only
+		// matters for old caches written before sshPort landed
+		// in the sidecar; current provisions always include it.
+		// SSHUser is hardcoded because cloud-init's user-data
+		// template (pkg/provision/qemu/qemu.go renderCloudInitUserData)
+		// only ever creates `ystack`. SSHHost is hardcoded
+		// because qemu always binds host-side port forwards to
+		// 127.0.0.1.
+		if sshPort == "" {
+			sshPort = "2222"
+		}
 		return &LookupResult{
 			Backend:     BackendQEMU,
 			Context:     contextName,
 			ClusterName: clusterName,
 			SSHKey:      sshKey,
 			SSHHost:     "127.0.0.1",
-			SSHPort:     "2222",
+			SSHPort:     sshPort,
 			SSHUser:     "ystack",
 		}, nil
 	}
@@ -221,30 +232,61 @@ func dockerContainerRunning(ctx context.Context, name string) (bool, error) {
 // $Y_CLUSTER_QEMU_CACHE_DIR when set, else ~/.cache/y-cluster-qemu --
 // matching qemu.FromConfig's default. The env override exists so
 // e2e tests can run an isolated cluster under t.TempDir() and
-// still have detect/ctr/crictl find it. Returns (true, sshKeyPath)
-// on a hit, (false, "") otherwise.
-func qemuRunning(name string) (bool, string) {
+// still have detect/ctr/crictl find it.
+//
+// Returns (true, sshKeyPath, sshPort) on a hit; sshPort is read
+// from the provisioner-written sidecar <cache>/<name>.json so
+// callers can reach a cluster that was provisioned with a
+// non-default port. sshPort is "" if the sidecar is missing or
+// has no sshPort field -- caller falls back to the qemu
+// provisioner's default.
+//
+// Returns (false, "", "") on no-hit.
+func qemuRunning(name string) (bool, string, string) {
 	cacheDir := os.Getenv("Y_CLUSTER_QEMU_CACHE_DIR")
 	if cacheDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return false, ""
+			return false, "", ""
 		}
 		cacheDir = filepath.Join(home, ".cache", "y-cluster-qemu")
 	}
 	pidPath := filepath.Join(cacheDir, name+".pid")
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
-		return false, ""
+		return false, "", ""
 	}
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		return false, ""
+		return false, "", ""
 	}
 	if !pidAlive(pid) {
-		return false, ""
+		return false, "", ""
 	}
-	return true, filepath.Join(cacheDir, name+"-ssh")
+	sshKey := filepath.Join(cacheDir, name+"-ssh")
+	sshPort := readQemuStateSSHPort(filepath.Join(cacheDir, name+".json"))
+	return true, sshKey, sshPort
+}
+
+// readQemuStateSSHPort reads the `sshPort` field out of the qemu
+// provisioner's state sidecar at the given path. Returns "" on
+// any failure (missing file, bad JSON, no field) -- the caller
+// is expected to fall back to a hardcoded default in that case.
+// We only care about one field, so we don't import the qemu
+// package's full state struct (which would risk an import cycle
+// since qemu imports cluster).
+func readQemuStateSSHPort(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var s struct {
+		SSHPort string `json:"sshPort"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		return ""
+	}
+	return s.SSHPort
 }
 
 // pidAlive is the stdlib equivalent of `kill -0 <pid>`.
