@@ -1,0 +1,137 @@
+# VersityGW StatefulSet: one-replica S3 API server with a posix
+# backend rooted in a PV. Pinned by digest so the fixture can't
+# silently drift on a `:latest` retag. v1.4.1 is the upstream
+# stable release as of 2026-04-22.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: versitygw
+  namespace: appliance-stateful
+  labels:
+    app.kubernetes.io/name: versitygw
+    app.kubernetes.io/part-of: appliance-stateful
+    app.kubernetes.io/managed-by: y-cluster
+spec:
+  serviceName: versitygw
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versitygw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versitygw
+        app.kubernetes.io/part-of: appliance-stateful
+    spec:
+      # Upstream image runs as root by default; the upstream Helm
+      # chart explicitly drops to UID/GID 1000 with caps cleared
+      # and a read-only root filesystem. We mirror that posture so
+      # the fixture demonstrates the production-shape security
+      # context an appliance customer would use.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: versitygw
+          image: ghcr.io/versity/versitygw:v1.4.1@sha256:0400cb59f59da0f1cf9f7fd49505191abc348dfadf54509bf1988caaff4eb96f
+          ports:
+            - name: s3
+              containerPort: 7070
+          env:
+            # ROOT_ACCESS_KEY / ROOT_SECRET_KEY are mandatory --
+            # versitygw refuses to start without them. These are
+            # TEST-ONLY values; a real customer install supplies
+            # their own via a Secret. The fixture's smoketest
+            # (curl /s3/health) doesn't need them, but the
+            # process refuses to boot without something here.
+            - name: ROOT_ACCESS_KEY
+              value: appliance-test
+            - name: ROOT_SECRET_KEY
+              value: appliance-test-secret-not-for-prod
+            # Posix backend rooted in the PV. The mount path below
+            # must match the volumeMounts entry, and the gateway
+            # never writes outside it.
+            - name: VGW_BACKEND
+              value: posix
+            - name: VGW_BACKEND_ARG
+              value: /data
+            # Listener port. Default is :7070; we set it explicitly
+            # so the Service / HTTPRoute / smoketest line up
+            # without anyone hunting for the upstream default.
+            - name: VGW_PORT
+              value: ":7070"
+            # Unauth GET endpoint at /health. Without this set, the
+            # gateway answers /s3/health with an S3 auth error
+            # (which is fine as a TCP liveness signal but not as a
+            # readiness probe -- HTTP 200 is much more useful for
+            # the e2e curl loop).
+            - name: VGW_HEALTH
+              value: /health
+            # IAM dir lives in /tmp/vgw because the root filesystem
+            # is read-only. The path is mounted directly via the
+            # vgw-iam emptyDir below -- versitygw's binary doesn't
+            # auto-mkdir its iam-dir, so an emptyDir mount at
+            # /tmp/vgw is the simplest way to have the directory
+            # exist on container start.
+            - name: VGW_ARGS
+              value: --iam-dir /tmp/vgw
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: vgw-iam
+              mountPath: /tmp/vgw
+          # Liveness + readiness against the unauth /health
+          # endpoint. The probe runs from inside the pod (kubelet
+          # talks to :7070), so it bypasses the gateway entirely
+          # and only reflects the VGW process's own health.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: s3
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Dedicated emptyDir for VGW's IAM dir. Mounted at
+        # /tmp/vgw (the path passed via --iam-dir) so the
+        # directory exists on container start; versitygw's binary
+        # writes /tmp/vgw/users.json on first boot when no IAM
+        # service is configured. Lives on emptyDir (not the PV)
+        # because IAM data is per-instance state, not bucket
+        # content -- and a fresh appliance ought to start with a
+        # clean IAM seed every time the StatefulSet pod (re)
+        # creates.
+        - name: vgw-iam
+          emptyDir: {}
+  volumeClaimTemplates:
+    # 1Gi against k3s's default `local-path` StorageClass. The
+    # provisioner creates /var/lib/rancher/k3s/storage/<pvc-uuid>_
+    # appliance-stateful_data-versitygw-0 on the node and bind-
+    # mounts it into the pod. Survives stop/start and the qcow2
+    # export -> import (the directory is on the appliance disk).
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/part-of: appliance-stateful
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        resources:
+          requests:
+            storage: 1Gi

@@ -76,6 +76,50 @@ func buildVMNodeRemote(binary string, args []string) string {
 	return "sudo k3s " + binary + shellQuoteJoin(args)
 }
 
+// RunShell executes an arbitrary shell command (parsed by `sh -c`)
+// on the cluster node. Used by callers that need filesystem writes
+// or other ad-hoc operations the ctr/crictl wrappers don't cover --
+// the canonical example is `y-cluster manifests add` writing to
+// /var/lib/y-cluster/manifests-staging/. The command runs as root
+// on the node (sudo on qemu/multipass; the k3s container's user
+// is already root for docker).
+//
+// stdin/stdout/stderr are passthrough so callers can pipe arbitrary
+// bytes (manifest YAML on stdin, command output to stdout).
+//
+// Routing per backend mirrors RunCtr.
+func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+	switch lr.Backend {
+	case BackendDocker:
+		cli, err := dockerexec.New()
+		if err != nil {
+			return fmt.Errorf("docker client: %w", err)
+		}
+		defer func() { _ = cli.Close() }()
+		return dockerexec.Exec(ctx, cli, lr.ContainerName,
+			[]string{"sh", "-c", cmd},
+			stdin, stdout, stderr)
+	case BackendQEMU:
+		return sshexec.ExecStream(ctx, sshexec.Target{
+			Host: lr.SSHHost, Port: lr.SSHPort,
+			User: lr.SSHUser, KeyPath: lr.SSHKey,
+		}, "sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
+	case BackendMultipass:
+		return multipassexec.ExecStream(ctx, lr.MultipassName,
+			"sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
+	default:
+		return fmt.Errorf("unsupported backend %q", lr.Backend)
+	}
+}
+
+// singleQuote wraps a string in POSIX single quotes for safe inclusion
+// in a remote shell command. Single quotes inside the string are
+// escaped via the standard '\'' trick. Used to pass an entire `sh -c`
+// command line through ssh / multipass-exec without re-parsing.
+func singleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // shellQuoteJoin shell-quotes each arg with single quotes (POSIX-
 // safe) and joins with leading spaces. Empty `args` returns "".
 // Single quotes inside an arg become `'\''` per the standard

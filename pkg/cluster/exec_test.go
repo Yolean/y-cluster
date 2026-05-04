@@ -25,6 +25,32 @@ func TestBuildQemuRemote_NoArgs(t *testing.T) {
 	}
 }
 
+// TestSingleQuote covers the helper RunShell uses to wrap an
+// entire `sh -c <cmd>` string for ssh / multipass-exec -- the
+// caller's command must survive a second round of shell parsing
+// without losing semantics. Embedded single quotes go through
+// the standard `'\''` trick.
+func TestSingleQuote(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", "''"},
+		{"hello", "'hello'"},
+		{"hello world", "'hello world'"},
+		{"it's", `'it'\''s'`},
+		{"'leading", `''\''leading'`},
+		{"trailing'", `'trailing'\'''`},
+		{"a'b'c", `'a'\''b'\''c'`},
+		{"echo $HOME", "'echo $HOME'"},
+	}
+	for _, c := range cases {
+		if got := singleQuote(c.in); got != c.want {
+			t.Errorf("singleQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestShellQuoteJoin(t *testing.T) {
 	cases := []struct {
 		in   []string

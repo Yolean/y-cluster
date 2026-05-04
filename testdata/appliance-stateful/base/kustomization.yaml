@@ -1,0 +1,28 @@
+# Stateful workload fixture used by the appliance e2e:
+# scripts/e2e-appliance-export-import.sh applies this base via
+# kubectl after the echo workload is up. The same base also lands
+# in the Hetzner appliance snapshot via the Packer template.
+#
+# The fixture exercises the persistent-volume path: a one-replica
+# StatefulSet with a 1Gi volumeClaimTemplate against k3s's default
+# `local-path` StorageClass. Local-path-provisioner allocates the
+# volume under /var/lib/rancher/k3s/storage on the node, so the
+# data survives `y-cluster stop` / `y-cluster start` (no host-side
+# cleanup) AND survives a qcow2 export / import (the directory is
+# part of the appliance disk).
+#
+# Workload: VersityGW (https://github.com/versity/versitygw),
+# an S3 API server with a posix-filesystem backend. Exercises a
+# real stateful scenario: bucket / object writes hit the PV.
+#
+# This fixture is e2e-test scaffolding, NOT a customer-shipped
+# appliance default. The credentials below are deliberately
+# obvious test-only strings; customers writing real workloads
+# follow the same shape with their own Secret-managed values.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: appliance-stateful
+resources:
+  - statefulset.yaml
+  - service.yaml
+  - httproute.yaml

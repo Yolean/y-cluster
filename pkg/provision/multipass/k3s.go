@@ -109,8 +109,13 @@ func (c *Cluster) installK3sAirgap(ctx context.Context) error {
 // strategies. tls-san pinning is what makes the host's kubectl
 // trust the cert when it dials https://<vm-ip>:6443 instead of the
 // in-VM 127.0.0.1.
+//
+// --disable=local-storage hands the StorageClass over to
+// pkg/provision/localstorage, which bundles a y-cluster-shaped
+// local-path-provisioner (path /data/yolean, predictable PVC
+// namespace_name pattern, Retain reclaim).
 func (c *Cluster) k3sExecArgs() string {
-	return "--write-kubeconfig-mode=644 --disable=traefik --tls-san=" + c.vmIP
+	return "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --tls-san=" + c.vmIP
 }
 
 // cacheK3sAirgap downloads (or reuses cached) k3s binary + airgap

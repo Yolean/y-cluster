@@ -16,7 +16,7 @@
 #     letting fresh k3s versions be tested before the mirror runs.
 #
 # Format note: k3s GitHub releases use `+k3sN` as the build-metadata
-# separator (e.g. v1.35.4-rc3+k3s1). Docker tag syntax forbids `+`,
+# separator (e.g. v1.35.4+k3s1). Docker tag syntax forbids `+`,
 # so the mirrored image's tag substitutes `+` with `-`. We pin the
 # GitHub-release form here because that's what the install script
 # and binary download URL need; the workflow and the DockerTag
@@ -30,7 +30,7 @@
 #   4. CI's generate-drift job re-runs schemagen and fails until the
 #      regenerated schemas are committed alongside the bump.
 
-version: v1.35.4-rc3+k3s1
+version: v1.35.4+k3s1
 
 mirror:
   upstream: docker.io/rancher/k3s

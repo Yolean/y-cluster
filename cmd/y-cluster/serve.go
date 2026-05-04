@@ -101,13 +101,10 @@ func serveEnsureCmd() *cobra.Command {
 			// Success status to stdout: makes the line scriptable
 			// (`if y-cluster serve ensure ... | grep -q started`)
 			// and keeps stderr free for warnings the daemon may
-			// emit later. The short SHA tells the operator WHICH
-			// config the running daemon is on, which matters most
-			// when the answer is `noop` and they suspected the
-			// daemon was on stale state.
+			// emit later.
 			fmt.Fprintf(cmd.OutOrStdout(),
-				"y-cluster serve %s on %s (sha %s)\n",
-				res.Action, formatPorts(res.Ports), shortSHA(res.Digest))
+				"y-cluster serve %s on %s\n",
+				res.Action, formatPorts(res.Ports))
 			return nil
 		},
 	}
@@ -122,20 +119,6 @@ func serveEnsureCmd() *cobra.Command {
 // formatPorts renders ports as ":N" for one port or ":N, :M, ..."
 // for several. Single-port is the common case so we optimise the
 // reading.
-// shortSHA truncates a hex sha256 digest to 12 chars (git
-// short-rev convention) for the ensure output. Empty input
-// returns "unknown" so the line stays parseable when a
-// future Ensure path forgets to populate Digest.
-func shortSHA(s string) string {
-	if s == "" {
-		return "unknown"
-	}
-	if len(s) > 12 {
-		return s[:12]
-	}
-	return s
-}
-
 func formatPorts(ports []int) string {
 	if len(ports) == 1 {
 		return fmt.Sprintf(":%d", ports[0])

@@ -19,7 +19,6 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
-	"github.com/Yolean/y-cluster/pkg/serve"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
 
@@ -87,13 +86,6 @@ func versionString() string {
 }
 
 func main() {
-	// Surface the binary's version to pkg/serve so the daemon
-	// startup log reports it. The daemon process is a re-exec
-	// of THIS binary, so main() runs again on the daemon side
-	// and this assignment is what makes `serve logs` answer
-	// "which y-cluster build is running".
-	serve.DaemonVersion = versionString()
-
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -132,14 +124,22 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(yconvergeCmd())
 	root.AddCommand(provisionCmd())
 	root.AddCommand(teardownCmd())
+	root.AddCommand(pauseCmd())
+	root.AddCommand(resumeCmd())
+	root.AddCommand(stopCmd())
+	root.AddCommand(startCmd())
+	root.AddCommand(prepareExportCmd())
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(imagesCmd())
+	root.AddCommand(manifestsCmd())
 	root.AddCommand(detectCmd())
 	root.AddCommand(ctrCmd())
 	root.AddCommand(crictlCmd())
 	root.AddCommand(cacheCmd())
+	root.AddCommand(echoCmd())
+	root.AddCommand(localstorageCmd())
 
 	return root
 }
@@ -456,31 +456,6 @@ func (k *dockerNamedTeardown) run() error {
 	return dockerexec.Remove(context.Background(), cli, k.name)
 }
 
-func exportCmd() *cobra.Command {
-	var configDir string
-	cmd := &cobra.Command{
-		Use:   "export <output.vmdk>",
-		Short: "Export the cluster disk as a VMware appliance",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			loaded, err := loadProvision(configDir)
-			if err != nil {
-				return err
-			}
-			q, err := asQEMU(loaded)
-			if err != nil {
-				return err
-			}
-			rc := qemu.FromConfig(q)
-			return qemu.ExportVMDK(filepath.Join(rc.CacheDir, rc.Name+".qcow2"), args[0])
-		},
-	}
-	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
-	if err := cmd.MarkFlagRequired("config"); err != nil {
-		panic(err)
-	}
-	return cmd
-}
 
 func importCmd() *cobra.Command {
 	var configDir string

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: appliance-stateful
+  labels:
+    # Marker label so cluster-wide cleanup in tests can sweep the
+    # whole fixture in one selector ("delete ns -l app.kubernetes.io/
+    # part-of=appliance-stateful").
+    app.kubernetes.io/part-of: appliance-stateful

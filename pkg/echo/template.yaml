@@ -1,0 +1,135 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{.Namespace}}
+---
+# A Gateway listening on :80, accepting routes from any namespace
+# and any hostname. The bundled GatewayClass (default name
+# "y-cluster") wires it to Envoy Gateway.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: y-cluster
+  namespace: {{.Namespace}}
+spec:
+  gatewayClassName: {{.GatewayClass}}
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# Yolean envoy echo image: distroless envoyproxy/envoy with a Rust
+# dynamic-modules .so loaded by the bundled /etc/envoy/envoy.yaml.
+# The filter intercepts /q/envoy/echo and answers with a JSON dump
+# of request info, headers, and the upstream envoy version. No
+# extra config or scaffolding required -- the image is a complete
+# upstream service ready to sit behind an HTTPRoute.
+#
+# Replaces the older registry.k8s.io/echoserver:1.10 (nginx + Lua).
+# Distroless envoy is read-only-root-filesystem-friendly and
+# matches the data plane that production traffic flows through, so
+# the appliance test workload exercises the same code path the
+# customer's apps will land on.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/name: echo
+    app.kubernetes.io/managed-by: y-cluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: echo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: echo
+    spec:
+      # Distroless envoy ships without a USER directive but doesn't
+      # need root for an unprivileged :8080 listener. We pin the
+      # security context so the pod fails fast on a node configured
+      # to require runAsRoot, and so a future image bump that drops
+      # the implicit non-root assumption is caught here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+      containers:
+        - name: echo
+          image: {{.Image}}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          env:
+            # Downward-API vars for symmetry with the older
+            # echoserver template -- the bundled echo filter passes
+            # request headers through, so a custom envoy.yaml could
+            # surface these via header.add. Default config doesn't
+            # use them; harmless to set.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/name: echo
+    app.kubernetes.io/managed-by: y-cluster
+spec:
+  selector:
+    app.kubernetes.io/name: echo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# HTTPRoute matches /q/envoy/echo on ANY hostname (no hostnames
+# field on the HTTPRoute). Path type is PathPrefix so /q/envoy/echo
+# AND /q/envoy/echo/anything-deeper both route here. The path
+# tracks the upstream image's bundled envoy.yaml filter
+# `path_prefix`; both sides must agree or the upstream filter
+# 404s the request despite a successful gateway match.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/name: echo
+    app.kubernetes.io/managed-by: y-cluster
+spec:
+  parentRefs:
+    - name: y-cluster
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /q/envoy/echo
+      backendRefs:
+        - name: echo
+          port: 80

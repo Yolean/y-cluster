@@ -23,6 +23,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
+	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
@@ -57,6 +58,7 @@ type Config struct {
 	K3s          K3s
 	Registries   config.Registries
 	Gateway      config.GatewayConfig
+	Storage      config.StorageConfig
 }
 
 // K3s carries the runtime view of K3sConfig: which version to
@@ -68,6 +70,22 @@ type Config struct {
 type K3s struct {
 	Version string
 	Install string
+}
+
+// preflightHostPorts gathers every host port the qemu Provision
+// will bind: the SSH forward plus every PortForward.Host entry.
+// Empty Host entries are skipped (qemu picks via SLIRP).
+func preflightHostPorts(c Config) []string {
+	ports := make([]string, 0, 1+len(c.PortForwards))
+	if c.SSHPort != "" {
+		ports = append(ports, c.SSHPort)
+	}
+	for _, pf := range c.PortForwards {
+		if pf.Host != "" {
+			ports = append(ports, pf.Host)
+		}
+	}
+	return ports
 }
 
 // hostAPIPort scans the configured port forwards and returns the
@@ -139,6 +157,7 @@ func FromConfig(c *config.QEMUConfig) Config {
 		},
 		Registries: c.Registries,
 		Gateway:    c.Gateway,
+		Storage:    c.Storage,
 	}
 }
 
@@ -183,6 +202,21 @@ func (c Config) IsRunning() (bool, int) {
 
 // Provision creates and starts a QEMU VM with k3s installed.
 func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, error) {
+	// Cross-provisioner preflight: every host port we'll bind is
+	// free, and the kubeconfig context isn't pointing at a
+	// different cluster (which a second-cluster mistake would
+	// silently clobber). Fail with the full list of conflicts so
+	// the user fixes them in one config edit, not three.
+	pf := provision.Preflight{
+		HostPorts:      preflightHostPorts(cfg),
+		ContextName:    cfg.Context,
+		ContextCluster: clusterName(cfg.Name),
+		KubeconfigPath: cfg.Kubeconfig,
+	}
+	if err := pf.Run(); err != nil {
+		return nil, err
+	}
+
 	// Initialize kubeconfig manager early — validates KUBECONFIG env
 	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
 	if err != nil {
@@ -214,31 +248,38 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return nil, err
 	}
 
-	// Create disk from cloud image (or reuse existing)
+	// Create disk from cloud image. ensureDisk errors when the
+	// disk already exists -- per-customer Provision is always
+	// fresh; the operator runs teardown first or `start` to
+	// resume.
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
-	diskReused := diskExisted(diskPath)
 	if err := c.ensureDisk(ctx, cloudImg, diskPath); err != nil {
 		return nil, err
 	}
 
-	// Generate SSH key
+	// Generate a fresh SSH keypair (always; never reused across
+	// provisions). The public half lands in the disk via the
+	// cloud-init seed below.
 	if err := c.ensureSSHKey(); err != nil {
 		return nil, err
 	}
 
-	// Create cloud-init seed (only needed for first boot)
-	var seedPath string
-	if !diskReused {
-		var err error
-		seedPath, err = c.createCloudInitSeed()
-		if err != nil {
-			return nil, err
-		}
+	seedPath, err := c.createCloudInitSeed()
+	if err != nil {
+		return nil, err
 	}
 
 	// Start VM
 	if err := c.startVM(ctx, diskPath, seedPath); err != nil {
 		return nil, err
+	}
+
+	// Persist launch parameters so `y-cluster start` can re-launch
+	// the same shape after a stop. Best-effort: a failed write
+	// here doesn't unwind a working Provision; the operator can
+	// teardown if they care that the sidecar is missing.
+	if err := saveState(cfg); err != nil {
+		logger.Warn("could not save state sidecar (start will not work without it)", zap.Error(err))
 	}
 
 	// Wait for SSH
@@ -275,6 +316,19 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
+
+	// Install the bundled local-path-provisioner (replaces k3s's
+	// disabled local-storage addon). Runs before any workload
+	// install so the StorageClass exists when consumer PVCs land.
+	if err := localstorage.Install(ctx, localstorage.Options{
+		ContextName:   cfg.Context,
+		Path:          cfg.Storage.Path,
+		Pattern:       cfg.Storage.PathPattern,
+		ReclaimPolicy: cfg.Storage.ReclaimPolicy,
+		Logger:        logger,
+	}); err != nil {
+		return nil, fmt.Errorf("install local-path-provisioner: %w", err)
+	}
 
 	// Install the bundled Envoy Gateway (CRDs + controller +
 	// default GatewayClass). Replaces the Traefik k3s would
@@ -331,15 +385,41 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		kubecfg.CleanupTeardown()
 	}
 
-	// Handle disk
+	// Handle per-VM artefacts. keepDisk preserves everything (for
+	// export, where the operator wants the qcow2 plus the keypair
+	// that authenticates against it). The default removes
+	// everything: disk, state sidecar, ssh keypair, cloud-init seed,
+	// rendered cloud-init.yaml, and console log. Wiping the keypair
+	// is load-bearing -- the next provision generates a fresh one,
+	// which is the contract for per-customer appliance delivery (no
+	// key reuse across provision runs).
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if keepDisk {
 		logger.Info("teardown complete, disk preserved", zap.String("disk", diskPath))
-	} else {
-		os.Remove(diskPath)
-		logger.Info("teardown complete, disk deleted")
+		return nil
 	}
+	for _, p := range perVMArtefacts(cfg.CacheDir, cfg.Name) {
+		_ = os.Remove(p)
+	}
+	_ = removeState(cfg.CacheDir, cfg.Name)
+	logger.Info("teardown complete, disk and keypair deleted")
 	return nil
+}
+
+// perVMArtefacts returns every path Provision creates for a given
+// cluster. Used by TeardownConfig to leave the cache dir clean for
+// the next provision -- the keypair in particular must go so the
+// per-customer "no key reuse" contract holds.
+func perVMArtefacts(cacheDir, name string) []string {
+	prefix := filepath.Join(cacheDir, name)
+	return []string{
+		prefix + ".qcow2",
+		prefix + "-ssh",
+		prefix + "-ssh.pub",
+		prefix + "-seed.img",
+		prefix + "-cloud-init.yaml",
+		prefix + "-console.log",
+	}
 }
 
 // stopVM ends the qemu process whose pid lives in pidFile,
@@ -473,21 +553,6 @@ func (c *Cluster) DiskPath() string {
 	return filepath.Join(c.cfg.CacheDir, c.cfg.Name+".qcow2")
 }
 
-// ExportVMDK converts the disk image to a streamOptimized VMDK.
-func ExportVMDK(diskPath, outputPath string) error {
-	if _, err := os.Stat(diskPath); err != nil {
-		return fmt.Errorf("disk not found: %s", diskPath)
-	}
-	cmd := exec.Command("qemu-img", "convert",
-		"-f", "qcow2", "-O", "vmdk",
-		"-o", "subformat=streamOptimized",
-		diskPath, outputPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("qemu-img convert: %s: %w", out, err)
-	}
-	return nil
-}
-
 // ImportVMDK converts a VMDK to qcow2 for use as a VM disk.
 func ImportVMDK(vmdkPath, diskPath string) error {
 	if _, err := os.Stat(vmdkPath); err != nil {
@@ -512,11 +577,6 @@ func clusterName(vmName string) string {
 	return vmName
 }
 
-func diskExisted(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
 	imgPath := filepath.Join(c.cfg.CacheDir, fmt.Sprintf("ubuntu-%s-server-cloudimg-amd64.img", ubuntuVersion))
 	if _, err := os.Stat(imgPath); err == nil {
@@ -530,10 +590,19 @@ func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
 	return imgPath, nil
 }
 
+// ensureDisk creates the per-VM qcow2. Errors when the disk
+// already exists -- the per-customer appliance model treats every
+// `y-cluster provision` as a fresh build (fresh disk, fresh
+// keypair, fresh machine-id once the guest boots). Reusing a
+// disk under a new keypair would also leave the old pubkey in
+// the disk's authorized_keys, which we have no way to update
+// from the host. The operator runs `y-cluster teardown` first
+// (or `y-cluster start` to resume an existing one).
 func (c *Cluster) ensureDisk(ctx context.Context, cloudImg, diskPath string) error {
 	if _, err := os.Stat(diskPath); err == nil {
-		c.logger.Info("reusing existing disk", zap.String("path", diskPath))
-		return nil
+		return fmt.Errorf(
+			"disk %s already exists; run `y-cluster teardown -c %s` to start fresh, or `y-cluster start --context=%s` to resume",
+			diskPath, c.cfg.CacheDir, c.cfg.Context)
 	}
 	c.logger.Info("creating disk", zap.String("size", c.cfg.DiskSize))
 	cmd := exec.CommandContext(ctx, "qemu-img", "create",
@@ -545,20 +614,35 @@ func (c *Cluster) ensureDisk(ctx context.Context, cloudImg, diskPath string) err
 	return nil
 }
 
+// ensureSSHKey generates a fresh SSH keypair on every provision.
+// y-cluster ships the keypair as part of the per-customer appliance
+// handoff; reusing keys across provisions would compromise the
+// contract that each shipped appliance authenticates with its own
+// keypair. We delete any leftover key first (a clean teardown
+// already removed it; this is belt-and-braces against a half-done
+// teardown) and regenerate.
 func (c *Cluster) ensureSSHKey() error {
-	if _, err := os.Stat(c.sshKey); err == nil {
-		return nil
-	}
+	_ = os.Remove(c.sshKey)
+	_ = os.Remove(c.sshKey + ".pub")
 	return sshexec.GenerateKey(c.sshKey)
 }
 
-func (c *Cluster) createCloudInitSeed() (string, error) {
-	pubKey, err := os.ReadFile(c.sshKey + ".pub")
-	if err != nil {
-		return "", fmt.Errorf("read SSH public key: %w", err)
-	}
-
-	cloudInit := fmt.Sprintf(`#cloud-config
+// renderCloudInitUserData returns the #cloud-config user-data the
+// qemu provisioner writes into the seed image. Pulled out as a
+// pure function so unit tests can pin the shape without spinning
+// up cloud-localds.
+//
+// The write_files entry drops a cloud-init config snippet onto the
+// disk during first boot. It pins datasource_list so that when this
+// disk is later exported and re-imported (Hetzner snapshot, VMware
+// OVA, dd to bare metal), cloud-init only probes NoCloud (the qemu
+// seed shape) and then falls through to None instead of spending
+// minutes hammering EC2 IMDS / GCE metadata / OpenStack ConfigDrive
+// on hosts that don't provide them. The "no SSH banner" failure
+// mode on Hetzner was cloud-init blocking sshd's network ordering;
+// this pin prevents the recurrence.
+func renderCloudInitUserData(hostname, sshPubKey string) string {
+	return fmt.Sprintf(`#cloud-config
 hostname: %s
 users:
   - name: ystack
@@ -567,9 +651,31 @@ users:
     ssh_authorized_keys:
       - %s
 package_update: false
-`, c.cfg.Name, strings.TrimSpace(string(pubKey)))
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg
+    permissions: '0644'
+    content: |
+      # y-cluster: bound cloud-init datasource discovery so a re-imported
+      # disk does not stall on EC2 IMDS / GCE metadata probing on hosts
+      # that don't provide them. NoCloud covers the qemu seed; None lets
+      # cloud-init proceed when no NoCloud source is present.
+      datasource_list: [NoCloud, None]
+`, hostname, strings.TrimSpace(sshPubKey))
+}
 
-	cloudInitPath := filepath.Join(c.cfg.CacheDir, "cloud-init.yaml")
+func (c *Cluster) createCloudInitSeed() (string, error) {
+	pubKey, err := os.ReadFile(c.sshKey + ".pub")
+	if err != nil {
+		return "", fmt.Errorf("read SSH public key: %w", err)
+	}
+
+	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey))
+
+	// Name-prefix the cloud-init source so two concurrent provisions
+	// in the same cacheDir don't race on the file. Per-VM artifacts
+	// elsewhere (qcow2, pidfile, ssh key, seed image, console log,
+	// state sidecar) all follow the same <name>-prefixed convention.
+	cloudInitPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-cloud-init.yaml")
 	if err := os.WriteFile(cloudInitPath, []byte(cloudInit), 0o644); err != nil {
 		return "", err
 	}

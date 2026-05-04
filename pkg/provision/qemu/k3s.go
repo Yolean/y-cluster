@@ -55,11 +55,18 @@ func (c *Cluster) installK3s(ctx context.Context) error {
 // Gateway as the cluster ingress. Running both controllers
 // would have two consumers fighting over the host:80/:443
 // forwards.
+//
+// `--disable=local-storage` is added because y-cluster ships
+// its own local-path-provisioner (pkg/provision/localstorage)
+// with appliance-shape defaults (path /data/yolean,
+// PVC namespace_name pattern, Retain reclaim). k3s's deploy
+// controller would otherwise reconcile our config back to the
+// upstream defaults on every restart.
 func (c *Cluster) installK3sScript(ctx context.Context) error {
 	cmd := fmt.Sprintf(
 		"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=%s INSTALL_K3S_EXEC=%s sudo -E sh -",
 		shellQuote(c.cfg.K3s.Version),
-		shellQuote("--write-kubeconfig-mode=644 --disable=traefik"),
+		shellQuote("--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"),
 	)
 	out, err := c.SSH(ctx, cmd)
 	if err != nil {
@@ -93,7 +100,7 @@ func (c *Cluster) installK3sAirgap(ctx context.Context) error {
 		fmt.Sprintf(
 			"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=%s INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=%s sudo -E sh -",
 			shellQuote(c.cfg.K3s.Version),
-			shellQuote("--write-kubeconfig-mode=644 --disable=traefik"),
+			shellQuote("--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"),
 		),
 	} {
 		out, err := c.SSH(ctx, step)
