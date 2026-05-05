@@ -377,6 +377,47 @@ do_tls_frontend() {
             --target-https-proxy-region="$GCP_REGION" --ports=443 >/dev/null
     fi
 
+    # === HTTP -> HTTPS redirect chain ===
+    # GCP regional EXTERNAL_MANAGED URL maps can do a default redirect
+    # but `gcloud compute url-maps create` has no flag for it -- we
+    # have to import a YAML body. A URL map can have either
+    # `defaultService` (forward) or `defaultUrlRedirect` (redirect),
+    # not both, hence the second URL map + second target proxy + second
+    # forwarding rule sharing the same reserved IP.
+    stage "creating redirect URL map ${NAME}-tls-redirect (HTTP -> HTTPS)"
+    if ! gcloud compute url-maps describe "${NAME}-tls-redirect" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute url-maps import "${NAME}-tls-redirect" \
+                --project="$GCP_PROJECT" --region="$GCP_REGION" \
+                --source=- --quiet >/dev/null <<YAML
+name: ${NAME}-tls-redirect
+defaultUrlRedirect:
+  httpsRedirect: true
+  redirectResponseCode: MOVED_PERMANENTLY_DEFAULT
+  stripQuery: false
+YAML
+    fi
+
+    stage "creating target HTTP proxy ${NAME}-tls-http-proxy"
+    if ! gcloud compute target-http-proxies describe "${NAME}-tls-http-proxy" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute target-http-proxies create "${NAME}-tls-http-proxy" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --url-map="${NAME}-tls-redirect" \
+            --url-map-region="$GCP_REGION" >/dev/null
+    fi
+
+    stage "creating forwarding rule ${NAME}-tls-fr-http (:80 -> redirect)"
+    if ! gcloud compute forwarding-rules describe "${NAME}-tls-fr-http" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute forwarding-rules create "${NAME}-tls-fr-http" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --load-balancing-scheme=EXTERNAL_MANAGED --network-tier=STANDARD \
+            --network=default --address="${NAME}-tls-ip" \
+            --target-http-proxy="${NAME}-tls-http-proxy" \
+            --target-http-proxy-region="$GCP_REGION" --ports=80 >/dev/null
+    fi
+
     cat <<EOF
 
 ================================================================
@@ -385,6 +426,8 @@ External HTTPS LoadBalancer ready.
   IP:        $lb_ip
   Hostnames: ${domains_csv//,/ }
   Cert:      SELF-SIGNED (browser will warn; curl needs -k)
+  HTTP:      :80 -> 301 redirect to :443 (so plain http:// works
+             as long as the client follows redirects, e.g. curl -L)
 
 To test from another machine, append this single line to /etc/hosts:
 
@@ -404,16 +447,25 @@ EOF
 # the forwarding rule has to go before the proxy/url-map/backend
 # chain, and the IP after.
 do_tls_teardown() {
-    local fr proxy urlmap backend neg hc cert ip subnet
+    local fr fr_http proxy http_proxy urlmap urlmap_redirect backend neg hc cert ip subnet
     fr=$(gcloud compute forwarding-rules describe "${NAME}-tls-fr" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" \
         --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing fr is not an error
+    fr_http=$(gcloud compute forwarding-rules describe "${NAME}-tls-fr-http" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing :80 redirect fr is not an error
     proxy=$(gcloud compute target-https-proxies describe "${NAME}-tls-proxy" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" \
         --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing proxy is not an error
+    http_proxy=$(gcloud compute target-http-proxies describe "${NAME}-tls-http-proxy" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing :80 redirect proxy is not an error
     urlmap=$(gcloud compute url-maps describe "${NAME}-tls-urlmap" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" \
         --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing url-map is not an error
+    urlmap_redirect=$(gcloud compute url-maps describe "${NAME}-tls-redirect" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing redirect url-map is not an error
     backend=$(gcloud compute backend-services describe "${NAME}-tls-backend" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" \
         --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing backend is not an error
@@ -433,16 +485,26 @@ do_tls_teardown() {
         --project="$GCP_PROJECT" --region="$GCP_REGION" \
         --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing subnet is not an error
 
-    if [[ -z "$fr$proxy$urlmap$backend$neg$hc$cert$ip$subnet" ]]; then
+    if [[ -z "$fr$fr_http$proxy$http_proxy$urlmap$urlmap_redirect$backend$neg$hc$cert$ip$subnet" ]]; then
         return
     fi
 
     stage "deleting TLS LB stack (${NAME}-tls-*)"
+    # Forwarding rules first (they reference proxies) -- both :443
+    # and the :80 redirect.
     [[ -n "$fr" ]] && gcloud compute forwarding-rules delete "${NAME}-tls-fr" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$fr_http" ]] && gcloud compute forwarding-rules delete "${NAME}-tls-fr-http" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    # Then proxies (they reference URL maps).
     [[ -n "$proxy" ]] && gcloud compute target-https-proxies delete "${NAME}-tls-proxy" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$http_proxy" ]] && gcloud compute target-http-proxies delete "${NAME}-tls-http-proxy" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    # Then URL maps (the :443 backend-pointing one + the :80 redirect one).
     [[ -n "$urlmap" ]] && gcloud compute url-maps delete "${NAME}-tls-urlmap" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$urlmap_redirect" ]] && gcloud compute url-maps delete "${NAME}-tls-redirect" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
     [[ -n "$backend" ]] && gcloud compute backend-services delete "${NAME}-tls-backend" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
@@ -860,13 +922,64 @@ probe() {
     return 1
 }
 
-stage "probing http://$PUBLIC_IP -- whatever you applied locally"
-# We don't know the operator's routes a priori; try the
-# y-cluster-shipped echo path as a baseline. If their workload
-# replaced echo, this fails and the operator curls their own
-# route.
-probe echo "http://$PUBLIC_IP/q/envoy/echo" 30 || \
-    echo "  (no echo route -- expected if your workload replaced y-cluster echo)"
+# probe_route checks one Gateway-bound FQDN through PUBLIC_IP via
+# `--resolve <fqdn>:80:<ip>`. Reachability == any HTTP response,
+# not 200: an HTTPRoute that legitimately answers 302 / 401 / 404
+# is still proof the firewall + klipper-lb + envoy-gateway chain
+# is working end-to-end. Only `000` (timeout, refused) counts as
+# unreachable.
+probe_route() {
+    local fqdn=$1 attempts=${2:-30}
+    local code
+    for i in $(seq 1 "$attempts"); do
+        code=$(curl -sS -o /dev/null -m 5 \
+            --resolve "$fqdn:80:$PUBLIC_IP" \
+            -w '%{http_code}' "http://$fqdn/" 2>/dev/null \
+            || echo 000)
+        if [[ "$code" != "000" ]]; then
+            printf '  %-40s HTTP %s (attempt %d)\n' "$fqdn" "$code" "$i"
+            return 0
+        fi
+        echo "  $fqdn attempt $i/$attempts: no answer yet"
+        sleep 10
+    done
+    return 1
+}
+
+stage "enumerating Gateway routes on the appliance"
+# Walk HTTPRoutes + GRPCRoutes for spec.hostnames. Each unique FQDN
+# becomes a probe target. We use SSH + `sudo k3s kubectl` rather
+# than extracting the kubeconfig because the apiserver isn't yet
+# externally exposed at this point in the script (the kubeconfig
+# extract recipe at the bottom of the success summary is for the
+# operator after teardown of the local cluster).
+ROUTE_HOSTS=$(ssh $SSH_OPTS ystack@"$PUBLIC_IP" \
+    'sudo k3s kubectl get httproute,grpcroute -A -o jsonpath="{range .items[*]}{range .spec.hostnames[*]}{@}{\"\n\"}{end}{end}"' \
+    2>/dev/null | sort -u)
+
+if [[ -z "$ROUTE_HOSTS" ]]; then
+    echo "  no Gateway-bound HTTPRoutes/GRPCRoutes; falling back to echo probe"
+    probe echo "http://$PUBLIC_IP/q/envoy/echo" 30 || \
+        echo "  (echo also unreachable; cluster still booting?)"
+else
+    stage "probing each Gateway route via $PUBLIC_IP"
+    fail_count=0
+    fail_list=""
+    while IFS= read -r fqdn; do
+        if ! probe_route "$fqdn" 30; then
+            fail_count=$((fail_count + 1))
+            fail_list="$fail_list $fqdn"
+        fi
+    done <<<"$ROUTE_HOSTS"
+    if [[ $fail_count -gt 0 ]]; then
+        echo "  WARNING: $fail_count route(s) unreachable after 5min:$fail_list"
+        echo "  Possible causes:"
+        echo "    - firewall y-cluster-appliance-public source-ranges narrowed (check"
+        echo "      \`gcloud compute firewall-rules describe y-cluster-appliance-public\`)"
+        echo "    - HTTPRoute attached but backend Service not Ready"
+        echo "    - workload still rolling out (re-run \`probe_route <fqdn>\` later)"
+    fi
+fi
 
 # === Stage 11: optional external HTTPS LoadBalancer ===
 # Operator-driven add-on: if TLS_DOMAINS isn't set in the env,
