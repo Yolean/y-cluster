@@ -32,9 +32,9 @@ Positional:
 
 Environment:
   NAME             Appliance name (default: appliance-virtualbox)
-  APP_HTTP_PORT    Host port -> guest 80 (default: 80)
-  APP_API_PORT     Host port -> guest 6443 (default: 39443)
-  APP_SSH_PORT     Host port -> guest 22 (default: 2229)
+  APP_HTTP_PORT    Override host port for guest 80 (y-cluster default: 80)
+  APP_API_PORT     Override host port for guest 6443 (y-cluster default: 6443)
+  APP_SSH_PORT     Override host port for guest 22 (y-cluster default: 2222)
   Y_CLUSTER        Path to dev binary (default: ./dist/y-cluster)
   CACHE_DIR        Where y-cluster keeps its qcow2 (default: ~/.cache/y-cluster-qemu)
   KEEP_CLUSTER     Set to keep the cluster alive after export (default: tear it down)
@@ -53,9 +53,6 @@ case "${1:-}" in
 esac
 
 NAME="${NAME:-appliance-virtualbox}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
-APP_API_PORT="${APP_API_PORT:-39443}"
-APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 Y_CLUSTER="${Y_CLUSTER:-$REPO_ROOT/dist/y-cluster}"
@@ -99,20 +96,23 @@ mkdir -p "$(dirname "$Y_CLUSTER")"
 
 # === Config (always written; teardown + prepare-export need it) ===
 mkdir -p "$CFG_DIR"
-cat > "$CFG_DIR/y-cluster-provision.yaml" <<EOF
-provider: qemu
-name: $NAME
-context: $NAME
-sshPort: "$APP_SSH_PORT"
-memory: "4096"
-cpus: "2"
-diskSize: "40G"
-portForwards:
-  - host: "$APP_API_PORT"
-    guest: "6443"
-  - host: "$APP_HTTP_PORT"
-    guest: "80"
-EOF
+# YAML emission omits any port the operator didn't override, letting
+# y-cluster's Go binary apply its own defaults (sshPort=2222,
+# portForwards={6443:6443, 80:80, 443:443}).
+{
+    echo "provider: qemu"
+    echo "name: $NAME"
+    echo "context: $NAME"
+    [ -n "${APP_SSH_PORT:-}" ] && printf 'sshPort: "%s"\n' "$APP_SSH_PORT"
+    echo 'memory: "4096"'
+    echo 'cpus: "2"'
+    echo 'diskSize: "40G"'
+    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
+        echo "portForwards:"
+        [ -n "${APP_API_PORT:-}" ] && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
+        [ -n "${APP_HTTP_PORT:-}" ] && printf '  - host: "%s"\n    guest: "80"\n' "$APP_HTTP_PORT"
+    fi
+} > "$CFG_DIR/y-cluster-provision.yaml"
 
 if [[ -z "${SKIP_PROVISION:-}" ]]; then
     stage "tearing down any leftover $NAME cluster"
@@ -145,8 +145,8 @@ if [[ -z "${SKIP_PROVISION:-}" ]]; then
         echo "$what smoketest never succeeded; aborting" >&2
         return 1
     }
-    probe echo "http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo"
-    probe s3   "http://127.0.0.1:$APP_HTTP_PORT/s3/health"
+    probe echo "http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo"
+    probe s3   "http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health"
 else
     stage "SKIP_PROVISION set; resuming against existing $NAME cluster"
 fi
@@ -159,19 +159,19 @@ cat <<EOF
 ================================================================
 Cluster $NAME is up and ready for testing.
 
-  HTTP (echo + s3):  http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo
-                     http://127.0.0.1:$APP_HTTP_PORT/s3/health
-  Kubernetes API:    https://127.0.0.1:$APP_API_PORT
+  HTTP (echo + s3):  http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo
+                     http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health
+  Kubernetes API:    https://127.0.0.1:${APP_API_PORT:-6443}
   kubectl context:   $NAME
 
 Quick checks:
   kubectl --context=$NAME get nodes -o wide
   kubectl --context=$NAME get pods -A
   kubectl --context=$NAME -n appliance-stateful get statefulset,pvc,pv
-  curl -sf http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo
+  curl -sf http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo
 
 SSH into the VM (passwordless sudo as ystack):
-  ssh -i $SSH_KEY -p $APP_SSH_PORT \\
+  ssh -i $SSH_KEY -p ${APP_SSH_PORT:-2222} \\
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
       ystack@127.0.0.1
 

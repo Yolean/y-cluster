@@ -50,9 +50,9 @@ Usage: e2e-appliance-export-import.sh
 
 Environment:
   NAME             Appliance name (default: appliance-export-test)
-  APP_HTTP_PORT    Build-side host port -> guest 80 (default: 80)
-  APP_API_PORT     Build-side host port -> guest 6443 (default: 39443)
-  APP_SSH_PORT     Build-side host port -> guest 22 (default: 2229)
+  APP_HTTP_PORT    Override build-side host port for guest 80 (y-cluster default: 80)
+  APP_API_PORT     Override build-side host port for guest 6443 (y-cluster default: 6443)
+  APP_SSH_PORT     Override build-side host port for guest 22 (y-cluster default: 2222)
   IMP_HTTP_PORT    Import-side host port -> guest 80 (default: 39180)
   IMP_SSH_PORT     Import-side host port -> guest 22 (default: 2230)
   Y_CLUSTER        Path to dev binary (default: ./dist/y-cluster)
@@ -75,9 +75,10 @@ case "${1:-}" in
 esac
 
 NAME="${NAME:-appliance-export-test}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
-APP_API_PORT="${APP_API_PORT:-39443}"
-APP_SSH_PORT="${APP_SSH_PORT:-2229}"
+# Import-side host ports: kept hardcoded (not env-overridable +
+# defaulted) because the import-side qemu is started directly by
+# this script (no y-cluster CLI involvement) and these values
+# can't collide with the build-side y-cluster's defaults.
 IMP_HTTP_PORT="${IMP_HTTP_PORT:-39180}"
 IMP_SSH_PORT="${IMP_SSH_PORT:-2230}"
 
@@ -135,20 +136,23 @@ stage "tearing down any leftover $NAME cluster"
 # We need the config in place for teardown to find the cluster, so
 # write it BEFORE the teardown attempt. teardown is idempotent
 # (no-op when the cluster doesn't exist) so re-entry is safe.
-cat > "$CFG_DIR/y-cluster-provision.yaml" <<EOF
-provider: qemu
-name: $NAME
-context: $NAME
-sshPort: "$APP_SSH_PORT"
-memory: "4096"
-cpus: "2"
-diskSize: "40G"
-portForwards:
-  - host: "$APP_API_PORT"
-    guest: "6443"
-  - host: "$APP_HTTP_PORT"
-    guest: "80"
-EOF
+# YAML emission omits any port the operator didn't override, letting
+# y-cluster's Go binary apply its own defaults (sshPort=2222,
+# portForwards={6443:6443, 80:80, 443:443}).
+{
+    echo "provider: qemu"
+    echo "name: $NAME"
+    echo "context: $NAME"
+    [ -n "${APP_SSH_PORT:-}" ] && printf 'sshPort: "%s"\n' "$APP_SSH_PORT"
+    echo 'memory: "4096"'
+    echo 'cpus: "2"'
+    echo 'diskSize: "40G"'
+    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
+        echo "portForwards:"
+        [ -n "${APP_API_PORT:-}" ] && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
+        [ -n "${APP_HTTP_PORT:-}" ] && printf '  - host: "%s"\n    guest: "80"\n' "$APP_HTTP_PORT"
+    fi
+} > "$CFG_DIR/y-cluster-provision.yaml"
 
 "$Y_CLUSTER" teardown -c "$CFG_DIR" || true # y-script-lint:disable=or-true # idempotent re-entry: missing cluster is not an error
 rm -f "$CACHE_DIR/$NAME".* "$CACHE_DIR/$NAME-"*
@@ -192,8 +196,8 @@ probe() {
     rm -f "$out"
     return 1
 }
-probe echo "http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo"
-probe s3   "http://127.0.0.1:$APP_HTTP_PORT/s3/health"
+probe echo "http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo"
+probe s3   "http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health"
 
 # === 5. stop + prepare-export ===
 # y-cluster stop owns the graceful guest shutdown (ssh

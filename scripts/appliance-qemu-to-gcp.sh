@@ -74,9 +74,9 @@ Environment:
                     something else, or delete the existing one.
   IMAGE_NAME        Custom image name in GCE (default: <NAME>-<UTC>)
   VM_NAME           Compute Engine VM name (default: $NAME)
-  APP_HTTP_PORT     Local host port -> guest 80 (default: 80)
-  APP_API_PORT      Local host port -> guest 6443 (default: 39443)
-  APP_SSH_PORT     Local host port -> guest 22 (default: 2229)
+  APP_HTTP_PORT     Override host port for guest 80 (y-cluster default: 80)
+  APP_API_PORT      Override host port for guest 6443 (y-cluster default: 6443)
+  APP_SSH_PORT      Override host port for guest 22 (y-cluster default: 2222)
   Y_CLUSTER         Path to dev binary (default: ./dist/y-cluster)
   CACHE_DIR         Where y-cluster keeps its qcow2 (default: ~/.cache/y-cluster-qemu)
   KEEP_LOCAL        Set to keep the local cluster after upload (default: tear down)
@@ -114,9 +114,6 @@ NAME="${NAME:-appliance-gcp-build}"
 KUBECTX="${KUBECTX:-local}"
 IMAGE_NAME="${IMAGE_NAME:-${NAME}-$(date -u +%Y%m%d-%H%M%S)}"
 VM_NAME="${VM_NAME:-$NAME}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
-APP_API_PORT="${APP_API_PORT:-39443}"
-APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 
 Y_CLUSTER="${Y_CLUSTER:-$REPO_ROOT/dist/y-cluster}"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/y-cluster-qemu}"
@@ -290,20 +287,25 @@ mkdir -p "$(dirname "$Y_CLUSTER")"
 ( cd "$REPO_ROOT" && go build -o "$Y_CLUSTER" ./cmd/y-cluster )
 
 mkdir -p "$CFG_DIR"
-cat > "$CFG_DIR/y-cluster-provision.yaml" <<EOF
-provider: qemu
-name: $NAME
-context: $KUBECTX
-sshPort: "$APP_SSH_PORT"
-memory: "4096"
-cpus: "2"
-diskSize: "40G"
-portForwards:
-  - host: "$APP_API_PORT"
-    guest: "6443"
-  - host: "$APP_HTTP_PORT"
-    guest: "80"
-EOF
+# YAML emission omits any port the operator didn't override, letting
+# y-cluster's Go binary apply its own defaults (sshPort=2222,
+# portForwards={6443:6443, 80:80, 443:443}). Set APP_*_PORT to take
+# different values; otherwise the script doesn't restate y-cluster's
+# defaults in two places.
+{
+    echo "provider: qemu"
+    echo "name: $NAME"
+    echo "context: $KUBECTX"
+    [ -n "${APP_SSH_PORT:-}" ] && printf 'sshPort: "%s"\n' "$APP_SSH_PORT"
+    echo 'memory: "4096"'
+    echo 'cpus: "2"'
+    echo 'diskSize: "40G"'
+    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
+        echo "portForwards:"
+        [ -n "${APP_API_PORT:-}" ] && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
+        [ -n "${APP_HTTP_PORT:-}" ] && printf '  - host: "%s"\n    guest: "80"\n' "$APP_HTTP_PORT"
+    fi
+} > "$CFG_DIR/y-cluster-provision.yaml"
 
 stage "tearing down any leftover $NAME cluster"
 "$Y_CLUSTER" teardown -c "$CFG_DIR" || true # y-script-lint:disable=or-true # idempotent re-entry: missing cluster is not an error
@@ -345,9 +347,9 @@ cat <<EOF
 Local cluster $NAME is up. Echo is already serving on :80.
 
   Echo route (baseline, already up):
-    curl -sf http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo
+    curl -sf http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo
 
-  Kubernetes API:   https://127.0.0.1:$APP_API_PORT
+  Kubernetes API:   https://127.0.0.1:${APP_API_PORT:-6443}
   kubectl context:  $KUBECTX
 
 Optional: apply more workloads before the disk gets sealed.
@@ -356,7 +358,7 @@ in any namespace can attach to it.
 
   # S3 backend example (VersityGW StatefulSet on local-path PV):
   $Y_CLUSTER yconverge --context=$KUBECTX -k $REPO_ROOT/testdata/appliance-stateful/base
-  curl -sf http://127.0.0.1:$APP_HTTP_PORT/s3/health
+  curl -sf http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health
 
   # Re-apply echo (e.g., after editing the manifest):
   $Y_CLUSTER echo render | kubectl --context=$KUBECTX apply -f -
@@ -366,7 +368,7 @@ in any namespace can attach to it.
   $Y_CLUSTER yconverge --context=$KUBECTX -k path/to/kustomize-base
 
 SSH into the local VM (passwordless sudo as ystack):
-  ssh -i $SSH_KEY -p $APP_SSH_PORT \\
+  ssh -i $SSH_KEY -p ${APP_SSH_PORT:-2222} \\
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
       ystack@127.0.0.1
 
