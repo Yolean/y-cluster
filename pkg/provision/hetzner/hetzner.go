@@ -238,13 +238,34 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 
+	// Phase 3.c: generate + upload a per-context self-signed cert
+	// before the LB so a fresh-LB create can include it in the
+	// initial HTTPS service (Hetzner refuses an empty cert list).
+	commonName, dnsNames := certSubjectsForContext(cfg.Context, cfg.FQDNDomain)
+	certPEM, keyPEM, err := generateSelfSignedCert(commonName, dnsNames, nil)
+	if err != nil {
+		return nil, fmt.Errorf("generate self-signed cert: %w", err)
+	}
+	cert, err := uploadCertificate(ctx, hc, cfg.Context, cfg.LBGroup, certPEM, keyPEM, logger)
+	if err != nil {
+		return nil, fmt.Errorf("upload certificate: %w", err)
+	}
+	c.state.CertificateID = cert.ID
+	if err := saveState(c.cacheDir, c.state); err != nil {
+		return nil, fmt.Errorf("save state with cert id: %w", err)
+	}
+
 	// Phase 3.a: ensure the lb-group LB exists and includes us.
 	// Server already carries managed-by + lb-group labels, so the
 	// label_selector target on the LB picks us up on creation.
+	// On a fresh-LB create we hand cert in as firstCert so the
+	// HTTPS-443 service lands with at least one cert; on reuse the
+	// follow-up attachCertificateToLB call adds our cert to the
+	// existing service's cert list.
 	lb, err := ensureLoadBalancer(ctx, hc, lbConfig{
 		LBGroup:  cfg.LBGroup,
 		Location: cfg.Location,
-	}, logger)
+	}, cert, logger)
 	if err != nil {
 		return nil, fmt.Errorf("ensure load balancer: %w", err)
 	}
@@ -252,6 +273,9 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 	c.state.LBID = lb.ID
 	if err := saveState(c.cacheDir, c.state); err != nil {
 		return nil, fmt.Errorf("save state with LB id: %w", err)
+	}
+	if err := attachCertificateToLB(ctx, hc, lb, cert, logger); err != nil {
+		return nil, fmt.Errorf("attach cert to LB: %w", err)
 	}
 	lbIPv4 := ""
 	if lb.PublicNet.IPv4.IP != nil {
@@ -350,12 +374,66 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 		logger.Info("no server to delete", zap.String("context", contextName))
 	}
 
+	// Order from here is delicate -- Hetzner refuses to delete a
+	// Certificate that's still referenced by an LB service. So:
+	//
+	//   1. If LB will be deleted (we were the last lb-group member),
+	//      the LB delete itself releases all cert references; we
+	//      just delete our Certificate afterwards.
+	//   2. If LB stays alive (other servers remain), detach our
+	//      cert from the 443 service first, THEN delete it.
+	//
+	// deleteLBIfEmpty handles (1); the path below covers (2).
+	if st.CertificateID != 0 && st.LBID != 0 {
+		if lbForDetach, _, err := hc.LoadBalancer.GetByID(ctx, st.LBID); err == nil && lbForDetach != nil {
+			// Only detach if the LB is going to survive this
+			// teardown -- otherwise the upcoming delete makes
+			// the UpdateService call wasted work (and noisy if
+			// the LB delete races us).
+			servers, lerr := hc.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+				ListOpts: hcloud.ListOpts{LabelSelector: labelSelectorForGroup(st.LBGroup)},
+			})
+			if lerr != nil {
+				return fmt.Errorf("list lb-group %q servers: %w", st.LBGroup, lerr)
+			}
+			if len(servers) > 0 {
+				if err := detachCertificateFromLB(ctx, hc, lbForDetach, st.CertificateID, logger); err != nil {
+					return fmt.Errorf("detach cert from LB: %w", err)
+				}
+			}
+		}
+	}
+
 	// LB delete IFF this server was the last lb-group member. The
 	// label_selector target on the LB drops the just-deleted
 	// server from rotation automatically, so we just need to
 	// count remaining managed-by=y-cluster,lb-group=<grp> servers.
 	if err := deleteLBIfEmpty(ctx, hc, st.LBGroup, st.LBID, logger); err != nil {
 		return fmt.Errorf("teardown LB: %w", err)
+	}
+
+	// Certificate delete: now safe whether we deleted the LB or
+	// just detached. ID-then-name fallback so a stranded sidecar
+	// doesn't strand the cert.
+	var hcCert *hcloud.Certificate
+	if st.CertificateID != 0 {
+		hcCert, _, err = hc.Certificate.GetByID(ctx, st.CertificateID)
+		if err != nil {
+			return fmt.Errorf("describe certificate id=%d: %w", st.CertificateID, err)
+		}
+	}
+	if hcCert == nil {
+		hcCert, _, err = hc.Certificate.GetByName(ctx, contextName)
+		if err != nil {
+			return fmt.Errorf("describe certificate name=%q: %w", contextName, err)
+		}
+	}
+	if hcCert != nil {
+		logger.Info("deleting Hetzner Certificate",
+			zap.Int64("id", hcCert.ID), zap.String("name", hcCert.Name))
+		if _, err := hc.Certificate.Delete(ctx, hcCert); err != nil {
+			return fmt.Errorf("delete certificate: %w", err)
+		}
 	}
 
 	// SSH key delete.

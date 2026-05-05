@@ -82,21 +82,24 @@ func generateSelfSignedCert(commonName string, dnsNames []string, ipSANs []net.I
 }
 
 // certSubjectsForContext computes the SAN list a context's cert
-// should cover: the leaf FQDN <ctx>.<fqdnDomain>, the wildcard
+// should cover: the leaf FQDN <ctx>.<fqdnDomain> plus the wildcard
 // *.<ctx>.<fqdnDomain> for namespaced sub-services (e.g.
-// keycloak-admin.<ctx>.local.test), plus the LB IPv4 so a
-// direct-IP dial picks up a matching cert.
+// keycloak-admin.<ctx>.local.test).
 //
-// Returns commonName (the leaf FQDN) + the DNS + IP SAN slices
-// for generateSelfSignedCert.
-func certSubjectsForContext(context, fqdnDomain, lbIPv4 string) (commonName string, dnsNames []string, ipSANs []net.IP) {
+// No IP SAN: in the shared-LB shape, the IP doesn't tell you which
+// context the request is for (SNI does), and consumers always
+// reach the cluster via FQDN via the dns-hint-ip /etc/hosts entry.
+// Including the LB IPv4 would be a chicken-and-egg too -- the LB
+// is created with the cert, so its IP isn't known when the cert
+// is generated.
+//
+// Returns commonName (the leaf FQDN) + the DNS SAN slice for
+// generateSelfSignedCert.
+func certSubjectsForContext(context, fqdnDomain string) (commonName string, dnsNames []string) {
 	if fqdnDomain == "" {
 		fqdnDomain = "local.test"
 	}
 	commonName = context + "." + fqdnDomain
 	dnsNames = []string{commonName, "*." + commonName}
-	if ip := net.ParseIP(lbIPv4); ip != nil {
-		ipSANs = []net.IP{ip}
-	}
-	return commonName, dnsNames, ipSANs
+	return commonName, dnsNames
 }

@@ -115,10 +115,9 @@ func TestGenerateSelfSignedCert_DistinctSerial(t *testing.T) {
 }
 
 // TestCertSubjectsForContext pins the SAN composition rules:
-// leaf FQDN, wildcard, and IP -- so a future tweak doesn't drop
-// one of the three on the floor.
+// leaf FQDN + wildcard, no IP SAN.
 func TestCertSubjectsForContext(t *testing.T) {
-	cn, dns, ips := certSubjectsForContext("y-c-test", "local.test", "203.0.113.1")
+	cn, dns := certSubjectsForContext("y-c-test", "local.test")
 	if cn != "y-c-test.local.test" {
 		t.Errorf("CN: got %q", cn)
 	}
@@ -126,30 +125,15 @@ func TestCertSubjectsForContext(t *testing.T) {
 	if !equalStringSlice(dns, want) {
 		t.Errorf("dns: got %v, want %v", dns, want)
 	}
-	if len(ips) != 1 || ips[0].String() != "203.0.113.1" {
-		t.Errorf("ips: got %v", ips)
-	}
 }
 
 // TestCertSubjectsForContext_DefaultDomain: empty fqdnDomain
 // falls back to local.test, the RFC 6761 reserved test TLD the
 // rest of the provisioner uses.
 func TestCertSubjectsForContext_DefaultDomain(t *testing.T) {
-	cn, _, _ := certSubjectsForContext("ctx", "", "")
+	cn, _ := certSubjectsForContext("ctx", "")
 	if !strings.HasSuffix(cn, ".local.test") {
 		t.Errorf("default domain should be local.test: got %q", cn)
-	}
-}
-
-// TestCertSubjectsForContext_NoLbIP: when the LB IPv4 is empty
-// or unparseable, ipSANs is empty rather than [<nil>] (which
-// would crash crypto/x509).
-func TestCertSubjectsForContext_NoLbIP(t *testing.T) {
-	if _, _, ips := certSubjectsForContext("ctx", "local.test", ""); len(ips) != 0 {
-		t.Errorf("empty lbIPv4 should produce no IP SANs, got %v", ips)
-	}
-	if _, _, ips := certSubjectsForContext("ctx", "local.test", "not-an-ip"); len(ips) != 0 {
-		t.Errorf("garbage lbIPv4 should produce no IP SANs, got %v", ips)
 	}
 }
 

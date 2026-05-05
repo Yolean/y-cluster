@@ -35,6 +35,12 @@ type state struct {
 	// Persisted so Teardown can delete it without a name lookup
 	// when it turns out to be the last attached server.
 	LBID int64 `json:"lbID,omitempty"`
+	// CertificateID is the Hetzner Certificate resource id the
+	// LB's HTTPS service references for this context. Persisted
+	// so Teardown can remove the cert from the LB before deleting
+	// the Certificate resource (Hetzner refuses to delete a cert
+	// that's still referenced by an LB service).
+	CertificateID int64 `json:"certificateID,omitempty"`
 }
 
 func statePath(cacheDir, context string) string {
