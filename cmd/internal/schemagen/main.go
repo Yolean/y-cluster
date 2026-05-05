@@ -91,6 +91,7 @@ func run() error {
 		{"qemu.schema.json", config.ProviderQEMU, &config.QEMUConfig{}},
 		{"docker.schema.json", config.ProviderDocker, &config.DockerConfig{}},
 		{"multipass.schema.json", config.ProviderMultipass, &config.MultipassConfig{}},
+		{"hetzner.schema.json", config.ProviderHetzner, &config.HetznerConfig{}},
 	}
 
 	if err := checkCollisions(providers); err != nil {

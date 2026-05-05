@@ -41,12 +41,13 @@ const (
 	ProviderQEMU      = "qemu"
 	ProviderDocker    = "docker"
 	ProviderMultipass = "multipass"
+	ProviderHetzner   = "hetzner"
 )
 
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
 // supported values.
-var AllProviders = []string{ProviderDocker, ProviderMultipass, ProviderQEMU}
+var AllProviders = []string{ProviderDocker, ProviderHetzner, ProviderMultipass, ProviderQEMU}
 
 // CommonConfig is the portable subset of `y-cluster-provision.yaml`.
 // Every provider config embeds it via `yaml:",inline"` so the keys
