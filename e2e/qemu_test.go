@@ -565,6 +565,213 @@ func TestQemu_Seed_GateAndBypass(t *testing.T) {
 	t.Fatalf("k3s never reached Ready after bypass+restart\nk3s journal tail:\n%s", out)
 }
 
+// TestQemu_Seed_VolumeAttached exercises the production-shape happy
+// path that TestQemu_Seed_GateAndBypass deliberately doesn't:
+//
+//   * State 1 -- a labeled `y-cluster-data` ext4 volume is attached
+//     at boot, the pre-baked LABEL fstab entry mounts it, the seed
+//     unit sees a mountpoint with only lost+found, extracts the
+//     seed tarball, writes the marker, k3s starts via Requires=.
+//   * State 5 -- the same disk on the next boot has a marker; the
+//     seed unit hits the marker-respect no-op path; k3s starts
+//     without re-extract.
+//
+// Combined into one test function so we pay the provision +
+// prepare-export cost once and stop / re-boot the same prepared
+// disk twice. Without this coverage state 1 + 5 are only exercised
+// by the manual GCP run, where a single flaky symptom is
+// expensive to reproduce -- the local form takes ~3 min and is
+// deterministic.
+func TestQemu_Seed_VolumeAttached(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("QEMU tests require /dev/kvm")
+	}
+	if err := qemu.CheckPrerequisites(); err != nil {
+		t.Skip(err)
+	}
+	if _, err := exec.LookPath("virt-customize"); err != nil {
+		t.Skip("virt-customize not on PATH; install libguestfs-tools")
+	}
+	if _, err := exec.LookPath("virt-format"); err != nil {
+		t.Skip("virt-format not on PATH; install libguestfs-tools")
+	}
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eQEMURuntime()
+	cfg.Name = "y-cluster-e2e-seed-volume"
+	cfg.Context = "y-cluster-e2e-seed-volume"
+	cfg.CacheDir = t.TempDir()
+	cfg.Memory = "4096"
+	cfg.CPUs = "2"
+	cfg.SSHPort = "2228"
+	cfg.PortForwards = e2eUniqueForwards("26448", "28448")
+	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
+	if cfg.Kubeconfig == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", cfg.CacheDir)
+
+	ctx := context.Background()
+
+	// Build the appliance + plant a sentinel under /data/yolean so
+	// state 1's extract has something verifiable when we read back
+	// the customer-side mount.
+	cluster, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cluster.Teardown(false) })
+
+	if out, err := cluster.SSH(ctx, "sudo mkdir -p /data/yolean && echo seed-volume-v1 | sudo tee /data/yolean/sentinel.txt >/dev/null"); err != nil {
+		t.Fatalf("plant sentinel: %s: %v", out, err)
+	}
+
+	if err := qemu.Stop(cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := qemu.PrepareExport(ctx, cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("PrepareExport: %v", err)
+	}
+
+	// Build a labeled ext4 qcow2 to act as the customer's persistent
+	// /data/yolean volume. Filesystem label matches the LABEL fstab
+	// entry prepare-export pre-baked into the appliance.
+	dataDisk := filepath.Join(cfg.CacheDir, cfg.Name+"-data.qcow2")
+	makeLabeledDataDisk(t, dataDisk, "y-cluster-data", "1G")
+
+	// === Boot 1: state 1 -- empty volume, extract ===
+	cluster1, err := qemu.StartForDiagnosticWithDisks(ctx, cfg.CacheDir, cfg.Name, []string{dataDisk}, logger)
+	if err != nil {
+		t.Fatalf("StartForDiagnosticWithDisks (boot 1): %v", err)
+	}
+
+	// Seed unit must reach `active` once it sees the mountpoint +
+	// empty mount + extracts.
+	if state := waitForSeedState(t, ctx, cluster1, "active", 90*time.Second); state != "active" {
+		out, _ := cluster1.SSH(ctx, "sudo journalctl -u y-cluster-data-seed.service -b --no-pager")
+		t.Fatalf("seed unit never reached active on first boot; last=%q\njournal:\n%s", state, out)
+	}
+
+	// /data/yolean is the labeled volume now (not the boot disk).
+	if out, err := cluster1.SSH(ctx, "mountpoint -q /data/yolean && echo mounted"); err != nil {
+		t.Fatalf("mountpoint check: %s: %v", out, err)
+	} else if !strings.Contains(string(out), "mounted") {
+		t.Errorf("expected /data/yolean to be a mountpoint, got: %s", out)
+	}
+
+	// Sentinel restored from the seed tarball.
+	if out, err := cluster1.SSH(ctx, "cat /data/yolean/sentinel.txt"); err != nil {
+		t.Fatalf("sentinel read: %v", err)
+	} else if !strings.Contains(string(out), "seed-volume-v1") {
+		t.Errorf("seed extract did not restore sentinel; got: %s", out)
+	}
+
+	// Marker present on the customer volume.
+	if out, err := cluster1.SSH(ctx, "sudo cat /data/yolean/.y-cluster-seeded"); err != nil {
+		t.Fatalf("marker read: %v", err)
+	} else if !strings.Contains(string(out), "seed_sha256") {
+		t.Errorf("marker should contain seed_sha256: %s", out)
+	}
+
+	// Bypass sentinel must NOT exist -- we went the production path,
+	// not the bypass path. This distinguishes state 1 from state 4.
+	if out, err := cluster1.SSH(ctx, "test -f /data/yolean/.y-cluster-seeded-via-bypass && echo present || echo absent"); err != nil {
+		t.Fatalf("bypass-sentinel check: %v", err)
+	} else if !strings.Contains(string(out), "absent") {
+		t.Errorf("bypass sentinel should not exist on a state-1 boot: %s", out)
+	}
+
+	// k3s should come up via Requires=y-cluster-data-seed.service
+	// without any manual restart, since the seed unit is `active`.
+	if !waitForK3sReady(t, ctx, cluster1, 3*time.Minute) {
+		out, _ := cluster1.SSH(ctx, "sudo journalctl -u k3s.service -b --no-pager | tail -50")
+		t.Fatalf("k3s never reached Ready on first boot\nk3s journal tail:\n%s", out)
+	}
+
+	// === Boot 2: state 5 -- marker present, no-op ===
+	if err := qemu.Stop(cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("Stop between boots: %v", err)
+	}
+	cluster2, err := qemu.StartForDiagnosticWithDisks(ctx, cfg.CacheDir, cfg.Name, []string{dataDisk}, logger)
+	if err != nil {
+		t.Fatalf("StartForDiagnosticWithDisks (boot 2): %v", err)
+	}
+
+	if state := waitForSeedState(t, ctx, cluster2, "active", 60*time.Second); state != "active" {
+		out, _ := cluster2.SSH(ctx, "sudo journalctl -u y-cluster-data-seed.service -b --no-pager")
+		t.Fatalf("seed unit not active on second boot; last=%q\njournal:\n%s", state, out)
+	}
+
+	// Journal must indicate the marker-respect no-op path -- not the
+	// extract path -- otherwise we'd be silently re-extracting on
+	// every boot, which would clobber any customer changes.
+	journalOut, err := cluster2.SSH(ctx, "sudo journalctl -u y-cluster-data-seed.service -b --no-pager")
+	if err != nil {
+		t.Fatalf("journalctl on boot 2: %v", err)
+	}
+	if !strings.Contains(string(journalOut), "marker present") {
+		t.Errorf("boot 2 should hit the marker-respect path; journal:\n%s", journalOut)
+	}
+	if strings.Contains(string(journalOut), "extracting") {
+		t.Errorf("boot 2 should NOT re-extract; journal mentions extracting:\n%s", journalOut)
+	}
+
+	// Sentinel content unchanged across the two boots (i.e., we did
+	// not silently re-extract over customer state).
+	if out, err := cluster2.SSH(ctx, "cat /data/yolean/sentinel.txt"); err != nil {
+		t.Fatalf("sentinel read on boot 2: %v", err)
+	} else if !strings.Contains(string(out), "seed-volume-v1") {
+		t.Errorf("sentinel mutated across boots: %s", out)
+	}
+
+	if !waitForK3sReady(t, ctx, cluster2, 3*time.Minute) {
+		out, _ := cluster2.SSH(ctx, "sudo journalctl -u k3s.service -b --no-pager | tail -50")
+		t.Fatalf("k3s never reached Ready on boot 2\nk3s journal tail:\n%s", out)
+	}
+}
+
+// makeLabeledDataDisk creates a qcow2 file at path with a single
+// ext4 filesystem labeled `label`, sized `size` (a qemu-img-style
+// string like "1G"). Uses libguestfs's virt-format so the test
+// doesn't need root + losetup; libguestfs is already a hard prereq
+// of prepare-export, so anything that runs the rest of this file
+// has it.
+func makeLabeledDataDisk(t *testing.T, path, label, size string) {
+	t.Helper()
+	if out, err := exec.Command("qemu-img", "create", "-f", "qcow2", path, size).CombinedOutput(); err != nil {
+		t.Fatalf("qemu-img create %s: %s: %v", path, out, err)
+	}
+	// virt-format with --filesystem makes the WHOLE disk one ext4
+	// filesystem (no partition table). The kernel + LABEL fstab
+	// match by filesystem label regardless of partitioning, so this
+	// is the simplest shape that satisfies the appliance contract.
+	if out, err := exec.Command("virt-format",
+		"-a", path,
+		"--filesystem=ext4",
+		"--label="+label,
+	).CombinedOutput(); err != nil {
+		t.Fatalf("virt-format %s: %s: %v", path, out, err)
+	}
+}
+
+// waitForK3sReady polls in-VM `k3s kubectl get nodes` for a Ready
+// node up to timeout. Returns true on success, false on timeout.
+// Used by the seed-volume tests since they boot via
+// StartForDiagnosticWithDisks and don't import the kubeconfig
+// host-side.
+func waitForK3sReady(t *testing.T, ctx context.Context, cluster *qemu.Cluster, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, _ := cluster.SSH(ctx, "sudo k3s kubectl get nodes --no-headers 2>/dev/null || true")
+		if strings.Contains(string(out), "Ready") {
+			return true
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
+}
+
 // waitForSeedState polls `systemctl is-active y-cluster-data-seed.service`
 // against the VM until it reports `want` or the timeout fires. Returns
 // the last observed state so the caller can include it in the failure

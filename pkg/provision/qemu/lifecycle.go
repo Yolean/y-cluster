@@ -154,7 +154,7 @@ func guestPoweroff(cacheDir, name string, pid int, logger *zap.Logger) error {
 // then re-imports the kubeconfig so the host-side context is
 // fresh even if it was cleaned while the cluster was down.
 func Start(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Cluster, error) {
-	c, err := startVMReady(ctx, cacheDir, name, logger)
+	c, err := startVMReady(ctx, cacheDir, name, nil, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -186,13 +186,27 @@ func Start(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Clu
 // SCP wired up; Kubeconfig is initialised but no kubeconfig has
 // been imported.
 func StartForDiagnostic(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Cluster, error) {
-	return startVMReady(ctx, cacheDir, name, logger)
+	return startVMReady(ctx, cacheDir, name, nil, logger)
+}
+
+// StartForDiagnosticWithDisks is StartForDiagnostic with extra qcow2
+// or raw disks attached as additional virtio drives. Used by tests
+// that exercise the appliance's pre-baked LABEL fstab against a
+// real labeled data volume -- the qemu provisioner itself doesn't
+// manage data disks (the appliance contract is "customer attaches a
+// labeled volume", not "y-cluster wires a fleet of disks"), so this
+// API surface is deliberately minimal: the caller owns the disk
+// files' lifecycle and just passes their paths.
+func StartForDiagnosticWithDisks(ctx context.Context, cacheDir, name string, extraDisks []string, logger *zap.Logger) (*Cluster, error) {
+	return startVMReady(ctx, cacheDir, name, extraDisks, logger)
 }
 
 // startVMReady is the prefix shared by Start and StartForDiagnostic:
 // load state, boot the VM, wait for SSH. Anything that requires k3s
-// to be up belongs in Start, not here.
-func startVMReady(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Cluster, error) {
+// to be up belongs in Start, not here. extraDisks is appended after
+// the boot disk + cidata seed; nil/empty means "boot disk + seed
+// only", the default.
+func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []string, logger *zap.Logger) (*Cluster, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -224,6 +238,7 @@ func startVMReady(ctx context.Context, cacheDir, name string, logger *zap.Logger
 		pidFile:    pidFilePath(cfg.CacheDir, cfg.Name),
 		logger:     logger,
 		Kubeconfig: kubecfg,
+		extraDisks: extraDisks,
 	}
 
 	if err := c.startVM(ctx, diskPath, ""); err != nil {

@@ -168,6 +168,10 @@ type Cluster struct {
 	pidFile    string
 	logger     *zap.Logger
 	Kubeconfig *kubeconfig.Manager
+	// extraDisks is appended after boot+seed in startVM. Set by
+	// StartForDiagnosticWithDisks for tests that need a labeled
+	// data volume attached; production code paths leave it nil.
+	extraDisks []string
 }
 
 // CheckPrerequisites verifies that required binaries and /dev/kvm exist.
@@ -714,6 +718,9 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 	}
 	if seedPath != "" {
 		args = append(args, "-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", seedPath))
+	}
+	for _, d := range c.extraDisks {
+		args = append(args, "-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", d))
 	}
 	args = append(args,
 		"-netdev", c.buildNetdev(),
