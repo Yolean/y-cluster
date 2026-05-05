@@ -75,7 +75,8 @@ type LookupResult struct {
 	// Docker-only.
 	ContainerName string
 
-	// QEMU-only.
+	// QEMU + Hetzner share the SSH-* fields. QEMU dials
+	// 127.0.0.1:<forward-port>, Hetzner dials the public IPv4 on 22.
 	SSHKey  string
 	SSHHost string
 	SSHPort string
@@ -86,16 +87,16 @@ type LookupResult struct {
 }
 
 // ErrNotFound is the user-facing error for "the kubeconfig
-// context exists but no docker, qemu, or multipass cluster is
-// running with that cluster name". Wrapped with the cluster +
-// context names so the message is actionable.
-var ErrNotFound = errors.New("no running docker, qemu, or multipass cluster matches the kubeconfig context")
+// context exists but no docker, qemu, multipass, or hetzner
+// cluster is running with that cluster name". Wrapped with the
+// cluster + context names so the message is actionable.
+var ErrNotFound = errors.New("no running docker, qemu, multipass, or hetzner cluster matches the kubeconfig context")
 
 // Lookup resolves the kubectl `contextName` (defaults to
 // DefaultContext when empty) to a running cluster runtime.
 // kubeconfigPath is passed to kubectl as `--kubeconfig`; empty
 // means kubectl uses its normal $KUBECONFIG / ~/.kube/config
-// search. Currently only docker and qemu backends are probed.
+// search. Probes docker, qemu, multipass, and hetzner backends.
 func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupResult, error) {
 	if contextName == "" {
 		contextName = DefaultContext
@@ -158,6 +159,18 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 			Context:       contextName,
 			ClusterName:   clusterName,
 			MultipassName: clusterName,
+		}, nil
+	}
+
+	if alive, sshKey, sshHost, sshUser := hetznerRunning(clusterName); alive {
+		return &LookupResult{
+			Backend:     BackendHetzner,
+			Context:     contextName,
+			ClusterName: clusterName,
+			SSHKey:      sshKey,
+			SSHHost:     sshHost,
+			SSHPort:     "22",
+			SSHUser:     sshUser,
 		}, nil
 	}
 
@@ -279,6 +292,47 @@ func qemuRunning(name string) (bool, string, string) {
 	sshKey := filepath.Join(cacheDir, name+"-ssh")
 	sshPort := readQemuStateSSHPort(filepath.Join(cacheDir, name+".json"))
 	return true, sshKey, sshPort
+}
+
+// hetznerRunning checks the hetzner provisioner's state-sidecar
+// convention: <cache-dir>/<name>.json exists and decodes to a
+// non-zero IPv4 + non-empty sshUser. The cache dir is
+// $Y_CLUSTER_HETZNER_CACHE_DIR when set, else
+// ~/.cache/y-cluster-hetzner -- matching pkg/provision/hetzner's
+// CacheDir().
+//
+// Unlike qemuRunning we do NOT TCP-probe the host: a Hetzner
+// server costs money to reach (and is over the public internet).
+// State-file existing is the cheapest signal that Provision
+// finished without Teardown firing; if the server was deleted
+// out-of-band, downstream ctr/crictl calls fail loudly with a
+// connection error, which is informative enough.
+//
+// Returns (true, sshKey, sshHost, sshUser) on a hit.
+func hetznerRunning(name string) (bool, string, string, string) {
+	cacheDir := os.Getenv("Y_CLUSTER_HETZNER_CACHE_DIR")
+	if cacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, "", "", ""
+		}
+		cacheDir = filepath.Join(home, ".cache", "y-cluster-hetzner")
+	}
+	data, err := os.ReadFile(filepath.Join(cacheDir, name+".json"))
+	if err != nil {
+		return false, "", "", ""
+	}
+	var s struct {
+		IPv4    string `json:"ipv4"`
+		SSHUser string `json:"sshUser"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		return false, "", "", ""
+	}
+	if s.IPv4 == "" || s.SSHUser == "" {
+		return false, "", "", ""
+	}
+	return true, filepath.Join(cacheDir, name+"-ssh"), s.IPv4, s.SSHUser
 }
 
 // readQemuStateSSHPort reads the `sshPort` field out of the qemu

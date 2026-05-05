@@ -17,12 +17,12 @@ import (
 // import`) without buffering.
 //
 // Routing per backend:
-//   - docker:    exec via the Docker daemon API (stdcopy demux);
-//                dockerexec.ExitError on non-zero exec exit.
-//   - qemu:      `sudo k3s ctr <args>` over an x/crypto/ssh session;
-//                *ssh.ExitError on non-zero remote exit.
-//   - multipass: `multipass exec <name> -- sudo k3s ctr <args>`;
-//                exit status comes from the local multipass CLI.
+//   - docker:           exec via the Docker daemon API (stdcopy demux);
+//                       dockerexec.ExitError on non-zero exec exit.
+//   - qemu / hetzner:   `sudo k3s ctr <args>` over an x/crypto/ssh session;
+//                       *ssh.ExitError on non-zero remote exit.
+//   - multipass:        `multipass exec <name> -- sudo k3s ctr <args>`;
+//                       exit status comes from the local multipass CLI.
 //
 // `ctr` rather than `k3s ctr` for docker because the rancher/k3s
 // container image puts ctr on PATH directly. qemu and multipass
@@ -48,11 +48,11 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 		return dockerexec.Exec(ctx, cli, lr.ContainerName,
 			append([]string{binary}, args...),
 			stdin, stdout, stderr)
-	case BackendQEMU:
+	case BackendQEMU, BackendHetzner:
 		return sshexec.ExecStream(ctx, sshexec.Target{
 			Host: lr.SSHHost, Port: lr.SSHPort,
 			User: lr.SSHUser, KeyPath: lr.SSHKey,
-		}, buildQemuRemote(binary, args), stdin, stdout, stderr)
+		}, buildVMNodeRemote(binary, args), stdin, stdout, stderr)
 	case BackendMultipass:
 		return multipassexec.ExecStream(ctx, lr.MultipassName,
 			buildVMNodeRemote(binary, args), stdin, stdout, stderr)
@@ -99,7 +99,7 @@ func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader
 		return dockerexec.Exec(ctx, cli, lr.ContainerName,
 			[]string{"sh", "-c", cmd},
 			stdin, stdout, stderr)
-	case BackendQEMU:
+	case BackendQEMU, BackendHetzner:
 		return sshexec.ExecStream(ctx, sshexec.Target{
 			Host: lr.SSHHost, Port: lr.SSHPort,
 			User: lr.SSHUser, KeyPath: lr.SSHKey,

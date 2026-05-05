@@ -186,3 +186,65 @@ func TestQemuRunning_PortFallbackWhenStateMissing(t *testing.T) {
 		t.Errorf("sshPort: got %q, want empty (so caller falls back to default)", sshPort)
 	}
 }
+
+// TestHetznerRunning_FromState round-trips the hetzner state
+// discovery: write a fake state sidecar, verify hetznerRunning
+// returns the IPv4 + sshUser the state encodes plus the
+// canonical key path.
+func TestHetznerRunning_FromState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("Y_CLUSTER_HETZNER_CACHE_DIR", dir)
+
+	name := "alice-dev"
+	if err := os.WriteFile(filepath.Join(dir, name+".json"),
+		[]byte(`{"context":"alice-dev","ipv4":"203.0.113.1","sshUser":"ystack","serverID":1}`),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	alive, sshKey, sshHost, sshUser := hetznerRunning(name)
+	if !alive {
+		t.Fatal("expected alive=true with state present")
+	}
+	if sshHost != "203.0.113.1" {
+		t.Errorf("sshHost: got %q, want %q", sshHost, "203.0.113.1")
+	}
+	if sshUser != "ystack" {
+		t.Errorf("sshUser: got %q, want %q", sshUser, "ystack")
+	}
+	if got, want := sshKey, filepath.Join(dir, name+"-ssh"); got != want {
+		t.Errorf("sshKey: got %q, want %q", got, want)
+	}
+}
+
+// TestHetznerRunning_MissingOrInvalid: the predicate must return
+// false when state is missing, malformed, or has empty required
+// fields, so Lookup falls through to the not-found error rather
+// than producing a half-populated result.
+func TestHetznerRunning_MissingOrInvalid(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("Y_CLUSTER_HETZNER_CACHE_DIR", dir)
+
+	if alive, _, _, _ := hetznerRunning("never-provisioned"); alive {
+		t.Error("missing state must report alive=false")
+	}
+
+	// Malformed JSON.
+	bad := "bad-json"
+	if err := os.WriteFile(filepath.Join(dir, bad+".json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if alive, _, _, _ := hetznerRunning(bad); alive {
+		t.Error("malformed JSON must report alive=false")
+	}
+
+	// Missing IPv4.
+	noIP := "no-ip"
+	if err := os.WriteFile(filepath.Join(dir, noIP+".json"),
+		[]byte(`{"sshUser":"ystack"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if alive, _, _, _ := hetznerRunning(noIP); alive {
+		t.Error("missing ipv4 must report alive=false")
+	}
+}
