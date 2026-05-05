@@ -210,10 +210,11 @@ mkdir -p "$CFG_DIR"
     echo 'memory: "4096"'
     echo 'cpus: "2"'
     echo 'diskSize: "40G"'
-    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
+    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_HTTPS_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
         echo "portForwards:"
-        [ -n "${APP_API_PORT:-}" ] && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
-        [ -n "${APP_HTTP_PORT:-}" ] && printf '  - host: "%s"\n    guest: "80"\n' "$APP_HTTP_PORT"
+        [ -n "${APP_API_PORT:-}" ]   && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
+        [ -n "${APP_HTTP_PORT:-}" ]  && printf '  - host: "%s"\n    guest: "80"\n'   "$APP_HTTP_PORT"
+        [ -n "${APP_HTTPS_PORT:-}" ] && printf '  - host: "%s"\n    guest: "443"\n'  "$APP_HTTPS_PORT"
     fi
 } > "$CFG_DIR/y-cluster-provision.yaml"
 

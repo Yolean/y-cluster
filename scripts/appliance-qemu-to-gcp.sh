@@ -75,6 +75,7 @@ Environment:
   IMAGE_NAME        Custom image name in GCE (default: <NAME>-<UTC>)
   VM_NAME           Compute Engine VM name (default: $NAME)
   APP_HTTP_PORT     Override host port for guest 80 (y-cluster default: 80)
+  APP_HTTPS_PORT    Override host port for guest 443 (y-cluster default: 443)
   APP_API_PORT      Override host port for guest 6443 (y-cluster default: 6443)
   APP_SSH_PORT      Override host port for guest 22 (y-cluster default: 2222)
   Y_CLUSTER         Path to dev binary (default: ./dist/y-cluster)
@@ -300,10 +301,11 @@ mkdir -p "$CFG_DIR"
     echo 'memory: "4096"'
     echo 'cpus: "2"'
     echo 'diskSize: "40G"'
-    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
+    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_HTTPS_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
         echo "portForwards:"
-        [ -n "${APP_API_PORT:-}" ] && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
-        [ -n "${APP_HTTP_PORT:-}" ] && printf '  - host: "%s"\n    guest: "80"\n' "$APP_HTTP_PORT"
+        [ -n "${APP_API_PORT:-}" ]   && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
+        [ -n "${APP_HTTP_PORT:-}" ]  && printf '  - host: "%s"\n    guest: "80"\n'   "$APP_HTTP_PORT"
+        [ -n "${APP_HTTPS_PORT:-}" ] && printf '  - host: "%s"\n    guest: "443"\n'  "$APP_HTTPS_PORT"
     fi
 } > "$CFG_DIR/y-cluster-provision.yaml"
 
