@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -74,7 +75,7 @@ error, 2 on usage.`,
 			if contextName != "" {
 				return runListFromCluster(cmd, contextName, format, sortKey)
 			}
-			r, closer, err := openYAMLInput(args[0], cmd.InOrStdin())
+			r, closer, err := openInput(cmd.Context(), args[0], cmd.InOrStdin())
 			if err != nil {
 				return err
 			}
@@ -189,29 +190,36 @@ func imagesLoadCmd() *cobra.Command {
 	useCache := true
 
 	cmd := &cobra.Command{
-		Use:   "load <ref|path|->",
+		Use:   "load <ref|path|-|url>",
 		Short: "Ensure an image is in the cluster's containerd",
 		Long: `Make an image available in the cluster's containerd. The single
 positional argument dispatches by leading character (same shape
 as docker build / git clone):
 
-  ./...     a local path (relative -- MUST start with "./")
-  /...      a local path (absolute)
-  ~/...     a local path (home-relative)
-  -         stdin (an OCI archive)
-  <other>   a remote image reference
+  ./...          a local path (relative -- MUST start with "./")
+  /...           a local path (absolute)
+  ~/...          a local path (home-relative)
+  -              stdin (an OCI archive)
+  http(s)://...  an OCI archive fetched over HTTP
+  <other>        a remote image reference
 
 Bare names without "./" are remote refs by rule. A directory
 called "myimage" in CWD is reached as "./myimage" --
 "myimage" alone is dispatched as a remote registry ref and
 fails fast. The rule is unambiguous because container references
 can't legally start with ./, /, or ~/ per the OCI distribution
-spec.
+spec, and never carry an http(s):// scheme.
 
 Path inputs:
   - file: an already-tarred OCI archive
   - directory: an OCI v1 layout (tar streamed on the fly,
     equivalent to ` + "`tar -cf - -C <dir> . | y-cluster images load -`" + `)
+
+URL inputs stream the HTTP response body into the same code
+path that file and stdin input use -- the byte stream is the
+contract. The motivating case is a Hetzner S3 blob URL: one
+less ` + "`curl ... | y-cluster images load -`" + ` shell-pipe in the
+workflow. Re-running re-downloads; no cache is touched.
 
 Remote refs (default flow): resolve digest, check the cluster's
 k8s.io namespace -- if the digest is already indexed, no-op.
@@ -219,20 +227,21 @@ Otherwise pull into the y-cluster shared cache (idempotent,
 dedup by digest, reused on the next load to another cluster)
 and stream to ` + "`ctr image import`" + `. Pass --cache=false to skip
 the persistent cache (pull into a tempdir, load, throw the
-tempdir away); rejected for path / stdin input where the caller
-already owns the bytes.
+tempdir away); rejected for path / stdin / url input where the
+cache is never involved.
 
 Cluster discovery uses --context (default "local"): docker
-backends import via the daemon API, qemu backends via SSH. No
-SSH/docker-exec bytes are wasted on a re-deploy of a digest the
-cluster already has.
+backends import via the daemon API, the qemu / hetzner backends
+via SSH. No SSH/docker-exec bytes are wasted on a re-deploy of
+a digest the cluster already has.
 
 Examples:
   y-cluster images load registry.k8s.io/pause:3.10
   y-cluster images load registry.k8s.io/pause:3.10 --cache=false
   y-cluster images load ./myimage/target-oci
   y-cluster images load /tmp/builds/myapp.tar
-  cat /tmp/builds/myapp.tar | y-cluster images load -`,
+  cat /tmp/builds/myapp.tar | y-cluster images load -
+  y-cluster images load https://hel1.your-objectstorage.com/bucket/myapp.tar`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := c.Context()
@@ -247,6 +256,10 @@ Examples:
 				if !useCache {
 					return fmt.Errorf("--cache=false is incompatible with stdin input")
 				}
+			case isURLArg(arg):
+				if !useCache {
+					return fmt.Errorf("--cache=false is incompatible with url input %q (the stream is never cached)", arg)
+				}
 			case isPathArg(arg):
 				if !useCache {
 					return fmt.Errorf("--cache=false is incompatible with path input %q (caller already owns the bytes)", arg)
@@ -259,6 +272,13 @@ Examples:
 			switch {
 			case arg == "-":
 				return images.Load(ctx, lr, c.InOrStdin(), logger)
+			case isURLArg(arg):
+				r, closer, err := openInput(ctx, arg, c.InOrStdin())
+				if err != nil {
+					return err
+				}
+				defer closer()
+				return images.Load(ctx, lr, r, logger)
 			case isPathArg(arg):
 				return loadFromPath(ctx, lr, arg, logger)
 			default:
@@ -287,6 +307,14 @@ func isPathArg(arg string) bool {
 		strings.HasPrefix(arg, "/") ||
 		strings.HasPrefix(arg, "~/") ||
 		arg == "." || arg == ".."
+}
+
+// isURLArg classifies the positional argument as an http(s) URL
+// input. Registry refs never carry a scheme, so this check does
+// not collide with remote-ref dispatch as long as it runs before
+// the remote-ref default.
+func isURLArg(arg string) bool {
+	return strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://")
 }
 
 // loadFromPath dispatches an existing-path input to either the
@@ -369,16 +397,43 @@ func loadFromRef(ctx context.Context, lr *cluster.LookupResult, ref, cacheDir st
 	return images.Load(ctx, lr, r, logger)
 }
 
-// openYAMLInput resolves the positional input arg ("<path>" or
-// "-") to an io.Reader plus a deferred-close callback. We expose
-// the close callback (rather than just an io.ReadCloser) because
-// stdin must not be Close()d — the test runner reuses it.
+// openInput resolves the positional input arg to an io.Reader
+// plus a deferred-close callback. Three modes by prefix detection:
 //
-// Used by both `images list` (yaml stream) and `images load`
-// (oci archive) — same input semantics, different content.
-func openYAMLInput(arg string, stdin io.Reader) (io.Reader, func(), error) {
+//   - "-"                       → stdin (no close)
+//   - "http://" / "https://"    → HTTP GET, stream the response body
+//   - anything else             → file open
+//
+// We expose the close callback (rather than just an io.ReadCloser)
+// because stdin must not be Close()d -- the test runner reuses it.
+//
+// Used by `images list` (YAML stream), `images load` (OCI
+// archive, url input), and `manifests add` (kustomize YAML). The
+// shared helper means a Hetzner S3 blob URL works as input to any
+// of them; the byte stream is the contract, not the content type.
+//
+// HTTP errors (non-2xx) close the body and return a clear error
+// rather than letting the consumer parse error HTML as the
+// expected content.
+func openInput(ctx context.Context, arg string, stdin io.Reader) (io.Reader, func(), error) {
 	if arg == "-" {
 		return stdin, func() {}, nil
+	}
+	if isURLArg(arg) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, arg, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("build GET %s: %w", arg, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("GET %s: %w", arg, err)
+		}
+		if resp.StatusCode/100 != 2 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			_ = resp.Body.Close()
+			return nil, nil, fmt.Errorf("GET %s: %s: %s", arg, resp.Status, strings.TrimSpace(string(body)))
+		}
+		return resp.Body, func() { _ = resp.Body.Close() }, nil
 	}
 	f, err := os.Open(arg)
 	if err != nil {

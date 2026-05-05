@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const podWithInitYAML = `apiVersion: v1
@@ -222,5 +227,148 @@ func TestImagesLoadCmd_CacheFalseRejectedForPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--cache=false") {
 		t.Errorf("error should call out --cache=false: %v", err)
+	}
+}
+
+// TestImagesLoadCmd_CacheFalseRejectedForURL: same shape for
+// the url-input case -- the response body is streamed straight
+// to the cluster; the cache is never involved, so toggling it
+// is meaningless.
+func TestImagesLoadCmd_CacheFalseRejectedForURL(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetArgs([]string{"images", "load", "--context=does-not-exist", "--cache=false", "https://example.invalid/some.tar"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --cache=false with url")
+	}
+	if !strings.Contains(err.Error(), "--cache=false") {
+		t.Errorf("error should call out --cache=false: %v", err)
+	}
+}
+
+// TestIsURLArg pins the scheme-driven dispatch rule the load cmd
+// consults before the remote-ref default: only http(s):// input
+// streams over HTTP; refs and paths never carry a scheme.
+func TestIsURLArg(t *testing.T) {
+	urls := []string{
+		"http://hel1.your-objectstorage.com/bucket/myapp.tar",
+		"https://hel1.your-objectstorage.com/bucket/myapp.tar",
+	}
+	other := []string{
+		"nginx:1.27",
+		"registry.k8s.io/pause:3.10",
+		"./relative/path.tar",
+		"/absolute/path.tar",
+		"-",
+		"httpd:2.4",
+	}
+	for _, u := range urls {
+		if !isURLArg(u) {
+			t.Errorf("expected %q to dispatch as url", u)
+		}
+	}
+	for _, o := range other {
+		if isURLArg(o) {
+			t.Errorf("expected %q NOT to dispatch as url", o)
+		}
+	}
+}
+
+// TestOpenInput_URL_Success exercises the http(s):// branch:
+// returns the body verbatim, closer drains the response. Phase 4
+// adds this path so a Hetzner S3 blob URL can be fed to images
+// load / list / manifests add without an intermediate `curl ... |
+// y-cluster ... -` pipe.
+func TestOpenInput_URL_Success(t *testing.T) {
+	const want = "fake oci archive bytes"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = io.WriteString(w, want)
+	}))
+	defer srv.Close()
+
+	r, closer, err := openInput(context.Background(), srv.URL+"/foo.tar", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("openInput: %v", err)
+	}
+	defer closer()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("body: got %q, want %q", got, want)
+	}
+}
+
+// TestOpenInput_URL_Non2xx surfaces server errors as a clean Go
+// error rather than letting them slip through as the response
+// body. Without this, `images load https://wherever/missing.tar`
+// would feed a 404 HTML page to ctr image import.
+func TestOpenInput_URL_Non2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such object", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, _, err := openInput(context.Background(), srv.URL+"/missing.tar", strings.NewReader(""))
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention status: %v", err)
+	}
+}
+
+// TestOpenInput_URL_DialFailure: an unreachable host surfaces
+// an error rather than hanging or silently degrading. Uses a
+// short ctx deadline because the default TCP connect timeout is
+// long; the unit-test signal we need ("dial failure -> error") is
+// independent of the wait.
+func TestOpenInput_URL_DialFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Reserved TEST-NET-1 (RFC 5737); guaranteed unroutable.
+	_, _, err := openInput(ctx, "http://192.0.2.1:1/foo.tar", strings.NewReader(""))
+	if err == nil {
+		t.Fatal("expected error for unroutable host")
+	}
+}
+
+// TestOpenInput_FileBranch confirms the file path is unchanged
+// from the pre-phase-4 behaviour.
+func TestOpenInput_FileBranch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.bin")
+	writeFile(t, path, "hello")
+
+	r, closer, err := openInput(context.Background(), path, strings.NewReader("stdin should not be used"))
+	if err != nil {
+		t.Fatalf("openInput: %v", err)
+	}
+	defer closer()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("got %q, want %q", got, "hello")
+	}
+}
+
+// TestOpenInput_StdinBranch confirms "-" routes to the supplied
+// stdin reader without consulting URL or file logic.
+func TestOpenInput_StdinBranch(t *testing.T) {
+	r, closer, err := openInput(context.Background(), "-", strings.NewReader("piped"))
+	if err != nil {
+		t.Fatalf("openInput: %v", err)
+	}
+	defer closer()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "piped" {
+		t.Errorf("got %q, want %q", got, "piped")
 	}
 }
