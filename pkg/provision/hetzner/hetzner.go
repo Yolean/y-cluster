@@ -312,20 +312,25 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		)
 	}
 
-	// Auto-teardown is NOT IMPLEMENTED YET. Earlier work scheduled
-	// an at(1) job on the operator's host, which was rejected: a
-	// laptop that gets wiped, retired, or simply belongs to someone
-	// who quit leaves the Hetzner server stranded forever -- the
-	// exact "don't leak" failure mode auto-teardown is supposed to
-	// prevent. The trigger has to live cloud-side or cluster-side
-	// (e.g. an in-cluster reaper Job that calls Hetzner API to
-	// self-delete after AutoTeardownHours, or a label-based external
-	// reaper). Pinned for a follow-up branch; this provisioner logs
-	// a Warn so an operator running it before the reaper lands can't
-	// claim ignorance of their server's footprint.
-	logger.Warn("auto-teardown NOT scheduled (not yet implemented); run `y-cluster teardown -c <dir>` manually when done",
-		zap.Int("intendedHours", cfg.AutoTeardownHours),
-	)
+	// Phase 2: install the in-cluster reaper Job. Sleeps for
+	// AutoTeardownHours, then calls hcloud delete for the server
+	// and (if no other lb-group members remain) the LB. Lives in
+	// the cluster so an operator-machine going away doesn't strand
+	// paid Hetzner resources -- the trade earlier at(1)-on-host
+	// work didn't pass.
+	if err := installReaper(ctx, installReaperOpts{
+		KubectlContext: cfg.Context,
+		ContextName:    cfg.Context,
+		HCloudToken:    readHCloudToken(),
+		Hours:          cfg.AutoTeardownHours,
+		ServerID:       c.state.ServerID,
+		LBID:           c.state.LBID,
+		LBGroup:        cfg.LBGroup,
+	}, logger); err != nil {
+		return nil, fmt.Errorf("install reaper: %w", err)
+	}
+	logger.Info("auto-teardown reaper installed",
+		zap.Int("hours", cfg.AutoTeardownHours))
 
 	logger.Info("cluster ready", zap.String("context", c.cfg.Context))
 

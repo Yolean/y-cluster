@@ -1,0 +1,81 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{NAMESPACE}}
+  labels:
+    managed-by: y-cluster
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hcloud-token
+  namespace: {{NAMESPACE}}
+  labels:
+    managed-by: y-cluster
+type: Opaque
+stringData:
+  token: "{{TOKEN}}"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: reaper
+  namespace: {{NAMESPACE}}
+  labels:
+    managed-by: y-cluster
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        managed-by: y-cluster
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: reaper
+        image: {{IMAGE}}
+        command: ["/bin/sh", "-c"]
+        # Sleep for HOURS, then (if we're the last lb-group member)
+        # delete the LB FIRST and the server SECOND. Order matters:
+        # this Pod runs ON the server it's about to delete, and the
+        # server-delete API returns before Hetzner physically shuts
+        # the VM down -- if we did LB-after-server, the Pod could be
+        # killed mid-cleanup and orphan the LB. Pre-counting also
+        # means: when other lb-group members exist, we leave the LB
+        # alone (label_selector drops us automatically once the
+        # server is gone).
+        #
+        # Hetzner Certificate + SSH key cleanup is intentionally NOT
+        # in here -- those are free, need LB-detach-then-delete
+        # sequencing the Go Teardown handles, and the operator can
+        # sweep them at next interactive Teardown.
+        args:
+        - |
+          set -eu
+          echo "[reaper] sleeping ${HOURS}h before tearing down server=${SERVER_ID} lb-group=${LB_GROUP}"
+          sleep $((HOURS * 3600))
+          TOTAL=$(/ko-app/hcloud server list -l "managed-by=y-cluster,lb-group=${LB_GROUP}" --output=noheader 2>/dev/null | wc -l)
+          echo "[reaper] lb-group has ${TOTAL} servers (including us)"
+          if [ "${TOTAL}" = "1" ] && [ "${LB_ID}" != "0" ]; then
+            echo "[reaper] last member; deleting LB ${LB_ID} BEFORE server"
+            /ko-app/hcloud load-balancer delete "${LB_ID}" || echo "[reaper] LB delete failed (already gone?)"
+          fi
+          echo "[reaper] deleting server ${SERVER_ID}"
+          /ko-app/hcloud server delete "${SERVER_ID}" || echo "[reaper] server delete failed (already gone?)"
+          echo "[reaper] done"
+        env:
+        - name: HOURS
+          value: "{{HOURS}}"
+        - name: SERVER_ID
+          value: "{{SERVER_ID}}"
+        - name: LB_ID
+          value: "{{LB_ID}}"
+        - name: LB_GROUP
+          value: "{{LB_GROUP}}"
+        - name: HCLOUD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hcloud-token
+              key: token
