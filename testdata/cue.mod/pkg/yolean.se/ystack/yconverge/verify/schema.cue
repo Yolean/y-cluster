@@ -10,8 +10,10 @@ package verify
 }
 
 // Check is a discriminated union. Each variant maps to a kubectl
-// subcommand that manages its own timeout and output.
-#Check: #Wait | #Rollout | #Exec
+// subcommand that manages its own timeout and output, or (for
+// kind: "gateway") to an in-cluster ephemeral curl probe with
+// auto-discovered Gateway address pinning.
+#Check: #Wait | #Rollout | #Exec | #Gateway
 
 // Thin wrapper around kubectl wait.
 // Timeout and output are managed by kubectl.
@@ -41,4 +43,35 @@ package verify
 	command:     string
 	timeout:     *"60s" | string
 	description: string
+}
+
+// HTTP probe through the cluster's Gateway. The runtime discovers
+// the Gateway's programmed address (Gateway.status.addresses) for
+// the configured class, launches an ephemeral in-cluster curl Pod
+// with `--resolve <host>:<port>:<gateway-addr>` so the request
+// actually traverses Gateway -> HTTPRoute -> backend (no DNS or
+// /etc/hosts dependency on the host running yconverge). The
+// engine retries until timeout.
+//
+// expectCode is always a list -- single-status callers write
+// `expectCode: [302]`. Empty defaults to `[200]` at runtime.
+//
+// expectLocation is a Go regexp matched against the response
+// Location header; useful for asserting "redirected to oauth, on
+// the right realm" without the curl-grep false-positives that
+// kind: exec is prone to.
+#Gateway: {
+	kind:               "gateway"
+	url:                string
+	expectCode:         *[200] | [...int]
+	expectLocation?:    string
+	// Optional explicit override of the Gateway-address discovery
+	// (curl --resolve target IP). Empty -> auto-discover from
+	// Gateway.status.addresses.
+	resolve?:           string
+	// Optional GatewayClass narrowing. Empty -> first programmed
+	// Gateway across all classes.
+	gatewayClassName?:  string
+	timeout:            *"60s" | string
+	description:        *"" | string
 }
