@@ -30,6 +30,14 @@ type state struct {
 	// AtJobID is the at(1) job number the auto-teardown is
 	// scheduled under. Phase 2 fills it; phase 1 leaves it 0.
 	AtJobID int `json:"atJobID,omitempty"`
+	// LBGroup mirrors cfg.LBGroup so Teardown -- which only sees
+	// the context name, not the YAML config -- knows which lb-group
+	// to enumerate when deciding whether to delete the LB.
+	LBGroup string `json:"lbGroup,omitempty"`
+	// LBID is the Hetzner LB resource id this server attached to.
+	// Persisted so Teardown can delete it without a name lookup
+	// when it turns out to be the last attached server.
+	LBID int64 `json:"lbID,omitempty"`
 }
 
 func statePath(cacheDir, context string) string {

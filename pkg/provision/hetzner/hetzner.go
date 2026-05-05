@@ -237,6 +237,22 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 
+	// Phase 3.a: ensure the lb-group LB exists and includes us.
+	// Server already carries managed-by + lb-group labels, so the
+	// label_selector target on the LB picks us up on creation.
+	lb, err := ensureLoadBalancer(ctx, hc, lbConfig{
+		LBGroup:  cfg.LBGroup,
+		Location: cfg.Location,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("ensure load balancer: %w", err)
+	}
+	c.state.LBGroup = cfg.LBGroup
+	c.state.LBID = lb.ID
+	if err := saveState(c.cacheDir, c.state); err != nil {
+		return nil, fmt.Errorf("save state with LB id: %w", err)
+	}
+
 	// Schedule auto-teardown last: every preceding step needs to
 	// have produced a working cluster, otherwise we'd queue a job
 	// that fires against a half-provisioned (or already-failed)
@@ -327,6 +343,14 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 		}
 	} else {
 		logger.Info("no server to delete", zap.String("context", contextName))
+	}
+
+	// LB delete IFF this server was the last lb-group member. The
+	// label_selector target on the LB drops the just-deleted
+	// server from rotation automatically, so we just need to
+	// count remaining managed-by=y-cluster,lb-group=<grp> servers.
+	if err := deleteLBIfEmpty(ctx, hc, st.LBGroup, st.LBID, logger); err != nil {
+		return fmt.Errorf("teardown LB: %w", err)
 	}
 
 	// SSH key delete.
