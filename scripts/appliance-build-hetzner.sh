@@ -30,9 +30,9 @@ Environment:
   ENV_FILE          Hetzner credentials file (set in .env or shell env; required)
   HCLOUD_TOKEN      Hetzner Cloud API token (sourced from ENV_FILE)
   NAME              Local cluster name (default: appliance-hetzner-build)
-  APP_HTTP_PORT     Local host port -> guest 80 (default: 80)
-  APP_API_PORT      Local host port -> guest 6443 (default: 39443)
-  APP_SSH_PORT     Local host port -> guest 22 (default: 2229)
+  APP_HTTP_PORT     Override host port for guest 80 (y-cluster default: 80)
+  APP_API_PORT      Override host port for guest 6443 (y-cluster default: 6443)
+  APP_SSH_PORT      Override host port for guest 22 (y-cluster default: 2222)
   SERVER_NAME       Hetzner server name (default: y-cluster-appliance)
   SERVER_TYPE       Hetzner server type (default: cx23)
   SERVER_LOCATION   Hetzner location (default: hel1)
@@ -60,9 +60,6 @@ fi
 : "${ENV_FILE:?set ENV_FILE in .env or shell env}"
 
 NAME="${NAME:-appliance-hetzner-build}"
-APP_HTTP_PORT="${APP_HTTP_PORT:-80}"
-APP_API_PORT="${APP_API_PORT:-39443}"
-APP_SSH_PORT="${APP_SSH_PORT:-2229}"
 SERVER_NAME="${SERVER_NAME:-y-cluster-appliance}"
 SERVER_TYPE="${SERVER_TYPE:-cx23}"
 SERVER_LOCATION="${SERVER_LOCATION:-hel1}"
@@ -155,20 +152,23 @@ mkdir -p "$(dirname "$Y_CLUSTER")"
 
 # === Local config ===
 mkdir -p "$CFG_DIR"
-cat > "$CFG_DIR/y-cluster-provision.yaml" <<EOF
-provider: qemu
-name: $NAME
-context: $NAME
-sshPort: "$APP_SSH_PORT"
-memory: "4096"
-cpus: "2"
-diskSize: "40G"
-portForwards:
-  - host: "$APP_API_PORT"
-    guest: "6443"
-  - host: "$APP_HTTP_PORT"
-    guest: "80"
-EOF
+# YAML emission omits any port the operator didn't override, letting
+# y-cluster's Go binary apply its own defaults (sshPort=2222,
+# portForwards={6443:6443, 80:80, 443:443}).
+{
+    echo "provider: qemu"
+    echo "name: $NAME"
+    echo "context: $NAME"
+    [ -n "${APP_SSH_PORT:-}" ] && printf 'sshPort: "%s"\n' "$APP_SSH_PORT"
+    echo 'memory: "4096"'
+    echo 'cpus: "2"'
+    echo 'diskSize: "40G"'
+    if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
+        echo "portForwards:"
+        [ -n "${APP_API_PORT:-}" ] && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
+        [ -n "${APP_HTTP_PORT:-}" ] && printf '  - host: "%s"\n    guest: "80"\n' "$APP_HTTP_PORT"
+    fi
+} > "$CFG_DIR/y-cluster-provision.yaml"
 
 # === Stage 1: local provision + install + smoketest ===
 stage "tearing down any leftover $NAME cluster"
@@ -200,24 +200,24 @@ probe_local() {
     echo "$what smoketest never succeeded; aborting" >&2
     return 1
 }
-probe_local echo "http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo"
-probe_local s3   "http://127.0.0.1:$APP_HTTP_PORT/s3/health"
+probe_local echo "http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo"
+probe_local s3   "http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health"
 
 cat <<EOF
 
 ================================================================
 Local cluster $NAME is up. Verify with:
 
-  HTTP (echo + s3):  http://127.0.0.1:$APP_HTTP_PORT/q/envoy/echo
-                     http://127.0.0.1:$APP_HTTP_PORT/s3/health
-  Kubernetes API:    https://127.0.0.1:$APP_API_PORT
+  HTTP (echo + s3):  http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo
+                     http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health
+  Kubernetes API:    https://127.0.0.1:${APP_API_PORT:-6443}
   kubectl context:   $NAME
 
   kubectl --context=$NAME get nodes -o wide
   kubectl --context=$NAME get pods -A
   kubectl --context=$NAME -n appliance-stateful get statefulset,pvc,pv
 
-  ssh -i $CACHE_DIR/$NAME-ssh -p $APP_SSH_PORT \\
+  ssh -i $CACHE_DIR/$NAME-ssh -p ${APP_SSH_PORT:-2222} \\
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
       ystack@127.0.0.1
 
