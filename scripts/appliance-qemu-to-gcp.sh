@@ -82,7 +82,14 @@ Environment:
   CACHE_DIR         Where y-cluster keeps its qcow2 (default: ~/.cache/y-cluster-qemu)
   KEEP_LOCAL        Set to keep the local cluster after upload (default: tear down)
   KEEP_BUNDLE       Set to keep the local export bundle (default: keep -- bundle path printed)
-  ASSUME_YES        Skip BOTH confirmations and proceed end-to-end
+  ASSUME_YES        Skip BOTH confirmations and proceed end-to-end.
+                    Also suppresses the optional TLS-LB prompt; set
+                    TLS_DOMAINS alongside to opt in unattended.
+  TLS_DOMAINS       Comma-separated FQDNs for an optional regional
+                    External HTTPS LoadBalancer with a self-signed
+                    cert (e.g., appliance.example.com,admin.appliance.example.com).
+                    Empty: skip the LB step. The HTTPRoutes must
+                    already match these hostnames.
 
 Dependencies:
   go, qemu-system-x86_64, qemu-img, kubectl, ssh, ssh-keygen, curl,
@@ -189,6 +196,14 @@ do_teardown() {
     if [[ $delete_data_disk -eq 1 && -n "$disk" ]]; then
         echo "  Data disk:          $GCP_DATADIR_DISK (PERSISTENT DATA WILL BE LOST)"
     fi
+    # If a TLS LB stack exists, do_tls_teardown will pick it up.
+    # We don't enumerate every resource here -- the function logs
+    # `deleting TLS LB stack ...` when it fires.
+    if gcloud compute forwarding-rules describe "${NAME}-tls-fr" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --format='value(name)' 2>/dev/null | grep -q .; then
+        echo "  TLS LB stack:       ${NAME}-tls-* (forwarding rule + 8 dependents)"
+    fi
     echo
     echo "Will PRESERVE:"
     if [[ $delete_data_disk -eq 0 && -n "$disk" ]]; then
@@ -230,7 +245,220 @@ do_teardown() {
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
     fi
 
+    do_tls_teardown
     stage "teardown complete"
+}
+
+# do_tls_frontend stands up a regional External Application
+# Load Balancer in front of $VM_NAME with a self-signed cert
+# covering $1 (comma-separated FQDNs). Idempotent: each create
+# is describe-then-create, so re-runs converge.
+#
+# Resources are named ${NAME}-tls-* so do_tls_teardown can clean
+# them up alongside the rest of the appliance.
+#
+# Cost: regional EXTERNAL_MANAGED LB forwarding rule (~hourly)
+# + reserved IP (only while reserved). Both billed by the
+# forwarding-rule-hour and the IP-hour respectively, so teardown
+# stops the meter immediately.
+do_tls_frontend() {
+    local domains_csv=$1
+    local first_domain
+    first_domain=$(echo "$domains_csv" | cut -d, -f1)
+    local sans
+    sans="DNS:$(echo "$domains_csv" | sed 's/,/,DNS:/g')"
+    local cert_dir="$BUNDLE_DIR/tls"
+    mkdir -p "$cert_dir"
+
+    stage "generating self-signed cert for $domains_csv (90 days)"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$cert_dir/privkey.pem" -out "$cert_dir/fullchain.pem" \
+        -days 90 -subj "/CN=$first_domain" \
+        -addext "subjectAltName=$sans" 2>/dev/null
+    chmod 600 "$cert_dir/privkey.pem"
+
+    # Proxy-only subnet: required by regional EXTERNAL_MANAGED LBs,
+    # one ACTIVE per region+VPC. Reuse if any exists; otherwise
+    # create a per-build one we can clean up on teardown.
+    stage "ensuring proxy-only subnet in $GCP_REGION"
+    if gcloud compute networks subnets list \
+            --project="$GCP_PROJECT" \
+            --filter "region:$GCP_REGION AND purpose=REGIONAL_MANAGED_PROXY AND role=ACTIVE" \
+            --format='value(name)' 2>/dev/null | grep -q .; then
+        echo "  reusing existing proxy-only subnet"
+    else
+        gcloud compute networks subnets create "${NAME}-tls-proxy-subnet" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --network=default --range=192.168.42.0/24 \
+            --purpose=REGIONAL_MANAGED_PROXY --role=ACTIVE >/dev/null
+    fi
+
+    stage "reserving regional external IP ${NAME}-tls-ip"
+    if ! gcloud compute addresses describe "${NAME}-tls-ip" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute addresses create "${NAME}-tls-ip" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --network-tier=STANDARD >/dev/null
+    fi
+    local lb_ip
+    lb_ip=$(gcloud compute addresses describe "${NAME}-tls-ip" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(address)')
+
+    stage "uploading SSL cert ${NAME}-tls-cert"
+    if ! gcloud compute ssl-certificates describe "${NAME}-tls-cert" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute ssl-certificates create "${NAME}-tls-cert" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --certificate="$cert_dir/fullchain.pem" \
+            --private-key="$cert_dir/privkey.pem" >/dev/null
+    fi
+
+    stage "creating health check ${NAME}-tls-hc"
+    if ! gcloud compute health-checks describe "${NAME}-tls-hc" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute health-checks create http "${NAME}-tls-hc" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --port=80 --request-path=/q/envoy/echo \
+            --check-interval=10s --timeout=5s >/dev/null
+    fi
+
+    stage "creating network endpoint group ${NAME}-tls-neg"
+    if ! gcloud compute network-endpoint-groups describe "${NAME}-tls-neg" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
+        gcloud compute network-endpoint-groups create "${NAME}-tls-neg" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+            --network-endpoint-type=GCE_VM_IP_PORT --default-port=80 >/dev/null
+        gcloud compute network-endpoint-groups update "${NAME}-tls-neg" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+            --add-endpoint="instance=$VM_NAME,port=80" >/dev/null
+    fi
+
+    stage "creating backend service ${NAME}-tls-backend"
+    if ! gcloud compute backend-services describe "${NAME}-tls-backend" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute backend-services create "${NAME}-tls-backend" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --load-balancing-scheme=EXTERNAL_MANAGED --protocol=HTTP \
+            --health-checks="${NAME}-tls-hc" \
+            --health-checks-region="$GCP_REGION" >/dev/null
+        gcloud compute backend-services add-backend "${NAME}-tls-backend" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --network-endpoint-group="${NAME}-tls-neg" \
+            --network-endpoint-group-zone="$GCP_ZONE" \
+            --balancing-mode=RATE --max-rate-per-endpoint=100 >/dev/null
+    fi
+
+    stage "creating URL map ${NAME}-tls-urlmap"
+    if ! gcloud compute url-maps describe "${NAME}-tls-urlmap" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute url-maps create "${NAME}-tls-urlmap" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --default-service="projects/$GCP_PROJECT/regions/$GCP_REGION/backendServices/${NAME}-tls-backend" >/dev/null
+    fi
+
+    stage "creating target HTTPS proxy ${NAME}-tls-proxy"
+    if ! gcloud compute target-https-proxies describe "${NAME}-tls-proxy" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute target-https-proxies create "${NAME}-tls-proxy" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --url-map="${NAME}-tls-urlmap" \
+            --ssl-certificates="${NAME}-tls-cert" >/dev/null
+    fi
+
+    stage "creating forwarding rule ${NAME}-tls-fr (:443)"
+    if ! gcloud compute forwarding-rules describe "${NAME}-tls-fr" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" >/dev/null 2>&1; then
+        gcloud compute forwarding-rules create "${NAME}-tls-fr" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --load-balancing-scheme=EXTERNAL_MANAGED --network-tier=STANDARD \
+            --network=default --address="${NAME}-tls-ip" \
+            --target-https-proxy="${NAME}-tls-proxy" \
+            --target-https-proxy-region="$GCP_REGION" --ports=443 >/dev/null
+    fi
+
+    cat <<EOF
+
+================================================================
+External HTTPS LoadBalancer ready.
+
+  IP:        $lb_ip
+  Hostnames: ${domains_csv//,/ }
+  Cert:      SELF-SIGNED (browser will warn; curl needs -k)
+
+To test from another machine, append this single line to /etc/hosts:
+
+  $lb_ip  ${domains_csv//,/ }
+
+For a real cert (cert-manager / Let's Encrypt), upload a fresh PEM
++ key as ${NAME}-tls-cert-vN, then point the proxy at it via
+\`gcloud compute target-https-proxies update ${NAME}-tls-proxy
+--ssl-certificates=${NAME}-tls-cert-vN --region=$GCP_REGION\`.
+================================================================
+
+EOF
+}
+
+# do_tls_teardown deletes everything do_tls_frontend created.
+# Idempotent: missing resources are not errors. Order matters --
+# the forwarding rule has to go before the proxy/url-map/backend
+# chain, and the IP after.
+do_tls_teardown() {
+    local fr proxy urlmap backend neg hc cert ip subnet
+    fr=$(gcloud compute forwarding-rules describe "${NAME}-tls-fr" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing fr is not an error
+    proxy=$(gcloud compute target-https-proxies describe "${NAME}-tls-proxy" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing proxy is not an error
+    urlmap=$(gcloud compute url-maps describe "${NAME}-tls-urlmap" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing url-map is not an error
+    backend=$(gcloud compute backend-services describe "${NAME}-tls-backend" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing backend is not an error
+    neg=$(gcloud compute network-endpoint-groups describe "${NAME}-tls-neg" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing neg is not an error
+    hc=$(gcloud compute health-checks describe "${NAME}-tls-hc" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing hc is not an error
+    cert=$(gcloud compute ssl-certificates describe "${NAME}-tls-cert" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing cert is not an error
+    ip=$(gcloud compute addresses describe "${NAME}-tls-ip" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing ip is not an error
+    subnet=$(gcloud compute networks subnets describe "${NAME}-tls-proxy-subnet" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" \
+        --format='value(name)' 2>/dev/null) || true # y-script-lint:disable=or-true # missing subnet is not an error
+
+    if [[ -z "$fr$proxy$urlmap$backend$neg$hc$cert$ip$subnet" ]]; then
+        return
+    fi
+
+    stage "deleting TLS LB stack (${NAME}-tls-*)"
+    [[ -n "$fr" ]] && gcloud compute forwarding-rules delete "${NAME}-tls-fr" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$proxy" ]] && gcloud compute target-https-proxies delete "${NAME}-tls-proxy" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$urlmap" ]] && gcloud compute url-maps delete "${NAME}-tls-urlmap" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$backend" ]] && gcloud compute backend-services delete "${NAME}-tls-backend" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$neg" ]] && gcloud compute network-endpoint-groups delete "${NAME}-tls-neg" \
+        --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+    [[ -n "$hc" ]] && gcloud compute health-checks delete "${NAME}-tls-hc" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$cert" ]] && gcloud compute ssl-certificates delete "${NAME}-tls-cert" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    [[ -n "$ip" ]] && gcloud compute addresses delete "${NAME}-tls-ip" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    # Subnet last: only delete the per-build one (do_tls_frontend
+    # never creates a subnet that already exists, so anything named
+    # ${NAME}-tls-proxy-subnet was definitely ours).
+    [[ -n "$subnet" ]] && gcloud compute networks subnets delete "${NAME}-tls-proxy-subnet" \
+        --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
 }
 
 # Minimal pre-checks shared by build and teardown: gcloud
@@ -639,6 +867,33 @@ stage "probing http://$PUBLIC_IP -- whatever you applied locally"
 # route.
 probe echo "http://$PUBLIC_IP/q/envoy/echo" 30 || \
     echo "  (no echo route -- expected if your workload replaced y-cluster echo)"
+
+# === Stage 11: optional external HTTPS LoadBalancer ===
+# Operator-driven add-on: if TLS_DOMAINS isn't set in the env,
+# prompt for it (skip on empty input). With ASSUME_YES + TLS_DOMAINS
+# set, runs without prompting. With ASSUME_YES alone, skip silently
+# -- ASSUME_YES is for unattended e2e and we don't want to surprise
+# the operator with a billing meter they didn't ask for.
+if [[ -z "${TLS_DOMAINS:-}" && -z "${ASSUME_YES:-}" ]]; then
+    echo
+    echo "================================================================"
+    echo "Optional: external HTTPS LoadBalancer (regional, EXTERNAL_MANAGED)"
+    echo
+    echo "Sets up a regional GCP External Application Load Balancer in"
+    echo "front of $VM_NAME with a SELF-SIGNED cert covering the FQDNs"
+    echo "you specify. Useful for testing the LB+routing chain without"
+    echo "DNS or a real CA. Browsers will warn on the cert; tools need"
+    echo "--insecure / -k. Cost: ~hourly forwarding-rule + reserved IP."
+    echo
+    echo "HTTPRoutes on the cluster need spec.hostnames covering the"
+    echo "same FQDNs (the LB forwards Host: unchanged). Patch them"
+    echo "yourself before answering yes."
+    echo "================================================================"
+    read -r -p "FQDNs (comma-separated, empty to skip): " TLS_DOMAINS
+fi
+if [[ -n "${TLS_DOMAINS:-}" ]]; then
+    do_tls_frontend "$TLS_DOMAINS"
+fi
 
 if [[ -z "${KEEP_LOCAL:-}" ]]; then
     stage "tearing down local cluster (set KEEP_LOCAL=1 to keep it)"
