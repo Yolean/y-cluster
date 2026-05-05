@@ -90,7 +90,7 @@ func CacheDir() string {
 func newClient() (*hcloud.Client, error) {
 	tok := os.Getenv(HCloudTokenEnv)
 	if tok == "" {
-		return nil, fmt.Errorf("%s is unset; source ENV_FILE (typically ~/Yolean/.yolean-bots-device/y-cluster-hetzner-$USER.env) before running this command", HCloudTokenEnv)
+		return nil, fmt.Errorf("%s is unset; source ~/Yolean/.yolean-bots-device/y-cluster-hetzner.env (or wherever your token lives) before running this command", HCloudTokenEnv)
 	}
 	return hcloud.NewClient(hcloud.WithToken(tok)), nil
 }
@@ -288,53 +288,29 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		)
 	}
 
-	// Schedule auto-teardown last: every preceding step needs to
-	// have produced a working cluster, otherwise we'd queue a job
-	// that fires against a half-provisioned (or already-failed)
-	// state. The job id goes back into the state sidecar so
-	// Teardown can cancel it.
-	if err := c.scheduleAutoTeardown(ctx); err != nil {
-		return nil, fmt.Errorf("schedule auto-teardown: %w", err)
-	}
+	// Auto-teardown is NOT IMPLEMENTED YET. Earlier work scheduled
+	// an at(1) job on the operator's host, which was rejected: a
+	// laptop that gets wiped, retired, or simply belongs to someone
+	// who quit leaves the Hetzner server stranded forever -- the
+	// exact "don't leak" failure mode auto-teardown is supposed to
+	// prevent. The trigger has to live cloud-side or cluster-side
+	// (e.g. an in-cluster reaper Job that calls Hetzner API to
+	// self-delete after AutoTeardownHours, or a label-based external
+	// reaper). Pinned for a follow-up branch; this provisioner logs
+	// a Warn so an operator running it before the reaper lands can't
+	// claim ignorance of their server's footprint.
+	logger.Warn("auto-teardown NOT scheduled (not yet implemented); run `y-cluster teardown -c <dir>` manually when done",
+		zap.Int("intendedHours", cfg.AutoTeardownHours),
+	)
 
 	logger.Info("cluster ready", zap.String("context", c.cfg.Context))
 
 	return c, nil
 }
 
-// scheduleAutoTeardown queues `y-cluster teardown -c <Dir>` on the
-// operator's host via at(1). The shell command captures the
-// current binary path so a future-self atd run doesn't depend on
-// $PATH; it captures cfg.Dir absolute (load.go has already
-// resolved it). Records the job id in the state sidecar.
-func (c *Cluster) scheduleAutoTeardown(ctx context.Context) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve own binary path: %w", err)
-	}
-	shellCmd := fmt.Sprintf("%s teardown -c %s",
-		shellQuote(exe), shellQuote(c.cfg.Dir))
-	id, err := atSchedule(ctx, c.cfg.AutoTeardownHours, shellCmd, c.logger)
-	if err != nil {
-		return err
-	}
-	c.state.AtJobID = id
-	if err := saveState(c.cacheDir, c.state); err != nil {
-		// Cancel the job we just scheduled rather than leak it
-		// against a state sidecar that doesn't know about it.
-		atRemove(ctx, id, c.logger)
-		return fmt.Errorf("save state with at job id: %w", err)
-	}
-	return nil
-}
-
 // Teardown deletes the Hetzner server and its uploaded SSH key
-// resource, cancels the at(1) auto-teardown job, removes the state
-// sidecar, and shreds the local keypair. Idempotent: missing
-// resources are not errors.
-//
-// LB detach lands in phase 3; this teardown is server + key + at
-// job + local files.
+// resource, removes the state sidecar, and shreds the local
+// keypair. Idempotent: missing resources are not errors.
 func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -349,12 +325,6 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 	// back to a name-based lookup so a missing sidecar (e.g. the
 	// operator deleted it manually) doesn't strand the server.
 	st, _ := loadState(cacheDir, contextName) // ignore missing
-
-	// Cancel the at(1) auto-teardown first. If we deleted the
-	// server first and then crashed before cancelling, the at job
-	// would still fire and call Teardown again -- harmless but
-	// noisy. Reverse order keeps logs cleaner.
-	atRemove(ctx, st.AtJobID, logger)
 
 	var srv *hcloud.Server
 	if st.ServerID != 0 {

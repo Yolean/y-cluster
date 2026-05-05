@@ -27,9 +27,6 @@ type state struct {
 	IPv4       string `json:"ipv4"`
 	SSHUser    string `json:"sshUser"`
 	SSHKeyName string `json:"sshKeyName"` // Hetzner SSHKey resource name (uploaded by us)
-	// AtJobID is the at(1) job number the auto-teardown is
-	// scheduled under. Phase 2 fills it; phase 1 leaves it 0.
-	AtJobID int `json:"atJobID,omitempty"`
 	// LBGroup mirrors cfg.LBGroup so Teardown -- which only sees
 	// the context name, not the YAML config -- knows which lb-group
 	// to enumerate when deciding whether to delete the LB.
