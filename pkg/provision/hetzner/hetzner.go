@@ -223,12 +223,20 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		hc:       hc,
 	}
 
-	// Wait for sshd. Phase 1 stops here; later phases call
-	// installK3s + envoyGateway.Install + ensureLB.
+	// Wait for sshd. Phase 1.b: install k3s and merge kubeconfig.
+	// Phase 3 layers envoy-gateway + LB on top.
 	if err := c.waitForSSH(ctx, 3*time.Minute); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
-	logger.Info("SSH reachable; cluster handle ready")
+	logger.Info("SSH reachable")
+
+	if err := c.installK3s(ctx); err != nil {
+		return nil, fmt.Errorf("install k3s: %w", err)
+	}
+	if err := c.MergeKubeconfig(ctx); err != nil {
+		return nil, fmt.Errorf("merge kubeconfig: %w", err)
+	}
+	logger.Info("cluster ready", zap.String("context", c.cfg.Context))
 
 	return c, nil
 }
