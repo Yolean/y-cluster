@@ -28,8 +28,30 @@ const (
 // LBGroup. Per-developer dev clusters default to LBGroup = $USER.
 func lbName(lbGroup string) string { return "y-cluster-" + lbGroup }
 
-func intPtr(n int) *int                       { return &n }
+func intPtr(n int) *int                          { return &n }
 func durationPtr(d time.Duration) *time.Duration { return &d }
+
+// tcpService renders one Hetzner LB service: TCP listen=destination=port,
+// with a TCP health check pinned to the same port. Hetzner's create-with-
+// services payload requires health_check.port explicitly even for TCP
+// services where it's "obviously" the destination port; the CLI adds
+// that default but the API doesn't. Each service needs its OWN health-
+// check struct -- sharing a pointer means both services would health-check
+// the same port, which is wrong as soon as ports diverge.
+func tcpService(port int) hcloud.LoadBalancerCreateOptsService {
+	return hcloud.LoadBalancerCreateOptsService{
+		Protocol:        hcloud.LoadBalancerServiceProtocolTCP,
+		ListenPort:      intPtr(port),
+		DestinationPort: intPtr(port),
+		HealthCheck: &hcloud.LoadBalancerCreateOptsServiceHealthCheck{
+			Protocol: hcloud.LoadBalancerServiceProtocolTCP,
+			Port:     intPtr(port),
+			Interval: durationPtr(lbHealthCheckInterval),
+			Timeout:  durationPtr(lbHealthCheckTimeout),
+			Retries:  intPtr(lbHealthCheckRetries),
+		},
+	}
+}
 
 // ensureLoadBalancer reconciles a Hetzner LB for cfg.LBGroup and
 // returns it. Reuses an existing LB by name (so a second server in
@@ -73,30 +95,14 @@ func ensureLoadBalancer(ctx context.Context, hc *hcloud.Client, cfg lbConfig, lo
 		zap.String("location", cfg.Location),
 		zap.String("targetSelector", labelSelectorForGroup(cfg.LBGroup)),
 	)
-	healthCheck := &hcloud.LoadBalancerCreateOptsServiceHealthCheck{
-		Protocol: hcloud.LoadBalancerServiceProtocolTCP,
-		Interval: durationPtr(lbHealthCheckInterval),
-		Timeout:  durationPtr(lbHealthCheckTimeout),
-		Retries:  intPtr(lbHealthCheckRetries),
-	}
 	res, _, err := hc.LoadBalancer.Create(ctx, hcloud.LoadBalancerCreateOpts{
 		Name:             name,
 		LoadBalancerType: &hcloud.LoadBalancerType{Name: lbType},
 		Location:         &hcloud.Location{Name: cfg.Location},
 		Algorithm:        &hcloud.LoadBalancerAlgorithm{Type: hcloud.LoadBalancerAlgorithmTypeRoundRobin},
 		Services: []hcloud.LoadBalancerCreateOptsService{
-			{
-				Protocol:        hcloud.LoadBalancerServiceProtocolTCP,
-				ListenPort:      intPtr(80),
-				DestinationPort: intPtr(80),
-				HealthCheck:     healthCheck,
-			},
-			{
-				Protocol:        hcloud.LoadBalancerServiceProtocolTCP,
-				ListenPort:      intPtr(443),
-				DestinationPort: intPtr(443),
-				HealthCheck:     healthCheck,
-			},
+			tcpService(80),
+			tcpService(443),
 		},
 		Targets: []hcloud.LoadBalancerCreateOptsTarget{
 			{
