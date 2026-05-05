@@ -39,6 +39,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -251,6 +252,40 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 	c.state.LBID = lb.ID
 	if err := saveState(c.cacheDir, c.state); err != nil {
 		return nil, fmt.Errorf("save state with LB id: %w", err)
+	}
+	lbIPv4 := ""
+	if lb.PublicNet.IPv4.IP != nil {
+		lbIPv4 = lb.PublicNet.IPv4.IP.String()
+	}
+
+	// Phase 3.b: install envoy-gateway and stamp the LB IPv4 onto
+	// the GatewayClass under yolean.se/dns-hint-ip. ystack's
+	// y-k8s-ingress-hosts reads that annotation when populating
+	// /etc/hosts on the operator's machine, so consumer kustomize
+	// bases that use *.<ctx>.local.test FQDNs resolve to the LB
+	// without any user-supplied DNS.
+	//
+	// NB: the older "dns-hint-ip is for tunnel-NAT only; cloud-LB
+	// provisioners leave it empty" guidance does NOT apply here:
+	// the dev-cluster shape uses RFC-6761-reserved local.test
+	// FQDNs that have no public DNS, so the operator's host needs
+	// the hint to reach the LB.
+	if cfg.Gateway.Skip {
+		logger.Info("envoy gateway install skipped (gateway.skip)")
+	} else {
+		if err := envoygateway.Install(ctx, envoygateway.Options{
+			ContextName:      cfg.Context,
+			GatewayClassName: cfg.Gateway.ClassName,
+			DNSHintIP:        lbIPv4,
+			Logger:           logger,
+		}); err != nil {
+			return nil, fmt.Errorf("install envoy gateway: %w", err)
+		}
+		logger.Info("envoy gateway ready",
+			zap.String("version", envoygateway.Version),
+			zap.String("gatewayClass", cfg.Gateway.ClassName),
+			zap.String("dnsHintIP", lbIPv4),
+		)
 	}
 
 	// Schedule auto-teardown last: every preceding step needs to
