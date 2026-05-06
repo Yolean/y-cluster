@@ -39,20 +39,30 @@ set -eo pipefail
 YHELP='appliance-qemu-to-gcp.sh - local provision -> hands-on -> export -> ship to GCP
 
 Usage:
-  appliance-qemu-to-gcp.sh                            build + ship to GCP
-  appliance-qemu-to-gcp.sh teardown                   delete VM + image + GCS object
-  appliance-qemu-to-gcp.sh teardown --delete-data-disk
-                                                      also delete the persistent
-                                                      /data/yolean disk (DESTRUCTIVE)
+  appliance-qemu-to-gcp.sh [--reuse-disk=true|false]   build + ship to GCP
+  appliance-qemu-to-gcp.sh teardown [--keep-disk=true|false]
+                                                       delete VM + image + GCS object;
+                                                       persistent disk preserved by
+                                                       default (state-preservation
+                                                       is the appliance design goal)
+
+Build flow disk handling:
+  --reuse-disk=true   reuse existing /data/yolean disk (preserves customer state
+                      across redeploys; the build image seed is no-op against an
+                      already-seeded marker -- this is the production upgrade path)
+  --reuse-disk=false  delete + recreate the disk (fresh disk lets the build image
+                      seed extract; use this for QA / end-to-end seed validation)
+  (no flag, TTY)      interactive prompt with default Y (reuse)
+  (no flag, no TTY)   error: explicit choice required for non-interactive runs
 
 Teardown reads GCP_PROJECT / GCP_ZONE / GCP_BUCKET / VM_NAME /
 GCP_DATADIR_DISK / NAME from the same env vars as the build
 flow. Custom images and GCS objects are deleted by NAME prefix
 (so different NAMEs in the same project do not clobber each
 other). The persistent data disk, the bucket itself, and the
-firewall rule are preserved unless --delete-data-disk is set.
-Local cluster cleanup (if KEEP_LOCAL was set) is separate:
-y-cluster teardown -c \$CFG_DIR.
+firewall rule are preserved unless --keep-disk=false is set
+(legacy alias: --delete-data-disk). Local cluster cleanup (if
+KEEP_LOCAL was set) is separate: y-cluster teardown -c \$CFG_DIR.
 
 Environment:
   GCP_PROJECT       GCP project (set in .env or shell env; required)
@@ -148,6 +158,27 @@ confirm() {
     esac
 }
 
+# prompt_yes_default is for irreversible decisions where the
+# default-on-Enter is YES (state preservation, design-goal aligned)
+# but the operator must EXPLICITLY pre-answer for non-interactive
+# runs. Distinct from confirm() in two ways:
+#   - default is Y, not N
+#   - ASSUME_YES is NOT consulted; non-TTY callers without an
+#     explicit flag get a clear error instead of a silent default.
+# Returns 0 for yes, 1 for no, exits 2 on no-TTY-no-flag.
+prompt_yes_default() {
+    local prompt=$1 missing_flag_hint=$2
+    if [[ ! -t 0 ]]; then
+        echo "non-interactive shell: $missing_flag_hint" >&2
+        exit 2
+    fi
+    read -r -p "$prompt [Y/n] " answer
+    case "${answer,,}" in
+        n|no) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # do_teardown deletes GCP resources owned by this script's
 # NAME prefix in the configured project + zone. Reads the
 # same env vars as the build flow so a teardown after a
@@ -155,10 +186,18 @@ confirm() {
 # exactly that customer's resources without touching other
 # NAMEs that share the same project.
 do_teardown() {
+    # delete_data_disk: 0=keep (default; design-goal state preservation),
+    # 1=delete. --keep-disk=true|false is the explicit form;
+    # --delete-data-disk is the legacy alias mapped to --keep-disk=false.
     local delete_data_disk=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --delete-data-disk) delete_data_disk=1 ;;
+            --keep-disk=true) delete_data_disk=0 ;;
+            --keep-disk=false) delete_data_disk=1 ;;
+            --delete-data-disk)
+                echo "  note: --delete-data-disk is deprecated; prefer --keep-disk=false"
+                delete_data_disk=1
+                ;;
             *) echo "unknown teardown flag: $1" >&2; exit 2 ;;
         esac
         shift
@@ -207,7 +246,7 @@ do_teardown() {
     echo
     echo "Will PRESERVE:"
     if [[ $delete_data_disk -eq 0 && -n "$disk" ]]; then
-        echo "  Data disk:          $GCP_DATADIR_DISK (--delete-data-disk to also remove)"
+        echo "  Data disk:          $GCP_DATADIR_DISK (--keep-disk=false to also remove)"
     fi
     echo "  GCS bucket:         gs://$GCP_BUCKET (objects matching $NAME-* deleted above)"
     echo "  Firewall rule:      y-cluster-appliance-public (tag-based, shared)"
@@ -247,6 +286,26 @@ do_teardown() {
 
     do_tls_teardown
     stage "teardown complete"
+
+    # Surface the preservation contract at the moment the operator
+    # is about to step away. Previously this only appeared in the
+    # build-flow success block, where it was less actionable.
+    if [[ $delete_data_disk -eq 0 && -n "$disk" ]]; then
+        cat <<EOF
+
+Persistent data disk PRESERVED:
+  $GCP_DATADIR_DISK (zone=$GCP_ZONE)
+
+PVC data survives across redeploys -- re-running the build/deploy
+flow reuses the same /data/yolean. To start fresh from the next
+build's seed, pass --reuse-disk=false on the next deploy.
+
+Delete the disk manually when truly done:
+  gcloud compute disks delete $GCP_DATADIR_DISK \\
+      --project=$GCP_PROJECT --zone=$GCP_ZONE
+Or pass --keep-disk=false on the next teardown.
+EOF
+    fi
 }
 
 # do_tls_frontend stands up a regional External Application
@@ -521,6 +580,12 @@ do_tls_teardown() {
     # ${NAME}-tls-proxy-subnet was definitely ours).
     [[ -n "$subnet" ]] && gcloud compute networks subnets delete "${NAME}-tls-proxy-subnet" \
         --project="$GCP_PROJECT" --region="$GCP_REGION" --quiet >/dev/null
+    # Force a 0 return: the [[ -n "$subnet" ]] && ... pattern above
+    # returns 1 when $subnet is empty (subnet was reused, not
+    # created by this run). Without this, set -e in the caller
+    # treats the function as failed and aborts before the
+    # "teardown complete" stage + the PRESERVED message can fire.
+    return 0
 }
 
 # Minimal pre-checks shared by build and teardown: gcloud
@@ -553,6 +618,34 @@ if [[ "${1:-}" = "teardown" ]]; then
     shift
     do_teardown "$@"
     exit 0
+fi
+
+# Build-flow arg parsing. Today: just --reuse-disk=true|false.
+# Empty REUSE_DISK + interactive prompt at Stage 8.5 if the disk
+# already exists; non-interactive runs without the flag error
+# out at Stage 8.5 with a clear message.
+REUSE_DISK=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reuse-disk=true) REUSE_DISK=true ;;
+        --reuse-disk=false) REUSE_DISK=false ;;
+        *) echo "unknown build flag: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# Fail early if ASSUME_YES is set without an explicit disk
+# decision: ASSUME_YES means "unattended; don't prompt me", and
+# disk handling is irreversible (--reuse-disk=false destroys
+# customer state). Don't let that slip through to a prompt at
+# Stage 8.5 that would either hang (TTY-less) or be answered
+# by a default the operator never deliberately picked.
+if [[ -n "${ASSUME_YES:-}" && -z "$REUSE_DISK" ]]; then
+    echo "ASSUME_YES set without --reuse-disk=true|false: refusing to" >&2
+    echo "guess at an irreversible decision. Pick one explicitly:" >&2
+    echo "  --reuse-disk=true   preserve customer state (production upgrade)" >&2
+    echo "  --reuse-disk=false  delete + recreate (QA seed validation)" >&2
+    exit 2
 fi
 
 # Build-flow tool check (additional to gcloud above).
@@ -771,10 +864,71 @@ fi
 # fresh image, the same /data/yolean comes back. Disk auto-delete
 # is OFF when attaching an existing disk via --disk=name=, so
 # `instances delete` won't wipe it.
+#
+# Reuse decision (when the disk already exists):
+#   --reuse-disk=true  reuse silently (preserves customer state -- the
+#                      production upgrade path; data-seed unit no-ops
+#                      on the existing marker, so the new image's seed
+#                      is correctly NOT applied)
+#   --reuse-disk=false delete + recreate (fresh disk lets the build
+#                      image's seed extract -- the QA validation path)
+#   no flag, TTY       interactive prompt, default Y (reuse)
+#   no flag, no TTY    error + exit (explicit choice required for
+#                      irreversible decisions in unattended runs)
 stage "ensuring persistent data disk $GCP_DATADIR_DISK (size only used on create: $GCP_DATADIR_SIZE)"
 if gcloud compute disks describe "$GCP_DATADIR_DISK" \
         --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
-    echo "  disk exists -- reusing (data preserved from previous deploy)"
+    case "$REUSE_DISK" in
+        true)
+            echo "  disk exists -- reusing (--reuse-disk=true; preserves customer state)"
+            ;;
+        false)
+            echo "  disk exists -- --reuse-disk=false: deleting and recreating"
+            # Detach by deleting the VM first if it's still attached.
+            # Stage 9 normally handles VM deletion for idempotency; we
+            # do it here too because gcloud compute disks delete refuses
+            # while the disk is mounted on a running instance.
+            if gcloud compute instances describe "$VM_NAME" \
+                    --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
+                echo "  $VM_NAME exists, deleting first to release disk"
+                gcloud compute instances delete "$VM_NAME" \
+                    --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+            fi
+            gcloud compute disks delete "$GCP_DATADIR_DISK" \
+                --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+            gcloud compute disks create "$GCP_DATADIR_DISK" \
+                --project="$GCP_PROJECT" \
+                --zone="$GCP_ZONE" \
+                --size="$GCP_DATADIR_SIZE" \
+                --type=pd-balanced \
+                >/dev/null
+            echo "  disk recreated (fresh; will be ext4-formatted on first mount)"
+            ;;
+        *)
+            if prompt_yes_default \
+                    "  Reuse existing data disk $GCP_DATADIR_DISK with its preserved state?" \
+                    "pass --reuse-disk=true (preserve state) or --reuse-disk=false (delete + reseed)"; then
+                echo "  reusing (preserves customer state)"
+            else
+                echo "  --reuse-disk=false chosen: deleting and recreating"
+                if gcloud compute instances describe "$VM_NAME" \
+                        --project="$GCP_PROJECT" --zone="$GCP_ZONE" >/dev/null 2>&1; then
+                    echo "  $VM_NAME exists, deleting first to release disk"
+                    gcloud compute instances delete "$VM_NAME" \
+                        --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+                fi
+                gcloud compute disks delete "$GCP_DATADIR_DISK" \
+                    --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
+                gcloud compute disks create "$GCP_DATADIR_DISK" \
+                    --project="$GCP_PROJECT" \
+                    --zone="$GCP_ZONE" \
+                    --size="$GCP_DATADIR_SIZE" \
+                    --type=pd-balanced \
+                    >/dev/null
+                echo "  disk recreated (fresh; will be ext4-formatted on first mount)"
+            fi
+            ;;
+    esac
 else
     gcloud compute disks create "$GCP_DATADIR_DISK" \
         --project="$GCP_PROJECT" \
@@ -922,64 +1076,23 @@ probe() {
     return 1
 }
 
-# probe_route checks one Gateway-bound FQDN through PUBLIC_IP via
-# `--resolve <fqdn>:80:<ip>`. Reachability == any HTTP response,
-# not 200: an HTTPRoute that legitimately answers 302 / 401 / 404
-# is still proof the firewall + klipper-lb + envoy-gateway chain
-# is working end-to-end. Only `000` (timeout, refused) counts as
-# unreachable.
-probe_route() {
-    local fqdn=$1 attempts=${2:-30}
-    local code
-    for i in $(seq 1 "$attempts"); do
-        code=$(curl -sS -o /dev/null -m 5 \
-            --resolve "$fqdn:80:$PUBLIC_IP" \
-            -w '%{http_code}' "http://$fqdn/" 2>/dev/null \
-            || echo 000)
-        if [[ "$code" != "000" ]]; then
-            printf '  %-40s HTTP %s (attempt %d)\n' "$fqdn" "$code" "$i"
-            return 0
-        fi
-        echo "  $fqdn attempt $i/$attempts: no answer yet"
-        sleep 10
-    done
-    return 1
-}
-
-stage "enumerating Gateway routes on the appliance"
-# Walk HTTPRoutes + GRPCRoutes for spec.hostnames. Each unique FQDN
-# becomes a probe target. We use SSH + `sudo k3s kubectl` rather
-# than extracting the kubeconfig because the apiserver isn't yet
-# externally exposed at this point in the script (the kubeconfig
-# extract recipe at the bottom of the success summary is for the
-# operator after teardown of the local cluster).
-ROUTE_HOSTS=$(ssh $SSH_OPTS ystack@"$PUBLIC_IP" \
-    'sudo k3s kubectl get httproute,grpcroute -A -o jsonpath="{range .items[*]}{range .spec.hostnames[*]}{@}{\"\n\"}{end}{end}"' \
-    2>/dev/null | sort -u)
-
-if [[ -z "$ROUTE_HOSTS" ]]; then
-    echo "  no Gateway-bound HTTPRoutes/GRPCRoutes; falling back to echo probe"
-    probe echo "http://$PUBLIC_IP/q/envoy/echo" 30 || \
-        echo "  (echo also unreachable; cluster still booting?)"
-else
-    stage "probing each Gateway route via $PUBLIC_IP"
-    fail_count=0
-    fail_list=""
-    while IFS= read -r fqdn; do
-        if ! probe_route "$fqdn" 30; then
-            fail_count=$((fail_count + 1))
-            fail_list="$fail_list $fqdn"
-        fi
-    done <<<"$ROUTE_HOSTS"
-    if [[ $fail_count -gt 0 ]]; then
-        echo "  WARNING: $fail_count route(s) unreachable after 5min:$fail_list"
-        echo "  Possible causes:"
-        echo "    - firewall y-cluster-appliance-public source-ranges narrowed (check"
-        echo "      \`gcloud compute firewall-rules describe y-cluster-appliance-public\`)"
-        echo "    - HTTPRoute attached but backend Service not Ready"
-        echo "    - workload still rolling out (re-run \`probe_route <fqdn>\` later)"
-    fi
-fi
+stage "probing http://$PUBLIC_IP -- whatever you applied locally"
+# We don't know the operator's routes a priori; try the
+# y-cluster-shipped echo path as a baseline. If their workload
+# replaced echo, this fails and the operator curls their own
+# route.
+#
+# We deliberately do NOT enumerate Gateway routes via SSH+kubectl
+# here. Post-import scripting that uses maintainer-only paths
+# (SSH keys + kubectl access) is a smell: the customer's hosting
+# can't replicate it, and tying the build flow to the api-server
+# warm-up period creates spurious halts on transient kubectl
+# failures (we hit one of those during this script's lifetime --
+# the silent abort right after `systemctl restart k3s.service`).
+# Any per-route probing belongs in the consumer-side validate
+# script which knows its own routes from its own kustomize.
+probe echo "http://$PUBLIC_IP/q/envoy/echo" 30 || \
+    echo "  (no echo route -- expected if your workload replaced y-cluster echo)"
 
 # === Stage 11: optional external HTTPS LoadBalancer ===
 # Operator-driven add-on: if TLS_DOMAINS isn't set in the env,
@@ -1041,13 +1154,9 @@ kubectl from your laptop (apiserver not externally exposed):
   KUBECONFIG=k3s-$VM_NAME.yaml kubectl get nodes
 
 Teardown when done:
-  gcloud compute instances delete $VM_NAME --project=$GCP_PROJECT --zone=$GCP_ZONE
-  gcloud compute images delete $IMAGE_NAME --project=$GCP_PROJECT
-  gcloud storage rm gs://$GCP_BUCKET/$IMAGE_NAME.tar.gz --project=$GCP_PROJECT
-
-Persistent data disk is PRESERVED on teardown so PVC data
-survives across redeploys. Re-running this script reuses the
-same /data/yolean. Delete it manually when you're truly done:
-  gcloud compute disks delete $GCP_DATADIR_DISK --project=$GCP_PROJECT --zone=$GCP_ZONE
+  $0 teardown
+  (preserves /data/yolean by default; pass --keep-disk=false to also
+   delete the persistent disk. Teardown's exit message lists the
+   disk + recommended delete command for later cleanup.)
 ================================================================
 EOF
