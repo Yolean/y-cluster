@@ -6,6 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 )
 
@@ -162,6 +166,107 @@ func TestTeardownConfig_DeleteDisk(t *testing.T) {
 	}
 	if _, err := os.Stat(diskPath); err == nil {
 		t.Fatal("disk should be deleted with keepDisk=false")
+	}
+}
+
+// TestTeardownConfig_LogsTruthfullyWhenNothingToDelete pins
+// the truthful-logging contract: a teardown against a cache
+// dir that holds no artefacts (already torn down, or the
+// operator pointed at the wrong --cacheDir) must NOT log
+// "deleted". Lying with an "X deleted" line masks real bugs
+// like a wrong cache path. The previous shape unconditionally
+// logged "teardown complete, disk and keypair deleted" even
+// when os.Remove returned IsNotExist on every artefact.
+func TestTeardownConfig_LogsTruthfullyWhenNothingToDelete(t *testing.T) {
+	core, recorded := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = ""
+	if err := TeardownConfig(cfg, false, logger); err != nil {
+		t.Fatal(err)
+	}
+	// Walk the recorded entries; we want exactly one info-level
+	// completion line and it must NOT claim anything was deleted.
+	var completion observer.LoggedEntry
+	for _, e := range recorded.All() {
+		if strings.HasPrefix(e.Message, "teardown complete") {
+			completion = e
+		}
+	}
+	if completion.Message == "" {
+		t.Fatalf("expected a teardown-complete log line, got: %+v", recorded.All())
+	}
+	if !strings.Contains(completion.Message, "no artefacts found") {
+		t.Errorf("teardown-complete log must say nothing was deleted, got %q", completion.Message)
+	}
+	for _, f := range completion.Context {
+		if f.Key == "removed" {
+			t.Errorf("removed field should be absent on the empty-cache path, got %v", f)
+		}
+	}
+}
+
+// TestTeardownConfig_LogsRemovedArtefacts pins the inverse:
+// when artefacts exist on disk, the completion log must list
+// them in a `removed` field. Consumers (the appliance build
+// script in particular) rely on that signal to confirm the
+// teardown actually freed the disk before they re-provision.
+func TestTeardownConfig_LogsRemovedArtefacts(t *testing.T) {
+	core, recorded := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = ""
+	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
+	if err := os.WriteFile(diskPath, []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(cfg.CacheDir, cfg.Name+"-ssh")
+	if err := os.WriteFile(keyPath, []byte("fake"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := TeardownConfig(cfg, false, logger); err != nil {
+		t.Fatal(err)
+	}
+	var completion observer.LoggedEntry
+	for _, e := range recorded.All() {
+		if strings.HasPrefix(e.Message, "teardown complete") {
+			completion = e
+		}
+	}
+	if completion.Message == "" {
+		t.Fatalf("expected a teardown-complete log line, got: %+v", recorded.All())
+	}
+	if strings.Contains(completion.Message, "no artefacts found") {
+		t.Errorf("non-empty teardown should not log 'no artefacts found': %q", completion.Message)
+	}
+	// zap's ArrayMarshaler types aren't trivially assertable
+	// off Field.Interface; ContextMap walks the encoder so we
+	// get []any for a Strings field.
+	ctxMap := completion.ContextMap()
+	rawRemoved, ok := ctxMap["removed"].([]any)
+	if !ok {
+		t.Fatalf("removed field missing or wrong shape on completion log: %v", ctxMap)
+	}
+	wantPresent := map[string]bool{
+		filepath.Base(diskPath): false,
+		filepath.Base(keyPath):  false,
+	}
+	for _, item := range rawRemoved {
+		if name, _ := item.(string); name != "" {
+			if _, want := wantPresent[name]; want {
+				wantPresent[name] = true
+			}
+		}
+	}
+	for name, seen := range wantPresent {
+		if !seen {
+			t.Errorf("removed list missing %q (got %v)", name, rawRemoved)
+		}
 	}
 }
 
