@@ -68,6 +68,21 @@
       ],
       "type": "object"
     },
+    "Envoy": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "object"
+        },
+        "source": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "GRPCRoute": {
       "additionalProperties": false,
       "properties": {
@@ -332,6 +347,9 @@
           },
           "type": "array"
         },
+        "envoy": {
+          "$ref": "#/$defs/Envoy"
+        },
         "fetchedAt": {
           "type": "string"
         },
@@ -361,6 +379,9 @@
             "1"
           ],
           "type": "string"
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
         }
       },
       "required": [
@@ -371,6 +392,188 @@
         "backendTrafficPolicies",
         "fetchedAt",
         "schemaVersion"
+      ],
+      "type": "object"
+    },
+    "Summary": {
+      "additionalProperties": false,
+      "properties": {
+        "listeners": {
+          "items": {
+            "$ref": "#/$defs/SummaryListener"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "listeners"
+      ],
+      "type": "object"
+    },
+    "SummaryBackend": {
+      "additionalProperties": false,
+      "properties": {
+        "redirect": {
+          "$ref": "#/$defs/SummaryRedirect"
+        },
+        "service": {
+          "$ref": "#/$defs/SummaryService"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "SummaryHost": {
+      "additionalProperties": false,
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "routes": {
+          "items": {
+            "$ref": "#/$defs/SummaryRoute"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "hostname",
+        "routes"
+      ],
+      "type": "object"
+    },
+    "SummaryListener": {
+      "additionalProperties": false,
+      "properties": {
+        "gateway": {
+          "type": "string"
+        },
+        "hosts": {
+          "items": {
+            "$ref": "#/$defs/SummaryHost"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "numTrustedHops": {
+          "type": "integer"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "programmed": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "trustedCIDRs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "gateway",
+        "name",
+        "port",
+        "protocol",
+        "programmed",
+        "hosts"
+      ],
+      "type": "object"
+    },
+    "SummaryMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SummaryRedirect": {
+      "additionalProperties": false,
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "scheme": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SummaryRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "items": {
+            "$ref": "#/$defs/SummaryBackend"
+          },
+          "type": "array"
+        },
+        "matches": {
+          "items": {
+            "$ref": "#/$defs/SummaryMatch"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "matches",
+        "backends"
+      ],
+      "type": "object"
+    },
+    "SummaryService": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
       ],
       "type": "object"
     }

@@ -97,6 +97,22 @@ type State struct {
 	// for backend-bound behavior.
 	BackendTrafficPolicies []BackendTrafficPolicy `json:"backendTrafficPolicies"`
 
+	// Envoy is a sample of dataplane state from one
+	// envoy-gateway proxy pod (version + verbatim
+	// /config_dump). Best-effort and optional: nil when no
+	// proxy pod is reachable. Consumers needing dataplane
+	// ground-truth (the actually-programmed envoy config) read
+	// this; consumers wanting the reconciled k8s view read the
+	// per-kind slices above.
+	Envoy *Envoy `json:"envoy,omitempty"`
+
+	// Summary is a fully-typed, industry-term projection of
+	// the routing tree (listener -> host -> route ->
+	// match/backend) derived deterministically from the
+	// per-kind slices. The k8s-side data is the source of
+	// truth; Summary is the ergonomic view on top.
+	Summary *Summary `json:"summary,omitempty"`
+
 	// FetchedAt is the wall-clock at which the snapshot was
 	// taken, in RFC 3339 format. Useful when comparing two
 	// snapshots taken minutes apart during a debug session.
@@ -306,6 +322,21 @@ func Fetch(ctx context.Context, kubectlContext string) (*State, error) {
 	}
 	if err := fetchBackendTrafficPolicies(ctx, kubectlContext, st); err != nil {
 		return nil, fmt.Errorf("fetch backendtrafficpolicy: %w", err)
+	}
+
+	// Summary is deterministic from the k8s-side slices we
+	// just populated -- always built. Envoy is best-effort:
+	// failing to reach a proxy pod doesn't fail the whole
+	// snapshot (the user might be running this against a
+	// pre-install cluster, or admin port-forward might be
+	// blocked by a network policy). Surfacing FetchEnvoy's
+	// error path to the caller would force them to special-
+	// case "no proxy yet" everywhere; quietly skipping is
+	// kinder. Real failures to investigate still print on
+	// stderr from kubectl itself.
+	st.Summary = BuildSummary(st)
+	if env, err := FetchEnvoy(ctx, kubectlContext); err == nil {
+		st.Envoy = env
 	}
 	return st, nil
 }
