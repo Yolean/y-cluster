@@ -118,12 +118,32 @@ func run() error {
 	// for input/config schemas). Add new outputs below as more
 	// y-cluster commands publish stable JSON contracts.
 	gatewayStateOut := filepath.Join(root, "pkg", "gateway", "state.schema.json")
-	if err := writeOutputSchema(gatewayStateOut, &gateway.State{}, gateway.SchemaID); err != nil {
+	// schemaVersion is a top-level field on State; pin it to
+	// the SOURCE version constant via an enum-of-one on the
+	// generated schema. A future SchemaVersion bump means
+	// updating that constant + this enum in lockstep; old
+	// snapshots would then validate against the previous
+	// version of the schema doc (which can be served from a
+	// versioned URL once we need it -- the canonical URL stays
+	// unversioned).
+	if err := writeOutputSchema(gatewayStateOut, &gateway.State{}, gateway.SchemaID,
+		enumPin{DefName: "State", PropName: "schemaVersion", Values: []string{gateway.SchemaVersion}},
+	); err != nil {
 		return fmt.Errorf("generate %s: %w", gatewayStateOut, err)
 	}
 	fmt.Printf("wrote %s\n", gatewayStateOut)
 
 	return nil
+}
+
+// enumPin is one (definition, property, values) tuple for the
+// schemagen output-schema post-processor. Use it to constrain a
+// reflected property to a fixed enum (typically a single-value
+// enum representing a schema-version stamp).
+type enumPin struct {
+	DefName  string
+	PropName string
+	Values   []string
 }
 
 // writeOutputSchema reflects a non-provider Go struct into a
@@ -140,7 +160,13 @@ func run() error {
 // The schemaID is written into the schema's $id so consumers
 // can validate by URL reference. SchemaID values live in the
 // source package as exported constants (e.g. gateway.SchemaID).
-func writeOutputSchema(outPath string, sample any, schemaID string) error {
+//
+// enumPins post-process the reflected schema to constrain
+// specific properties to a fixed enum -- used today for
+// schema-version stamping (single-value enum so consumers
+// validate the snapshot's declared version against the schema
+// they hold).
+func writeOutputSchema(outPath string, sample any, schemaID string, enumPins ...enumPin) error {
 	r := &jsonschema.Reflector{
 		AllowAdditionalProperties: false,
 		DoNotReference:            false,
@@ -162,7 +188,42 @@ func writeOutputSchema(outPath string, sample any, schemaID string) error {
 	if err != nil {
 		return err
 	}
+	for _, pin := range enumPins {
+		data, err = injectFieldEnum(data, pin.DefName, pin.PropName, pin.Values)
+		if err != nil {
+			return fmt.Errorf("inject enum on %s.%s: %w", pin.DefName, pin.PropName, err)
+		}
+	}
 	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+}
+
+// injectFieldEnum sets `enum` on the named property of the named
+// definition under $defs. Errors when the definition or property
+// can't be found -- a typo there is a real bug in the generator
+// wiring, not a runtime data shape question.
+func injectFieldEnum(data []byte, defName, propName string, values []string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	defs, ok := doc["$defs"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("$defs missing or wrong type")
+	}
+	def, ok := defs[defName].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("definition %q missing under $defs", defName)
+	}
+	props, ok := def["properties"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("properties missing on %s", defName)
+	}
+	prop, ok := props[propName].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("property %q missing on %s", propName, defName)
+	}
+	prop["enum"] = stringSliceToAny(values)
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // setSchemaID rewrites the top-level $id field of the schema

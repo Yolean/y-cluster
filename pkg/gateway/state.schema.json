@@ -355,6 +355,12 @@
             "$ref": "#/$defs/HTTPRoute"
           },
           "type": "array"
+        },
+        "schemaVersion": {
+          "enum": [
+            "1"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -363,7 +369,8 @@
         "grpcRoutes",
         "clientTrafficPolicies",
         "backendTrafficPolicies",
-        "fetchedAt"
+        "fetchedAt",
+        "schemaVersion"
       ],
       "type": "object"
     }
