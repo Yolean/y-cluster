@@ -3,9 +3,40 @@ package qemu
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// stubPrepareExportTools writes empty executable shims named
+// `virt-customize` and `kubectl` to a fresh temp dir and prepends
+// that dir to $PATH for the test. PrepareExport's two LookPath
+// guards then resolve them as present, so the test reaches the
+// state/precondition checks it actually wants to assert against.
+//
+// On hosts that already have libguestfs-tools installed (developer
+// Linux/macOS) the LookPath would have passed anyway. On
+// ubuntu-latest GHA runners virt-customize is not present and
+// without this shim the test fails at the apt-install hint
+// instead of exercising its real target. The shim bodies are
+// empty: PrepareExport's no-saved-state and not-running branches
+// return before invoking either binary.
+//
+// Same shape as fakeKubectlOnPATH in pkg/yconverge/kubectl_test.go.
+func stubPrepareExportTools(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH stub helper is /bin/sh-only")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"virt-customize", "kubectl"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 // TestPrepareInguestScript_NoMACPinning is the regression guard
 // for the original Hetzner failure: nothing in the embedded
@@ -196,6 +227,7 @@ func TestWritePrepareInguestScript(t *testing.T) {
 // branch: the error must point the user at `y-cluster provision`,
 // not bubble up an opaque os.IsNotExist.
 func TestPrepareExport_NoSavedState(t *testing.T) {
+	stubPrepareExportTools(t)
 	err := PrepareExport(context.Background(), t.TempDir(), "missing", nil)
 	if err == nil {
 		t.Fatal("expected error when no saved state exists")
@@ -212,6 +244,7 @@ func TestPrepareExport_NoSavedState(t *testing.T) {
 // produce an error pointing the operator at `start`, not bubble
 // up a generic libguestfs/kubectl failure later.
 func TestPrepareExport_VMNotRunning(t *testing.T) {
+	stubPrepareExportTools(t)
 	cacheDir := t.TempDir()
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = cacheDir

@@ -40,7 +40,7 @@ func toConditions(in []rawCondition) []Condition {
 	}
 	out := make([]Condition, len(in))
 	for i, c := range in {
-		out[i] = Condition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+		out[i] = Condition(c)
 	}
 	return out
 }
@@ -125,14 +125,7 @@ func fetchGateways(ctx context.Context, kubectlContext string, out *State) error
 		}
 		listeners := make([]Listener, len(g.Spec.Listeners))
 		for i, l := range g.Spec.Listeners {
-			listeners[i] = Listener{
-				Name:          l.Name,
-				Port:          l.Port,
-				Protocol:      l.Protocol,
-				Hostname:      l.Hostname,
-				AllowedRoutes: l.AllowedRoutes,
-				TLS:           l.TLS,
-			}
+			listeners[i] = Listener(l)
 		}
 		listenerStatus := make([]ListenerStatus, len(g.Status.Listeners))
 		for i, ls := range g.Status.Listeners {
