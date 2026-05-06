@@ -3,7 +3,6 @@ package qemu
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -206,28 +205,30 @@ func TestPrepareExport_NoSavedState(t *testing.T) {
 	}
 }
 
-// TestPrepareExport_VMRunning exercises the IsRunning guard: a
-// stale-but-live pidfile (we write our own pid into it) must
-// trigger the "run y-cluster stop first" error rather than
-// blindly invoking virt-customize on a busy disk.
-func TestPrepareExport_VMRunning(t *testing.T) {
+// TestPrepareExport_VMNotRunning exercises the new running-state
+// precondition: prepare-export needs the cluster up so it can
+// clear the dns-hint-ip annotation + snapshot reconciled Gateway
+// state. A stopped cluster (no pidfile, IsRunning false) must
+// produce an error pointing the operator at `start`, not bubble
+// up a generic libguestfs/kubectl failure later.
+func TestPrepareExport_VMNotRunning(t *testing.T) {
 	cacheDir := t.TempDir()
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = cacheDir
 	if err := saveState(cfg); err != nil {
 		t.Fatal(err)
 	}
-	pidFile := filepath.Join(cacheDir, cfg.Name+".pid")
-	if err := os.WriteFile(pidFile, []byte("1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// No pidfile -> IsRunning() reports false.
 
 	err := PrepareExport(context.Background(), cacheDir, cfg.Name, nil)
 	if err == nil {
-		t.Fatal("expected error when VM still running")
+		t.Fatal("expected error when VM not running")
 	}
-	if !strings.Contains(err.Error(), "y-cluster stop") {
-		t.Errorf("error should hint at stop: %v", err)
+	if !strings.Contains(err.Error(), "not running") {
+		t.Errorf("error should call out the not-running state: %v", err)
+	}
+	if !strings.Contains(err.Error(), "start the cluster") {
+		t.Errorf("error should hint at start: %v", err)
 	}
 }
 

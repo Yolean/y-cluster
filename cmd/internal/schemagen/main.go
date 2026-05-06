@@ -1,6 +1,14 @@
-// schemagen generates JSON Schema files into pkg/provision/schema/:
-// one per provisioner config struct, plus a portable common.schema.json
-// reflected from CommonConfig alone.
+// schemagen generates JSON Schema files for two distinct surfaces:
+//
+//   - Provision-config schemas under pkg/provision/schema/: one
+//     per provisioner config struct (qemu, docker, multipass) plus
+//     a portable common.schema.json reflected from CommonConfig.
+//
+//   - Output schemas alongside the Go type that produces them
+//     (e.g. pkg/gateway/state.schema.json next to gateway.State).
+//     These document the JSON shape published by `y-cluster`
+//     subcommands so downstream consumers can validate / parse
+//     against a stable contract.
 //
 // Each per-provider schema has its `provider` property post-processed
 // from the inherited enum into a single-value `const` so the file
@@ -34,6 +42,7 @@ import (
 	"github.com/invopop/jsonschema"
 	"sigs.k8s.io/yaml"
 
+	"github.com/Yolean/y-cluster/pkg/gateway"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 )
 
@@ -102,7 +111,69 @@ func run() error {
 	}
 	fmt.Printf("wrote %s\n", commonOut)
 
+	// Output schemas: not provider-config schemas, but other
+	// stable JSON shapes y-cluster produces for downstream
+	// consumption. These live alongside the Go type that
+	// produces them, NOT under pkg/provision/schema/ (which is
+	// for input/config schemas). Add new outputs below as more
+	// y-cluster commands publish stable JSON contracts.
+	gatewayStateOut := filepath.Join(root, "pkg", "gateway", "state.schema.json")
+	if err := writeOutputSchema(gatewayStateOut, &gateway.State{}, gateway.SchemaID); err != nil {
+		return fmt.Errorf("generate %s: %w", gatewayStateOut, err)
+	}
+	fmt.Printf("wrote %s\n", gatewayStateOut)
+
 	return nil
+}
+
+// writeOutputSchema reflects a non-provider Go struct into a
+// standalone JSON Schema file. Differs from writeProviderSchema
+// in two ways:
+//
+//   - Uses the `json` struct tag for property names, since the
+//     output is JSON (not YAML), and consumers parse the JSON
+//     directly. Reusing FieldNameTag="yaml" would produce YAML-
+//     tagged property names that don't match the runtime output.
+//   - No provider-narrowing post-processing -- the schema covers
+//     the full output type as-is.
+//
+// The schemaID is written into the schema's $id so consumers
+// can validate by URL reference. SchemaID values live in the
+// source package as exported constants (e.g. gateway.SchemaID).
+func writeOutputSchema(outPath string, sample any, schemaID string) error {
+	r := &jsonschema.Reflector{
+		AllowAdditionalProperties: false,
+		DoNotReference:            false,
+		FieldNameTag:              "json",
+		// Keep RequiredFromJSONSchemaTags symmetric with the
+		// provider schemas: omitempty fields fall through to
+		// non-required without us having to hand-tag each one.
+		RequiredFromJSONSchemaTags: false,
+	}
+	schema := r.Reflect(sample)
+	data, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return err
+	}
+	// Replace the reflector's auto-generated $id with our stable
+	// one. invopop emits a github.com/-prefixed URL by default;
+	// we want the schema reachable by a URL operators control.
+	data, err = setSchemaID(data, schemaID)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+}
+
+// setSchemaID rewrites the top-level $id field of the schema
+// document. Returns the raw JSON bytes with the new $id.
+func setSchemaID(data []byte, schemaID string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	doc["$id"] = schemaID
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // checkCollisions ensures no two providers declare the same own
