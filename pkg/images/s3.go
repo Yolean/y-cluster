@@ -550,6 +550,121 @@ func WriteIndex(ctx context.Context, c S3Config, idx Index) error {
 	return nil
 }
 
+// RemoteStats describes the on-S3 cache state at a point in
+// time. Produced by ReadRemoteStats, consumed by the
+// `images remote stats` CLI.
+//
+// References vs distinct: a v2 entry's BlobDigests are blob
+// keys at the shared prefix. Two images sharing a layer count
+// the same blob digest twice (once per image, on the
+// references side); the distinct count is the actual number
+// of objects in <bucket>/blobs/. The ratio is the dedup win.
+//
+// Orphan blobs are leftover v1 per-image blob copies under
+// oci/<safe-ref>/<digest>/blobs/. v2 push leaves them in
+// place (a future `images gc` is the cleanup); the count +
+// bytes are reported separately so operators can tell wasted
+// storage from live storage.
+type RemoteStats struct {
+	IndexVersion        int   `json:"indexVersion"`
+	ImageCount          int   `json:"imageCount"`
+	DistinctBlobs       int   `json:"distinctBlobs"`
+	BlobReferences      int   `json:"blobReferences"`
+	SharedBlobBytes     int64 `json:"sharedBlobBytes"`
+	ManifestObjects     int   `json:"manifestObjects"`
+	ManifestObjectBytes int64 `json:"manifestObjectBytes"`
+	OrphanBlobs         int   `json:"orphanBlobs"`
+	OrphanBlobBytes     int64 `json:"orphanBlobBytes"`
+}
+
+// DedupFactor reports References/Distinct as a float; 1.0 means
+// no dedup, 2.0 means every blob is referenced by two images on
+// average. Returns 1.0 for an empty cache (no division-by-zero,
+// no misleading "infinite dedup" report).
+func (r RemoteStats) DedupFactor() float64 {
+	if r.DistinctBlobs == 0 {
+		return 1.0
+	}
+	return float64(r.BlobReferences) / float64(r.DistinctBlobs)
+}
+
+// ReadRemoteStats produces a RemoteStats snapshot. ListObjects
+// the SharedBlobsPrefix to count + total-size distinct blobs;
+// ReadIndex to get image + reference counts. The two are
+// compared independently so a stale index (referencing a blob
+// that's been GC'd later) shows up as references > distinct.
+func ReadRemoteStats(ctx context.Context, c S3Config) (RemoteStats, error) {
+	resolved, err := c.Resolve()
+	if err != nil {
+		return RemoteStats{}, err
+	}
+	mc, err := newS3Client(resolved)
+	if err != nil {
+		return RemoteStats{}, fmt.Errorf("init S3 client: %w", err)
+	}
+	idx, err := ReadIndex(ctx, resolved)
+	if err != nil {
+		return RemoteStats{}, fmt.Errorf("read index: %w", err)
+	}
+	stats := RemoteStats{
+		IndexVersion: idx.Version,
+		ImageCount:   len(idx.Entries),
+	}
+	for _, e := range idx.Entries {
+		// v2 entries: BlobDigests counts as references.
+		// v1 entries: blob paths are in Files instead. Treat
+		// "blobs/..." prefixes in Files as references too so
+		// mixed v1/v2 buckets report sensibly.
+		stats.BlobReferences += len(e.BlobDigests)
+		for _, f := range e.Files {
+			if strings.HasPrefix(f, "blobs/") {
+				stats.BlobReferences++
+			}
+		}
+	}
+	// Distinct shared blobs + their bytes.
+	for obj := range mc.ListObjects(ctx, resolved.Bucket, minio.ListObjectsOptions{
+		Prefix:    SharedBlobsPrefix,
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			return stats, fmt.Errorf("list shared blobs: %w", obj.Err)
+		}
+		stats.DistinctBlobs++
+		stats.SharedBlobBytes += obj.Size
+	}
+	// Per-image objects under oci/ split into:
+	//
+	//   - manifest objects (oci-layout, index.json): the v2
+	//     shape's per-image footprint; small (KB each).
+	//   - orphan blobs (oci/<ref>/<digest>/blobs/...): leftover
+	//     v1 blob copies that v2 push did not migrate. Wasted
+	//     storage; the future `images gc` sweeps them.
+	for obj := range mc.ListObjects(ctx, resolved.Bucket, minio.ListObjectsOptions{
+		Prefix:    "oci/",
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			return stats, fmt.Errorf("list oci/ tree: %w", obj.Err)
+		}
+		switch {
+		case strings.HasSuffix(obj.Key, "/oci-layout"),
+			strings.HasSuffix(obj.Key, "/index.json"):
+			stats.ManifestObjects++
+			stats.ManifestObjectBytes += obj.Size
+		default:
+			// Anything else under oci/<ref>/<digest>/ that isn't
+			// a manifest is a v1 blob orphan -- v1 push wrote
+			// blobs under the per-image prefix, v2 push hoisted
+			// them to the shared prefix but didn't delete the
+			// originals.
+			stats.OrphanBlobs++
+			stats.OrphanBlobBytes += obj.Size
+		}
+	}
+	return stats, nil
+}
+
 // LocalOCILayoutDir returns the canonical local OCI layout
 // directory for digest under cacheRoot, mirroring pkg/images.Cache's
 // layout. Used by `images push` to find the bytes Cache wrote.
