@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -23,7 +24,60 @@ func gatewayCmd() *cobra.Command {
 		Short: "Inspect and manage the y-cluster Gateway state",
 	}
 	cmd.AddCommand(gatewayStateCmd())
+	cmd.AddCommand(gatewayHostnamesCmd())
 	cmd.AddCommand(gatewayClearDNSHintIPCmd())
+	return cmd
+}
+
+// gatewayHostnamesCmd extracts a deduped, sorted list of the
+// non-wildcard hostnames the cluster's HTTPRoutes / GRPCRoutes
+// declare, derived from the same `gateway.Fetch` snapshot the
+// `state` subcommand emits.
+//
+// The canonical consumer is the appliance build script's TLS LB
+// stage: `TLS_DOMAINS=$(y-cluster gateway hostnames --csv)`
+// makes the LB cert's SAN list match exactly what the cluster
+// serves, eliminating drift between the operator's env var and
+// the cluster's HTTPRoute manifests.
+//
+// Default output is one hostname per line (works with `xargs`,
+// `mapfile`, `read`); --csv joins with `,` for the SAN-list
+// shape `do_tls_frontend` expects.
+func gatewayHostnamesCmd() *cobra.Command {
+	var contextName string
+	var csv bool
+	cmd := &cobra.Command{
+		Use:   "hostnames",
+		Short: "Print non-wildcard hostnames from the cluster's gateway state",
+		Long: `Reads ` + "`gateway state`" + ` and projects unique non-wildcard hostnames
+from .summary.listeners[].hosts[].hostname. Default output is one
+hostname per line, sorted; --csv joins with "," for the format
+TLS_DOMAINS / do_tls_frontend consume.
+
+Use case: derive an LB cert's SAN list directly from the cluster's
+routing plane so the cert and the routes can't drift.
+
+  TLS_DOMAINS=$(y-cluster gateway hostnames --context=local --csv)`,
+		Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			st, err := gateway.Fetch(c.Context(), contextName)
+			if err != nil {
+				return err
+			}
+			hosts := gateway.Hostnames(st)
+			out := c.OutOrStdout()
+			if csv {
+				fmt.Fprintln(out, strings.Join(hosts, ","))
+				return nil
+			}
+			for _, h := range hosts {
+				fmt.Fprintln(out, h)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
+	cmd.Flags().BoolVar(&csv, "csv", false, "join hostnames with comma instead of newline")
 	return cmd
 }
 
