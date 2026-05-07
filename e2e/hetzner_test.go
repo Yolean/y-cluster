@@ -96,3 +96,77 @@ func TestHetzner_ProvisionTeardown(t *testing.T) {
 		t.Errorf("PublicIPv4 is empty; cluster.Lookup would have nothing to dial")
 	}
 }
+
+// TestHetzner_PreloadFromS3 covers phase 6.c: with
+// HetznerConfig.ImageCache.Bucket set, Provision pulls every
+// entry from s3://<bucket>/index.json into the node's containerd
+// before envoy-gateway runs.
+//
+// Pre-requisites:
+//   - HCLOUD_TOKEN (server create + teardown)
+//   - H_S3_ACCESS_KEY / H_S3_SECRET_KEY / H_S3_REGION /
+//     H_S3_BUCKET (presigned URL generation; same env file as
+//     above ships them all together)
+//   - the bucket must already contain at least one pushed image
+//     (run `y-cluster images push hello-world:latest` once).
+//
+// The test asserts the hello-world ref shows up in
+// `k3s ctr -n k8s.io image list` after Provision returns. Skips
+// if the env isn't set up, so opt-in by sourcing the env file.
+func TestHetzner_PreloadFromS3(t *testing.T) {
+	if os.Getenv("HCLOUD_TOKEN") == "" {
+		t.Skip("HCLOUD_TOKEN unset; opt in to the hetzner e2e by exporting it")
+	}
+	if os.Getenv("H_S3_ACCESS_KEY") == "" || os.Getenv("H_S3_SECRET_KEY") == "" ||
+		os.Getenv("H_S3_BUCKET") == "" || os.Getenv("H_S3_REGION") == "" {
+		t.Skip("H_S3_* env vars unset; opt in by sourcing y-cluster-hetzner.env")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	logger, _ := zap.NewDevelopment()
+
+	ctxName := "y-c-e2e-" + strings.ToLower(strings.ReplaceAll(t.Name(), "_", "-"))
+	if len(ctxName) > 50 {
+		ctxName = ctxName[:50]
+	}
+	t.Setenv(hetzner.CacheDirEnv, t.TempDir())
+
+	cfg := config.HetznerConfig{
+		CommonConfig: config.CommonConfig{
+			Provider: config.ProviderHetzner,
+			Context:  ctxName,
+		},
+		ImageCache: config.HetznerImageCache{
+			Bucket: os.Getenv("H_S3_BUCKET"),
+			Region: os.Getenv("H_S3_REGION"),
+		},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	cluster, err := hetzner.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Logf("teardown: %v", err)
+		}
+	})
+
+	// The pre-load step lands every index entry into the k8s.io
+	// namespace via `ctr image import`. We expect at least one
+	// image (the bucket has hello-world:latest from a prior push)
+	// to show up in the list.
+	out, err := cluster.SSH(ctx, "sudo k3s ctr -n k8s.io image list -q")
+	if err != nil {
+		t.Fatalf("ctr image list: %v", err)
+	}
+	listed := string(out)
+	if !strings.Contains(listed, "hello-world") {
+		t.Errorf("expected hello-world in containerd's k8s.io namespace after preload; got:\n%s", listed)
+	}
+}

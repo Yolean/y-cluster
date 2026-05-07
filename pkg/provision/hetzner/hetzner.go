@@ -239,6 +239,16 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 
+	// Phase 6.c: pre-load images from the S3 cache, if configured.
+	// Lands here -- after k3s is up (containerd is reachable for
+	// `ctr image import`) but before envoy-gateway, so the gateway
+	// install benefits from cache hits too.
+	if cfg.ImageCache.Enabled() {
+		if err := c.preloadFromS3(ctx); err != nil {
+			return nil, fmt.Errorf("preload images: %w", err)
+		}
+	}
+
 	// Phase 3.c: generate + upload a per-context self-signed cert
 	// before the LB so a fresh-LB create can include it in the
 	// initial HTTPS service (Hetzner refuses an empty cert list).
