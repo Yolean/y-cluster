@@ -9,7 +9,9 @@
 #      operator applies their custom workloads via kubectl /
 #      yconverge against context $NAME, tests them, and
 #      confirms when satisfied.
-#   3. y-cluster stop -> y-cluster prepare-export (virt-sysprep
+#   3. y-cluster prepare-export (snapshots reconciled Gateway
+#      state, clears the dns-hint-ip annotation, then stops the
+#      VM internally and runs the offline phase: virt-sysprep
 #      identity reset + timesyncd flip + netplan generic match).
 #   4. y-cluster export --format=gcp-tar -- packs the qcow2
 #      into <name>.tar.gz containing a single disk.raw, the
@@ -770,10 +772,13 @@ EOF
 confirm "Proceed to export + GCP deploy?" \
     || { echo "aborted; local cluster left running. Teardown with: $Y_CLUSTER teardown -c $CFG_DIR"; exit 0; }
 
-# === Stage 3: stop + prepare-export + export gcp-tar ===
-stage "stopping cluster ($NAME)"
-"$Y_CLUSTER" stop --context="$KUBECTX"
-
+# === Stage 3: prepare-export + export gcp-tar ===
+# prepare-export needs the cluster RUNNING: its live phase
+# clears the per-deploy yolean.se/dns-hint-ip annotation and
+# snapshots reconciled Gateway state into <cacheDir>/<name>-
+# gateway-state.json. It then stops the VM itself before the
+# offline phase (libguestfs needs the disk not in use).
+# Calling `y-cluster stop` here would defeat that.
 stage "prepare-export ($NAME)"
 "$Y_CLUSTER" prepare-export --context="$KUBECTX"
 
