@@ -242,13 +242,21 @@ func TestQemu_ExportImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Export to VMDK
-	vmdkPath := cfg.CacheDir + "/appliance.vmdk"
-	if err := qemu.ExportVMDK(cluster.DiskPath(), vmdkPath); err != nil {
+	// Export to VMDK via the bundle-shaped API. The bundle dir
+	// gets <name>.vmdk, <name>-ssh{,.pub}, and a README.md.
+	bundleDir := filepath.Join(cfg.CacheDir, "bundle")
+	if err := qemu.Export(ctx, qemu.ExportOptions{
+		CacheDir:  cfg.CacheDir,
+		Name:      cfg.Name,
+		BundleDir: bundleDir,
+		Format:    qemu.FormatVMDK,
+		Logger:    logger,
+	}); err != nil {
 		t.Fatal(err)
 	}
+	vmdkPath := filepath.Join(bundleDir, cfg.Name+".vmdk")
 	if _, err := os.Stat(vmdkPath); err != nil {
-		t.Fatal("VMDK should exist after export")
+		t.Fatalf("VMDK should exist after export: %v", err)
 	}
 	t.Logf("exported VMDK: %s", vmdkPath)
 
@@ -359,6 +367,204 @@ func TestQemu_StopStart(t *testing.T) {
 	if out, err := cluster2.SSH(ctx, "hostname"); err != nil {
 		t.Fatalf("SSH after Start: %s: %v", out, err)
 	}
+}
+
+// TestQemu_Seed_GateAndBypass exercises the data-seed mount-required
+// gate end-to-end against a real qemu boot:
+//
+//   - Provision a build cluster, plant a sentinel file under
+//     /data/yolean so the seed has something verifiable.
+//   - Stop, prepare-export (bakes the LABEL=y-cluster-data fstab
+//     entry, generates the seed tarball, lays down the systemd unit).
+//   - Boot the prepared disk in diagnostic mode -- StartForDiagnostic
+//     gives us a *Cluster without waiting for k3s, which we expect
+//     not to come up because no labeled volume is attached.
+//   - Assert: sshd works, the seed unit is in `failed` state, the
+//     journal mentions "not a mountpoint", k3s.service is NOT active.
+//     This is the regression posture for the GCP-appliance failure
+//     where the customer's volume mounted after k3s.
+//   - Inject /run/y-cluster-seed-bypass (the cloud-init-style hosting
+//     override; in this test we touch it directly via SSH) and
+//     restart the seed unit. Assert the seed extract ran, the
+//     sentinel is back under /data/yolean, the bypass sibling
+//     sentinel is present, and k3s reaches Ready after a restart.
+//
+// Covers states 3 (no volume, no bypass -> fail), 4 (no volume +
+// bypass -> extract), and 7 (sshd unaffected by seed failure) of
+// the 7-state seed-check matrix; states 1, 2, 5, 6 are unit-tested
+// via the embedded shell script under pkg/provision/qemu.
+func TestQemu_Seed_GateAndBypass(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("QEMU tests require /dev/kvm")
+	}
+	if err := qemu.CheckPrerequisites(); err != nil {
+		t.Skip(err)
+	}
+	if _, err := exec.LookPath("virt-customize"); err != nil {
+		t.Skip("virt-customize not on PATH; install libguestfs-tools")
+	}
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eQEMURuntime()
+	cfg.Name = "y-cluster-e2e-seed-gate"
+	cfg.Context = "y-cluster-e2e-seed-gate"
+	cfg.CacheDir = t.TempDir()
+	cfg.Memory = "4096"
+	cfg.CPUs = "2"
+	cfg.SSHPort = "2227"
+	cfg.PortForwards = e2eUniqueForwards("26447")
+	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
+	if cfg.Kubeconfig == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", cfg.CacheDir)
+
+	ctx := context.Background()
+
+	// 1. Build the appliance.
+	cluster, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cleanup runs even on test failure; teardown removes the disk +
+	// pidfile + ssh key. Idempotent against the second VM (cluster2)
+	// because it shares CacheDir/Name.
+	t.Cleanup(func() { _ = cluster.Teardown(false) })
+
+	// 2. Plant a sentinel under /data/yolean. PrepareExport's
+	//    BuildSeedAssets snapshots /data/yolean into the tarball; the
+	//    sentinel proves end-to-end that the bypass branch's extract
+	//    actually wrote the build-time data back onto the customer
+	//    side.
+	if out, err := cluster.SSH(ctx, "sudo mkdir -p /data/yolean && echo seed-sentinel-v1 | sudo tee /data/yolean/sentinel.txt >/dev/null"); err != nil {
+		t.Fatalf("plant sentinel: %s: %v", out, err)
+	}
+
+	// 3. Stop the build cluster cleanly.
+	if err := qemu.Stop(cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// 4. prepare-export: bake fstab + seed tarball + systemd unit.
+	if err := qemu.PrepareExport(ctx, cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("PrepareExport: %v", err)
+	}
+
+	// 5. Boot in diagnostic mode. k3s won't come up because the seed
+	//    unit will fail (no volume attached, no bypass). The Cluster
+	//    handle still gives us SSH against the running VM.
+	cluster2, err := qemu.StartForDiagnostic(ctx, cfg.CacheDir, cfg.Name, logger)
+	if err != nil {
+		t.Fatalf("StartForDiagnostic: %v", err)
+	}
+
+	// 6. SSH works -- sshd has no transitive dep on the seed unit.
+	if out, err := cluster2.SSH(ctx, "hostname"); err != nil {
+		t.Fatalf("SSH after diagnostic boot (sshd should be unaffected by seed failure): %s: %v", out, err)
+	}
+
+	// 7. Wait for the seed unit to settle. It's oneshot Before=k3s.service,
+	//    runs early; expect it to be `failed` once cloud-init.service has
+	//    completed and the gate has fired.
+	if state := waitForSeedState(t, ctx, cluster2, "failed", 90*time.Second); state != "failed" {
+		out, _ := cluster2.SSH(ctx, "sudo journalctl -u y-cluster-data-seed.service -b --no-pager")
+		t.Fatalf("seed unit never reached failed; last state=%q\njournal:\n%s", state, out)
+	}
+
+	// 8. Journal carries the actionable error.
+	journalOut, err := cluster2.SSH(ctx, "sudo journalctl -u y-cluster-data-seed.service -b --no-pager")
+	if err != nil {
+		t.Fatalf("journalctl: %v", err)
+	}
+	if !strings.Contains(string(journalOut), "not a mountpoint") {
+		t.Errorf("journal missing 'not a mountpoint':\n%s", journalOut)
+	}
+	if !strings.Contains(string(journalOut), "LABEL=y-cluster-data") {
+		t.Errorf("journal missing LABEL hint (resolution recipe):\n%s", journalOut)
+	}
+
+	// 9. k3s must NOT be active. Per the drop-in `Requires=` on the
+	//    failed seed unit, k3s.service stays in "inactive (deps
+	//    failed)" or similar.
+	k3sOut, _ := cluster2.SSH(ctx, "systemctl is-active k3s.service")
+	if state := strings.TrimSpace(string(k3sOut)); state == "active" {
+		t.Fatalf("k3s.service should not be active when seed gate fires; got: %q", state)
+	}
+
+	// === Bypass path ===
+
+	// 10. Inject the bypass flag the way Hetzner QA cloud-init would,
+	//     except via SSH for test simplicity. /run is tmpfs.
+	if out, err := cluster2.SSH(ctx, "sudo touch /run/y-cluster-seed-bypass"); err != nil {
+		t.Fatalf("touch bypass flag: %s: %v", out, err)
+	}
+
+	// 11. Reset the failed state and restart the seed unit. With the
+	//     bypass file in place, the script extracts regardless of
+	//     mount status and exits 0.
+	if out, err := cluster2.SSH(ctx, "sudo systemctl reset-failed y-cluster-data-seed.service && sudo systemctl restart y-cluster-data-seed.service"); err != nil {
+		t.Fatalf("restart seed unit after bypass: %s: %v", out, err)
+	}
+	if state := waitForSeedState(t, ctx, cluster2, "active", 60*time.Second); state != "active" {
+		out, _ := cluster2.SSH(ctx, "sudo journalctl -u y-cluster-data-seed.service -b --no-pager")
+		t.Fatalf("seed unit never reached active after bypass; last state=%q\njournal:\n%s", state, out)
+	}
+
+	// 12. Sentinel from build time must be back under /data/yolean
+	//     (extracted from the seed tarball into the boot-disk dir).
+	sentOut, err := cluster2.SSH(ctx, "cat /data/yolean/sentinel.txt")
+	if err != nil {
+		t.Fatalf("read sentinel after bypass extract: %v", err)
+	}
+	if !strings.Contains(string(sentOut), "seed-sentinel-v1") {
+		t.Errorf("seed extract didn't restore sentinel; got: %s", sentOut)
+	}
+
+	// 13. Bypass sibling-sentinel marks "we went down the bypass path"
+	//     for forensic visibility.
+	if out, err := cluster2.SSH(ctx, "test -f /data/yolean/.y-cluster-seeded-via-bypass && echo present"); err != nil {
+		t.Errorf("bypass sentinel missing: %s: %v", out, err)
+	} else if !strings.Contains(string(out), "present") {
+		t.Errorf("bypass sentinel not present: %s", out)
+	}
+
+	// 14. k3s.service's Requires is now satisfied; restart should
+	//     bring it up.
+	if out, err := cluster2.SSH(ctx, "sudo systemctl reset-failed k3s.service 2>/dev/null; sudo systemctl restart k3s.service"); err != nil {
+		t.Fatalf("restart k3s after bypass: %s: %v", out, err)
+	}
+
+	// 15. Wait for k3s to be Ready via in-VM kubectl (we don't import
+	//     the kubeconfig in diagnostic mode, so use guest-side kubectl).
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		nodesOut, _ := cluster2.SSH(ctx, "sudo k3s kubectl get nodes --no-headers 2>/dev/null || true")
+		if strings.Contains(string(nodesOut), "Ready") {
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	out, _ := cluster2.SSH(ctx, "sudo journalctl -u k3s.service -b --no-pager | tail -50")
+	t.Fatalf("k3s never reached Ready after bypass+restart\nk3s journal tail:\n%s", out)
+}
+
+// waitForSeedState polls `systemctl is-active y-cluster-data-seed.service`
+// against the VM until it reports `want` or the timeout fires. Returns
+// the last observed state so the caller can include it in the failure
+// message.
+func waitForSeedState(t *testing.T, ctx context.Context, cluster *qemu.Cluster, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := ""
+	for time.Now().Before(deadline) {
+		out, _ := cluster.SSH(ctx, "systemctl is-active y-cluster-data-seed.service 2>/dev/null || true")
+		last = strings.TrimSpace(string(out))
+		if last == want {
+			return last
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return last
 }
 
 // assertNodeReady polls `kubectl get nodes` against ctx until at

@@ -33,8 +33,8 @@ against the build cluster.
 
 Typical use: ship a migration Job that runs once on the
 customer's first boot of a new appliance version. See
-specs/y-cluster/APPLIANCE_UPGRADES.md for the recommended Job
-shape and idempotency conventions.`,
+APPLIANCE_MAINTENANCE.md for the recommended Job shape and
+idempotency conventions.`,
 	}
 	cmd.AddCommand(manifestsAddCmd())
 	return cmd

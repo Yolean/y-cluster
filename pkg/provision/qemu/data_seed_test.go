@@ -9,17 +9,20 @@ import (
 	"testing"
 )
 
-// runSeedCheck executes the embedded data_seed_check.sh against a
-// fake $MOUNT and $SEED setup the caller wires up under tmp.
-//
-// The script is hardcoded to /data/yolean / /var/lib/y-cluster paths.
-// We override them by writing a tiny wrapper that exports the same
-// names as shell environment variables and then sources the original
-// script with sed-substituted constants. Cheaper than refactoring the
-// boot-time script to take env-var paths -- the boot-time script is
-// what runs on a real customer machine and shouldn't grow knobs we
-// don't need there.
-func runSeedCheck(t *testing.T, mount, seed, meta string) (stdout, stderr string, exit int) {
+type seedCheckOpts struct {
+	mount      string // -> $MOUNT
+	seed       string // -> $SEED
+	meta       string // -> $META
+	bypass     string // -> $BYPASS_FLAG (defaults to a tmpdir non-existent path; create the file before running to exercise the bypass branch)
+	forceMount bool   // when true, override mountpoint -q to always succeed (simulate "/data/yolean is a mountpoint")
+}
+
+// runSeedCheck executes the embedded data_seed_check.sh against
+// caller-supplied paths. The boot-time script hardcodes
+// /data/yolean / /var/lib/y-cluster / /run for production; tests
+// override each path via sed substitution so we can exercise the
+// real branches without root or a real mount.
+func runSeedCheck(t *testing.T, opts seedCheckOpts) (stdout, stderr string, exit int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("seed-check is /bin/sh-only")
@@ -28,27 +31,42 @@ func runSeedCheck(t *testing.T, mount, seed, meta string) (stdout, stderr string
 		t.Skip("zstd not on PATH")
 	}
 
-	// Materialise the script with path substitutions.
+	// Default the bypass path to something that won't exist unless
+	// the test explicitly creates it. Tests that want to exercise
+	// the bypass branch set opts.bypass to a path AND `touch` it.
+	bypass := opts.bypass
+	if bypass == "" {
+		bypass = filepath.Join(t.TempDir(), "no-bypass-flag")
+	}
+
+	// Path substitutions on the production script. Each replacement
+	// is anchored to the constant assignment line so a future
+	// renaming of the literal doesn't silently break the test.
 	src := dataSeedCheckScript
-	src = strings.Replace(src, "MOUNT=/data/yolean", "MOUNT="+mount, 1)
-	src = strings.Replace(src, "SEED=/var/lib/y-cluster/data-seed.tar.zst", "SEED="+seed, 1)
-	src = strings.Replace(src, "META=/var/lib/y-cluster/data-seed.meta.json", "META="+meta, 1)
-	// The script's mountpoint check uses `mountpoint -q` against
-	// MOUNT. tmp dirs are not mountpoints, so the test would
-	// always exit early at "not a separate mount". Replace the
-	// guard with a TEST_FORCE_MOUNT env-var override so we can
-	// exercise the real branches.
-	src = strings.Replace(src,
-		`if ! mountpoint -q "$MOUNT" 2>/dev/null; then`,
-		`if [ -z "${TEST_FORCE_MOUNT:-}" ] && ! mountpoint -q "$MOUNT" 2>/dev/null; then`,
-		1)
+	src = strings.Replace(src, "MOUNT=/data/yolean", "MOUNT="+opts.mount, 1)
+	src = strings.Replace(src, "SEED=/var/lib/y-cluster/data-seed.tar.zst", "SEED="+opts.seed, 1)
+	src = strings.Replace(src, "META=/var/lib/y-cluster/data-seed.meta.json", "META="+opts.meta, 1)
+	src = strings.Replace(src, "BYPASS_FLAG=/run/y-cluster-seed-bypass", "BYPASS_FLAG="+bypass, 1)
+
+	// The mountpoint check uses `mountpoint -q` against MOUNT. tmp
+	// dirs aren't mountpoints, so any test exercising "the mount IS
+	// present" (states 1, 2, 5) needs to short-circuit the check.
+	// We slip an env-var override in front of the original guard.
+	if opts.forceMount {
+		src = strings.Replace(src,
+			`if ! mountpoint -q "$MOUNT" 2>/dev/null; then`,
+			`if [ -z "${TEST_FORCE_MOUNT:-}" ] && ! mountpoint -q "$MOUNT" 2>/dev/null; then`,
+			1)
+	}
 
 	scriptPath := filepath.Join(t.TempDir(), "seed-check.sh")
 	if err := os.WriteFile(scriptPath, []byte(src), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("/bin/sh", scriptPath)
-	cmd.Env = append(os.Environ(), "TEST_FORCE_MOUNT=1")
+	if opts.forceMount {
+		cmd.Env = append(os.Environ(), "TEST_FORCE_MOUNT=1")
+	}
 	var sob, seb strings.Builder
 	cmd.Stdout = &sob
 	cmd.Stderr = &seb
@@ -62,8 +80,7 @@ func runSeedCheck(t *testing.T, mount, seed, meta string) (stdout, stderr string
 }
 
 // makeSeedTar writes a small tar.zst at seedPath whose contents are
-// the entries (path -> body) given. The sha256 of the resulting
-// tarball is returned for verification.
+// the entries (path -> body) given.
 func makeSeedTar(t *testing.T, seedPath string, entries map[string]string) {
 	t.Helper()
 	if _, err := exec.LookPath("zstd"); err != nil {
@@ -82,7 +99,6 @@ func makeSeedTar(t *testing.T, seedPath string, entries map[string]string) {
 			t.Fatal(err)
 		}
 	}
-	// tar -C contentDir -cf - . | zstd > seedPath
 	tarCmd := exec.Command("tar", "-C", contentDir, "-cf", "-", ".")
 	tarOut, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -107,102 +123,86 @@ func makeSeedTar(t *testing.T, seedPath string, entries map[string]string) {
 	}
 }
 
-// TestSeedCheck_MarkerPresent_NoOp pins the upgrade fast path: the
-// customer's drive already has a marker, we respect it and exit 0.
-func TestSeedCheck_MarkerPresent_NoOp(t *testing.T) {
-	dir := t.TempDir()
-	mount := filepath.Join(dir, "mount")
-	if err := os.MkdirAll(mount, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(mount, ".y-cluster-seeded"),
-		[]byte(`{"schemaVersion":1,"existing":"marker"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(mount, "existing-data.txt"),
-		[]byte("customer's data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	stdout, _, exit := runSeedCheck(t, mount, "/nonexistent/seed", "/nonexistent/meta")
-	if exit != 0 {
-		t.Errorf("exit: got %d, want 0; stdout=%q", exit, stdout)
-	}
-	if !strings.Contains(stdout, "marker present") {
-		t.Errorf("expected 'marker present' in stdout, got: %s", stdout)
-	}
-	// Existing data must be untouched.
-	body, _ := os.ReadFile(filepath.Join(mount, "existing-data.txt"))
-	if string(body) != "customer's data" {
-		t.Errorf("existing data mutated: %q", body)
-	}
+// fixture sets up a (mount, seed, meta) triple under t.TempDir()
+// so individual tests stay focused on the assertion shape, not the
+// boilerplate.
+type fixture struct {
+	dir   string
+	mount string
+	seed  string
+	meta  string
 }
 
-// TestSeedCheck_EmptyMount_Seeds covers the green path: customer
-// attached an empty drive, we extract the seed and write the marker.
-func TestSeedCheck_EmptyMount_Seeds(t *testing.T) {
+func newFixture(t *testing.T) fixture {
+	t.Helper()
 	dir := t.TempDir()
-	mount := filepath.Join(dir, "mount")
-	if err := os.MkdirAll(mount, 0o755); err != nil {
+	f := fixture{
+		dir:   dir,
+		mount: filepath.Join(dir, "mount"),
+		seed:  filepath.Join(dir, "seed.tar.zst"),
+		meta:  filepath.Join(dir, "seed.meta.json"),
+	}
+	if err := os.MkdirAll(f.mount, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// lost+found is allowed and must be ignored.
-	if err := os.MkdirAll(filepath.Join(mount, "lost+found"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	return f
+}
 
-	seed := filepath.Join(dir, "seed.tar.zst")
-	meta := filepath.Join(dir, "seed.meta.json")
-	makeSeedTar(t, seed, map[string]string{
+// State 1: volume attached, empty mount -> seed extracts, marker written.
+func TestSeedCheck_EmptyMount_Seeds(t *testing.T) {
+	f := newFixture(t)
+	if err := os.MkdirAll(filepath.Join(f.mount, "lost+found"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeSeedTar(t, f.seed, map[string]string{
 		"workload-data/db.txt": "schema=v0.4.0",
 	})
-	if err := os.WriteFile(meta,
+	if err := os.WriteFile(f.meta,
 		[]byte(`{"schemaVersion":1,"seed_sha256":"sha256:fake"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	stdout, stderr, exit := runSeedCheck(t, mount, seed, meta)
+	stdout, stderr, exit := runSeedCheck(t, seedCheckOpts{
+		mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true,
+	})
 	if exit != 0 {
 		t.Fatalf("exit: got %d, want 0; stdout=%q stderr=%q", exit, stdout, stderr)
 	}
-	body, err := os.ReadFile(filepath.Join(mount, "workload-data/db.txt"))
+	body, err := os.ReadFile(filepath.Join(f.mount, "workload-data/db.txt"))
 	if err != nil {
 		t.Fatalf("seed file should be extracted: %v", err)
 	}
 	if string(body) != "schema=v0.4.0" {
 		t.Errorf("extracted body: got %q, want schema=v0.4.0", body)
 	}
-	markerBody, err := os.ReadFile(filepath.Join(mount, ".y-cluster-seeded"))
+	markerBody, err := os.ReadFile(filepath.Join(f.mount, ".y-cluster-seeded"))
 	if err != nil {
 		t.Fatalf("marker should be written: %v", err)
 	}
 	if !strings.Contains(string(markerBody), "seed_sha256") {
 		t.Errorf("marker should contain seed metadata: %s", markerBody)
 	}
+	// Bypass-sentinel must NOT exist in the production-mount path.
+	if _, err := os.Stat(filepath.Join(f.mount, ".y-cluster-seeded-via-bypass")); err == nil {
+		t.Errorf("bypass sentinel should not exist on a mounted-volume seed")
+	}
 }
 
-// TestSeedCheck_NonEmptyNoMarker_Conflict pins the safety belt:
-// customer drive has unrelated data, no marker -> we refuse and
-// exit non-zero so the k3s drop-in blocks startup.
+// State 2: volume attached, has unmarked data -> conflict, no seed.
 func TestSeedCheck_NonEmptyNoMarker_Conflict(t *testing.T) {
-	dir := t.TempDir()
-	mount := filepath.Join(dir, "mount")
-	if err := os.MkdirAll(mount, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(mount, "customer-stuff.txt"),
+	f := newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.mount, "customer-stuff.txt"),
 		[]byte("not ours"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	seed := filepath.Join(dir, "seed.tar.zst")
-	meta := filepath.Join(dir, "seed.meta.json")
-	makeSeedTar(t, seed, map[string]string{"x": "y"})
-	if err := os.WriteFile(meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+	makeSeedTar(t, f.seed, map[string]string{"x": "y"})
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	stdout, stderr, exit := runSeedCheck(t, mount, seed, meta)
+	stdout, stderr, exit := runSeedCheck(t, seedCheckOpts{
+		mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true,
+	})
 	if exit == 0 {
 		t.Errorf("exit: got 0, want non-zero (conflict); stdout=%q", stdout)
 	}
@@ -212,33 +212,127 @@ func TestSeedCheck_NonEmptyNoMarker_Conflict(t *testing.T) {
 	if !strings.Contains(stderr, "Resolution") {
 		t.Errorf("stderr should include recovery recipes: %s", stderr)
 	}
-	// Customer file must be untouched.
-	body, _ := os.ReadFile(filepath.Join(mount, "customer-stuff.txt"))
+	body, _ := os.ReadFile(filepath.Join(f.mount, "customer-stuff.txt"))
 	if string(body) != "not ours" {
 		t.Errorf("customer file mutated: %q", body)
 	}
-	// Marker must NOT have been written.
-	if _, err := os.Stat(filepath.Join(mount, ".y-cluster-seeded")); err == nil {
+	if _, err := os.Stat(filepath.Join(f.mount, ".y-cluster-seeded")); err == nil {
 		t.Errorf("marker should not exist after conflict")
 	}
 }
 
-// TestSeedCheck_LostFoundIgnored covers the freshly-formatted ext4
-// case: lost+found exists but isn't customer data.
-func TestSeedCheck_LostFoundIgnored(t *testing.T) {
-	dir := t.TempDir()
-	mount := filepath.Join(dir, "mount")
-	if err := os.MkdirAll(filepath.Join(mount, "lost+found"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	seed := filepath.Join(dir, "seed.tar.zst")
-	meta := filepath.Join(dir, "seed.meta.json")
-	makeSeedTar(t, seed, map[string]string{"hello.txt": "world"})
-	if err := os.WriteFile(meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+// State 3: no volume, no bypass -> production gate fails closed.
+// This is the regression posture for the customer-mounts-after-k3s
+// race we hit on the GCP appliance.
+func TestSeedCheck_NotMounted_NoBypass_Fails(t *testing.T) {
+	f := newFixture(t)
+	makeSeedTar(t, f.seed, map[string]string{"x": "y"})
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, exit := runSeedCheck(t, mount, seed, meta)
+	stdout, stderr, exit := runSeedCheck(t, seedCheckOpts{
+		mount: f.mount, seed: f.seed, meta: f.meta,
+		// forceMount: false -- the tmp dir really isn't a mountpoint.
+	})
+	if exit == 0 {
+		t.Fatalf("exit: got 0, want non-zero (mount required); stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "not a mountpoint") {
+		t.Errorf("stderr should mention missing mountpoint: %s", stderr)
+	}
+	if !strings.Contains(stderr, "LABEL=y-cluster-data") {
+		t.Errorf("stderr should reference the LABEL fstab convention: %s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(f.mount, ".y-cluster-seeded")); err == nil {
+		t.Errorf("marker should not exist when mount-required gate fires")
+	}
+}
+
+// State 4: no volume + bypass flag -> extract regardless of mount,
+// drop sibling sentinel marking the bypass.
+func TestSeedCheck_BypassFlag_Extracts(t *testing.T) {
+	f := newFixture(t)
+	bypass := filepath.Join(f.dir, "bypass-flag")
+	if err := os.WriteFile(bypass, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	makeSeedTar(t, f.seed, map[string]string{"hello.txt": "world"})
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, exit := runSeedCheck(t, seedCheckOpts{
+		mount: f.mount, seed: f.seed, meta: f.meta, bypass: bypass,
+		// forceMount: false on purpose -- the bypass branch must
+		// short-circuit the mount-required gate.
+	})
+	if exit != 0 {
+		t.Fatalf("exit: got %d, want 0; stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "bypass flag") {
+		t.Errorf("stdout should announce bypass: %s", stdout)
+	}
+	body, err := os.ReadFile(filepath.Join(f.mount, "hello.txt"))
+	if err != nil {
+		t.Fatalf("seed should have been extracted in bypass mode: %v", err)
+	}
+	if string(body) != "world" {
+		t.Errorf("extracted body: got %q, want world", body)
+	}
+	if _, err := os.Stat(filepath.Join(f.mount, ".y-cluster-seeded")); err != nil {
+		t.Errorf("marker should be written even in bypass mode: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.mount, ".y-cluster-seeded-via-bypass")); err != nil {
+		t.Errorf("bypass sentinel should be present: %v", err)
+	}
+}
+
+// State 5: marker present -> upgrade fast path, no-op.
+func TestSeedCheck_MarkerPresent_NoOp(t *testing.T) {
+	f := newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.mount, ".y-cluster-seeded"),
+		[]byte(`{"schemaVersion":1,"existing":"marker"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.mount, "existing-data.txt"),
+		[]byte("customer's data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, exit := runSeedCheck(t, seedCheckOpts{
+		mount: f.mount, seed: "/nonexistent/seed", meta: "/nonexistent/meta",
+		forceMount: true,
+	})
+	if exit != 0 {
+		t.Errorf("exit: got %d, want 0; stdout=%q", exit, stdout)
+	}
+	if !strings.Contains(stdout, "marker present") {
+		t.Errorf("expected 'marker present' in stdout, got: %s", stdout)
+	}
+	body, _ := os.ReadFile(filepath.Join(f.mount, "existing-data.txt"))
+	if string(body) != "customer's data" {
+		t.Errorf("existing data mutated: %q", body)
+	}
+}
+
+// State 6: lost+found ignored on freshly-formatted ext4. The kernel
+// creates lost+found on every mkfs.ext4, so a "fresh empty" volume
+// is actually never empty; the script must treat lost+found as
+// non-content.
+func TestSeedCheck_LostFoundIgnored(t *testing.T) {
+	f := newFixture(t)
+	if err := os.MkdirAll(filepath.Join(f.mount, "lost+found"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeSeedTar(t, f.seed, map[string]string{"hello.txt": "world"})
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, exit := runSeedCheck(t, seedCheckOpts{
+		mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true,
+	})
 	if exit != 0 {
 		t.Errorf("lost+found should be ignored; exit=%d", exit)
 	}

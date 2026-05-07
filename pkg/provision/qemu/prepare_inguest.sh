@@ -88,7 +88,39 @@ rm -f /var/lib/systemd/random-seed
 rm -f /var/lib/dhcp/dhclient.leases
 apt-get clean
 
-# 5. Enable wall-clock sync at first boot. Without this, an
+# 5a. Clear /data/yolean on the boot disk now that BuildSeedAssets
+# (host-side, BEFORE virt-customize started) has snapshotted its
+# content into /var/lib/y-cluster/data-seed.tar.zst. Two reasons:
+#
+#   - Production: the customer's persistent volume mounts at
+#     /data/yolean on first boot and shadows the boot-disk dir, so
+#     the bytes here are dead weight. fstrim later reclaims the
+#     freed blocks; the appliance image ships smaller.
+#   - Bypass (Hetzner QA): no labeled volume attached, so the boot
+#     disk's /data/yolean IS the seed target. data_seed_check.sh's
+#     conflict-detection branch refuses to overwrite unmarked files;
+#     clearing here means the bypass extract goes into an empty dir
+#     and the marker writes cleanly.
+#
+# The dir itself is preserved (recreated) so the fstab mount has a
+# mountpoint to attach to and seed-check has somewhere to extract
+# into.
+mkdir -p /data/yolean
+rm -rf /data/yolean/* /data/yolean/.[!.]* 2>/dev/null || true
+
+# 5c. Pre-bake the customer's persistent /data/yolean fstab entry.
+# The customer attaches an ext4 volume labeled "y-cluster-data" to
+# the imported VM; cloud-agnostic LABEL= mounting means VMware /
+# VirtualBox / Hetzner / GCP all recognise the same volume without
+# the customer editing fstab themselves. nofail keeps boot moving
+# even if the volume isn't attached -- y-cluster-data-seed.service
+# fails closed in that case and surfaces the actionable error.
+# Idempotent: re-running prepare-export doesn't dupe the entry.
+if ! grep -q 'LABEL=y-cluster-data' /etc/fstab; then
+    echo 'LABEL=y-cluster-data /data/yolean ext4 defaults,nofail 0 2' >> /etc/fstab
+fi
+
+# 5d. Enable wall-clock sync at first boot. Without this, an
 # imported VM whose RTC was set by the host clock can boot
 # minutes-to-hours away from real UTC, and k3s's TLS certs
 # (NotBefore = build time) read as "not yet valid", which
@@ -112,7 +144,7 @@ systemctl enable systemd-timesyncd.service
 # appliance therefore runs every staged manifest against THEIR
 # cluster (e.g., migration Jobs).
 #
-# See specs/y-cluster/APPLIANCE_UPGRADES.md.
+# See APPLIANCE_MAINTENANCE.md.
 if [ -d /var/lib/y-cluster/manifests-staging ] \
         && [ "$(ls -A /var/lib/y-cluster/manifests-staging 2>/dev/null)" ]; then
     mkdir -p /var/lib/rancher/k3s/server/manifests
