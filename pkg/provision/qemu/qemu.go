@@ -406,10 +406,13 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	return nil
 }
 
-// perVMArtefacts returns every path Provision creates for a given
-// cluster. Used by TeardownConfig to leave the cache dir clean for
-// the next provision -- the keypair in particular must go so the
-// per-customer "no key reuse" contract holds.
+// perVMArtefacts returns every path Provision or PrepareExport
+// creates for a given cluster. Used by TeardownConfig to leave
+// the cache dir clean for the next provision -- the keypair in
+// particular must go so the per-customer "no key reuse"
+// contract holds, and the prepare-export gateway-state JSON
+// must go so a stale dump from a prior export doesn't ship in
+// the next bundle.
 func perVMArtefacts(cacheDir, name string) []string {
 	prefix := filepath.Join(cacheDir, name)
 	return []string{
@@ -419,6 +422,12 @@ func perVMArtefacts(cacheDir, name string) []string {
 		prefix + "-seed.img",
 		prefix + "-cloud-init.yaml",
 		prefix + "-console.log",
+		// PrepareExport's live phase writes the reconciled
+		// Gateway snapshot here; export copies it into
+		// BUNDLE_DIR/gateway-state.json. Without this entry,
+		// teardown leaves the JSON behind and a subsequent
+		// build picks up a stale dump from the prior cluster.
+		prefix + "-gateway-state.json",
 	}
 }
 

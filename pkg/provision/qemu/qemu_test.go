@@ -174,14 +174,16 @@ func TestTeardownConfig_DeletesKeypair(t *testing.T) {
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = t.TempDir()
 	cfg.Kubeconfig = ""
-	for _, name := range []string{
+	artefacts := []string{
 		cfg.Name + ".qcow2",
 		cfg.Name + "-ssh",
 		cfg.Name + "-ssh.pub",
 		cfg.Name + "-seed.img",
 		cfg.Name + "-cloud-init.yaml",
 		cfg.Name + "-console.log",
-	} {
+		cfg.Name + "-gateway-state.json",
+	}
+	for _, name := range artefacts {
 		if err := os.WriteFile(filepath.Join(cfg.CacheDir, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -189,14 +191,7 @@ func TestTeardownConfig_DeletesKeypair(t *testing.T) {
 	if err := TeardownConfig(cfg, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{
-		cfg.Name + ".qcow2",
-		cfg.Name + "-ssh",
-		cfg.Name + "-ssh.pub",
-		cfg.Name + "-seed.img",
-		cfg.Name + "-cloud-init.yaml",
-		cfg.Name + "-console.log",
-	} {
+	for _, name := range artefacts {
 		if _, err := os.Stat(filepath.Join(cfg.CacheDir, name)); err == nil {
 			t.Errorf("teardown should remove %s", name)
 		}
@@ -222,9 +217,11 @@ func TestTeardownConfig_KeepDiskKeepsKeypair(t *testing.T) {
 	}
 }
 
-// TestPerVMArtefacts pins the path layout. Provision creates these
-// files; teardown removes them.  A drift between the two leaves
-// stale state that breaks the no-key-reuse contract.
+// TestPerVMArtefacts pins the path layout. Provision and
+// PrepareExport create these files; teardown removes them. A
+// drift between the two leaves stale state that breaks the
+// no-key-reuse contract OR ships a stale gateway-state dump
+// in the next prepare-export bundle.
 func TestPerVMArtefacts(t *testing.T) {
 	got := perVMArtefacts("/c", "n")
 	want := []string{
@@ -234,6 +231,7 @@ func TestPerVMArtefacts(t *testing.T) {
 		"/c/n-seed.img",
 		"/c/n-cloud-init.yaml",
 		"/c/n-console.log",
+		"/c/n-gateway-state.json",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
