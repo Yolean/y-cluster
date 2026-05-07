@@ -61,8 +61,8 @@ func TestBuildSummary_HTTPRouteServiceBackend(t *testing.T) {
 	if l.Port != 443 || l.Protocol != "HTTPS" || !l.Programmed {
 		t.Errorf("listener port/proto/programmed: %+v", l)
 	}
-	if l.NumTrustedHops != nil {
-		t.Errorf("numTrustedHops should be nil with no CTP, got %d", *l.NumTrustedHops)
+	if l.XForwardedFor != nil {
+		t.Errorf("xForwardedFor should be nil with no CTP, got %+v", l.XForwardedFor)
 	}
 	if len(l.Hosts) != 1 || l.Hosts[0].Hostname != "keycloak-admin" {
 		t.Fatalf("hosts: %+v", l.Hosts)
@@ -257,8 +257,8 @@ func TestBuildSummary_NumTrustedHopsGatewayScope(t *testing.T) {
 	}
 
 	for _, l := range BuildSummary(st).Listeners {
-		if l.NumTrustedHops == nil || *l.NumTrustedHops != 1 {
-			t.Errorf("listener %q numTrustedHops: %v", l.Name, l.NumTrustedHops)
+		if l.XForwardedFor == nil || l.XForwardedFor.NumTrustedHops == nil || *l.XForwardedFor.NumTrustedHops != 1 {
+			t.Errorf("listener %q xForwardedFor: %+v", l.Name, l.XForwardedFor)
 		}
 	}
 }
@@ -289,11 +289,11 @@ func TestBuildSummary_NumTrustedHopsListenerScope(t *testing.T) {
 	for _, l := range BuildSummary(st).Listeners {
 		listenersByName[l.Name] = l
 	}
-	if listenersByName["http"].NumTrustedHops != nil {
-		t.Errorf("http listener should have nil numTrustedHops: %v", listenersByName["http"].NumTrustedHops)
+	if listenersByName["http"].XForwardedFor != nil {
+		t.Errorf("http listener should have nil xForwardedFor: %+v", listenersByName["http"].XForwardedFor)
 	}
-	if h := listenersByName["https"].NumTrustedHops; h == nil || *h != 2 {
-		t.Errorf("https listener numTrustedHops: %v", h)
+	if x := listenersByName["https"].XForwardedFor; x == nil || x.NumTrustedHops == nil || *x.NumTrustedHops != 2 {
+		t.Errorf("https listener xForwardedFor: %+v", x)
 	}
 }
 
@@ -321,16 +321,19 @@ func TestBuildSummary_TrustedCIDRs(t *testing.T) {
 	}
 
 	l := BuildSummary(st).Listeners[0]
-	if l.NumTrustedHops != nil {
-		t.Errorf("numTrustedHops should be nil with trustedCIDRs-only CTP, got %d", *l.NumTrustedHops)
+	if l.XForwardedFor == nil {
+		t.Fatalf("xForwardedFor should be set with trustedCIDRs-only CTP")
+	}
+	if l.XForwardedFor.NumTrustedHops != nil {
+		t.Errorf("numTrustedHops should be nil with trustedCIDRs-only CTP, got %d", *l.XForwardedFor.NumTrustedHops)
 	}
 	want := []string{"10.0.0.0/8", "100.64.0.0/10"}
-	if len(l.TrustedCIDRs) != len(want) {
-		t.Fatalf("trustedCIDRs len: got %v want %v", l.TrustedCIDRs, want)
+	if len(l.XForwardedFor.TrustedCIDRs) != len(want) {
+		t.Fatalf("trustedCIDRs len: got %v want %v", l.XForwardedFor.TrustedCIDRs, want)
 	}
 	for i, c := range want {
-		if l.TrustedCIDRs[i] != c {
-			t.Errorf("trustedCIDRs[%d]=%q want %q", i, l.TrustedCIDRs[i], c)
+		if l.XForwardedFor.TrustedCIDRs[i] != c {
+			t.Errorf("trustedCIDRs[%d]=%q want %q", i, l.XForwardedFor.TrustedCIDRs[i], c)
 		}
 	}
 }
@@ -359,11 +362,14 @@ func TestBuildSummary_TrustedCIDRsAndNumTrustedHops(t *testing.T) {
 	}
 
 	l := BuildSummary(st).Listeners[0]
-	if l.NumTrustedHops == nil || *l.NumTrustedHops != 2 {
-		t.Errorf("numTrustedHops: %v", l.NumTrustedHops)
+	if l.XForwardedFor == nil {
+		t.Fatalf("xForwardedFor should be set when CTP declares both knobs")
 	}
-	if len(l.TrustedCIDRs) != 1 || l.TrustedCIDRs[0] != "10.0.0.0/8" {
-		t.Errorf("trustedCIDRs: %v", l.TrustedCIDRs)
+	if l.XForwardedFor.NumTrustedHops == nil || *l.XForwardedFor.NumTrustedHops != 2 {
+		t.Errorf("numTrustedHops: %v", l.XForwardedFor.NumTrustedHops)
+	}
+	if len(l.XForwardedFor.TrustedCIDRs) != 1 || l.XForwardedFor.TrustedCIDRs[0] != "10.0.0.0/8" {
+		t.Errorf("trustedCIDRs: %v", l.XForwardedFor.TrustedCIDRs)
 	}
 }
 

@@ -56,29 +56,43 @@ type SummaryListener struct {
 	// "envoy-gateway accepted this listener and is serving it".
 	Programmed bool `json:"programmed"`
 
-	// NumTrustedHops, when non-nil, is the per-listener
-	// X-Forwarded-For trust depth applied via a
-	// ClientTrafficPolicy. Pointer (rather than int + omitempty)
-	// so a deliberate 0 is distinguishable from "policy absent".
-	// Listener-level placement is correct for envoy-gateway
-	// today: ClientTrafficPolicy targets a Gateway (with
-	// optional sectionName), not individual route matches.
-	NumTrustedHops *int `json:"numTrustedHops,omitempty"`
-
-	// TrustedCIDRs lists the per-listener X-Forwarded-For
-	// trusted-source CIDRs from the same ClientTrafficPolicy.
-	// numTrustedHops and trustedCIDRs are alternative tuning
-	// knobs for the same reverse-proxy-trust problem (count
-	// hops vs. trust source ranges); newer envoy-gateway
-	// versions treat them as mutually exclusive on a single
-	// policy, but a snapshot may surface either or neither.
-	TrustedCIDRs []string `json:"trustedCIDRs,omitempty"`
+	// XForwardedFor, when non-nil, is the per-listener
+	// X-Forwarded-For trust configuration applied via a
+	// ClientTrafficPolicy. Mirrors the source CRD shape
+	// (`spec.clientIPDetection.xForwardedFor` on the policy)
+	// at one wrapping level so a consumer reading the JSON
+	// sees the field in context rather than two loose
+	// `numTrustedHops` / `trustedCIDRs` props at the listener
+	// root. Listener-level placement is correct for
+	// envoy-gateway today: ClientTrafficPolicy targets a
+	// Gateway (with optional sectionName), not individual
+	// route matches. If envoy-gateway's `customHeader`
+	// alternate detection mechanism becomes relevant, it
+	// lands as a sibling at the same level here.
+	XForwardedFor *XForwardedForSettings `json:"xForwardedFor,omitempty"`
 
 	// Hosts groups routes by the hostname declared on the
 	// underlying HTTPRoute / GRPCRoute. Routes that declare no
 	// hostname land in the "*" bucket, listed last so a
 	// consumer eyeballing the JSON sees the named hosts first.
 	Hosts []SummaryHost `json:"hosts"`
+}
+
+// XForwardedForSettings projects the
+// `spec.clientIPDetection.xForwardedFor` block of a
+// ClientTrafficPolicy that targets the surrounding listener.
+// Pointer-only fields (`numTrustedHops`) preserve "policy
+// absent" vs. "policy says 0"; slices are nil when the policy
+// doesn't declare them.
+//
+// envoy-gateway treats `numTrustedHops` and `trustedCIDRs` as
+// alternative tuning knobs for the same reverse-proxy-trust
+// problem (count hops vs. trust source ranges); newer
+// versions treat them as mutually exclusive on a single
+// policy, but a snapshot may surface either or neither.
+type XForwardedForSettings struct {
+	NumTrustedHops *int     `json:"numTrustedHops,omitempty"`
+	TrustedCIDRs   []string `json:"trustedCIDRs,omitempty"`
 }
 
 // SummaryHost groups routes by hostname under one listener.
@@ -194,11 +208,7 @@ func BuildSummary(s *State) *Summary {
 				Hosts:      collectHosts(s, gw, l),
 			}
 			if xff := xForwardedForFor(s.ClientTrafficPolicies, gw, l); xff != nil {
-				if xff.NumTrustedHops != nil {
-					v := *xff.NumTrustedHops
-					sl.NumTrustedHops = &v
-				}
-				sl.TrustedCIDRs = xff.TrustedCIDRs
+				sl.XForwardedFor = xff
 			}
 			out.Listeners = append(out.Listeners, sl)
 		}
@@ -206,14 +216,6 @@ func BuildSummary(s *State) *Summary {
 	return out
 }
 
-// xffSettings is the projection of a ClientTrafficPolicy's
-// spec.clientIPDetection.xForwardedFor block. Returned by
-// xForwardedForFor when at least one CTP applies to the
-// listener; nil when no policy applies.
-type xffSettings struct {
-	NumTrustedHops *int
-	TrustedCIDRs   []string
-}
 
 // listenerProgrammed pulls the Programmed=True signal from the
 // matching ListenerStatus row. Default false when the controller
@@ -229,15 +231,15 @@ func listenerProgrammed(gw Gateway, listenerName string) bool {
 
 // xForwardedForFor walks the ClientTrafficPolicy list and
 // returns the first applicable policy's xForwardedFor block
-// projected into xffSettings. Returns nil when no CTP applies
-// to this listener.
+// projected into XForwardedForSettings. Returns nil when no
+// CTP applies to this listener.
 //
 // "First" is deterministic because Fetch sorts policies by
 // (namespace, name) before populating State. Multiple
 // overlapping policies are rare and a reconciliation conflict
 // in their own right; consumers wanting full disambiguation
 // drill into State.ClientTrafficPolicies.
-func xForwardedForFor(ctps []ClientTrafficPolicy, gw Gateway, l Listener) *xffSettings {
+func xForwardedForFor(ctps []ClientTrafficPolicy, gw Gateway, l Listener) *XForwardedForSettings {
 	for _, ctp := range ctps {
 		if !ctpAppliesTo(ctp, gw, l) {
 			continue
@@ -257,7 +259,7 @@ func xForwardedForFor(ctps []ClientTrafficPolicy, gw Gateway, l Listener) *xffSe
 		if xff.NumTrustedHops == nil && len(xff.TrustedCIDRs) == 0 {
 			continue
 		}
-		return &xffSettings{
+		return &XForwardedForSettings{
 			NumTrustedHops: xff.NumTrustedHops,
 			TrustedCIDRs:   xff.TrustedCIDRs,
 		}

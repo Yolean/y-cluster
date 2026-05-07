@@ -462,9 +462,6 @@
         "name": {
           "type": "string"
         },
-        "numTrustedHops": {
-          "type": "integer"
-        },
         "port": {
           "type": "integer"
         },
@@ -474,11 +471,8 @@
         "protocol": {
           "type": "string"
         },
-        "trustedCIDRs": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "xForwardedFor": {
+          "$ref": "#/$defs/XForwardedForSettings"
         }
       },
       "required": [
@@ -575,6 +569,21 @@
       "required": [
         "name"
       ],
+      "type": "object"
+    },
+    "XForwardedForSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "numTrustedHops": {
+          "type": "integer"
+        },
+        "trustedCIDRs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     }
   },
