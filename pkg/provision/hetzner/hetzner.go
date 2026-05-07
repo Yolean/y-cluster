@@ -321,6 +321,15 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 			zap.String("dnsHintIP", lbIPv4),
 		)
+		// Apply the per-cluster Gateway resource. envoy-gateway
+		// only spawns its data-plane Pod (and the LoadBalancer
+		// Service that klipper-lb binds to host:80) when a Gateway
+		// referencing this GatewayClass exists. Without this step
+		// the Hetzner LB targets a node with nothing on :80 and
+		// the LB health check stays red.
+		if err := c.installDefaultGateway(ctx); err != nil {
+			return nil, fmt.Errorf("install default Gateway: %w", err)
+		}
 	}
 
 	// Phase 2: install the in-cluster reaper Job. Sleeps for

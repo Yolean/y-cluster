@@ -3,14 +3,17 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/example"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 )
@@ -288,4 +291,155 @@ func TestHetzner_RejectUpstream(t *testing.T) {
 	default:
 		t.Errorf("reaper Pod phase = %q after rejectUpstream; want Running/Succeeded (lockdown raced the image pull?)", string(phase))
 	}
+}
+
+// TestHetzner_GatewayExample covers the operator-host -> Hetzner LB
+// -> node:80 -> envoy-gateway -> HTTPRoute -> backend Pod path
+// end-to-end:
+//
+//   1. Provision a Hetzner cluster (which now installs the
+//      per-cluster default Gateway in y-cluster-gateway).
+//   2. Resolve the LB public IPv4 from the per-cluster
+//      GatewayClass dns-hint-ip annotation (set by Provision).
+//   3. Install the example workload via pkg/example.Install
+//      with a hostname matching the default Gateway's wildcard.
+//   4. curl --resolve <hostname>:443:<lb-ip> https://<hostname>
+//      and assert the static PublicResponse comes back.
+//
+// Uses curl --resolve so /etc/hosts stays untouched -- the
+// operator-side workflow we ship can use the same trick to
+// verify provisions without root access. Hostname must match
+// the HTTPRoute exactly because envoy-gateway routes by Host
+// header, not by destination IP.
+func TestHetzner_GatewayExample(t *testing.T) {
+	if os.Getenv("HCLOUD_TOKEN") == "" {
+		t.Skip("HCLOUD_TOKEN unset; opt in to the hetzner e2e by exporting it")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	logger, _ := zap.NewDevelopment()
+
+	ctxName := "y-c-e2e-" + strings.ToLower(strings.ReplaceAll(t.Name(), "_", "-"))
+	if len(ctxName) > 50 {
+		ctxName = ctxName[:50]
+	}
+	t.Setenv(hetzner.CacheDirEnv, t.TempDir())
+
+	cfg := config.HetznerConfig{
+		CommonConfig: config.CommonConfig{
+			Provider: config.ProviderHetzner,
+			Context:  ctxName,
+		},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	if _, err := hetzner.Provision(ctx, cfg, logger); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Logf("teardown: %v", err)
+		}
+	})
+
+	// Read the LB public IP off the GatewayClass annotation
+	// Provision stamped on it -- the same lookup `y-cluster
+	// gateway state | jq` would do, just a bit terser.
+	jsonpath := "{.metadata.annotations['yolean\\.se/dns-hint-ip']}"
+	lbIPBytes, err := exec.CommandContext(ctx,
+		"kubectl", "--context="+ctxName,
+		"get", "gatewayclass", cfg.Gateway.ClassName,
+		"-o", "jsonpath="+jsonpath,
+	).Output()
+	if err != nil {
+		t.Fatalf("get GatewayClass dns-hint-ip: %v", err)
+	}
+	lbIP := strings.TrimSpace(string(lbIPBytes))
+	if lbIP == "" {
+		t.Fatalf("dns-hint-ip annotation empty on GatewayClass %q", cfg.Gateway.ClassName)
+	}
+	t.Logf("LB public IP: %s", lbIP)
+
+	// Hostname must match the default Gateway's wildcard
+	// (*.<context>.<lbGroup>.<fqdnDomain>) for envoy-gateway to
+	// accept the HTTPRoute's parentRef. Use a sub-host that
+	// substitutes cleanly into both.
+	hostname := "hello." + ctxName + "." + cfg.LBGroup + "." + cfg.FQDNDomain
+
+	if err := example.Install(ctx, example.InstallOptions{
+		KubectlContext:   ctxName,
+		GatewayNamespace: hetzner.DefaultGatewayNamespace,
+		GatewayName:      hetzner.DefaultGatewayName,
+		Hostname:         hostname,
+		Logger:           logger,
+	}); err != nil {
+		t.Fatalf("example.Install: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := example.Uninstall(context.Background(), ctxName, logger); err != nil {
+			t.Logf("example.Uninstall: %v", err)
+		}
+	})
+
+	// Wait for the example Deployment to be ready before curling.
+	// Resource is small (16Mi mem) so this is fast in practice;
+	// 90s ceiling guards against a slow first-pull.
+	rollout := exec.CommandContext(ctx,
+		"kubectl", "--context="+ctxName,
+		"-n", example.Namespace,
+		"rollout", "status", "deployment/"+example.WorkloadName,
+		"--timeout=90s",
+	)
+	rollout.Stdout, rollout.Stderr = os.Stdout, os.Stderr
+	if err := rollout.Run(); err != nil {
+		t.Fatalf("rollout status example deployment: %v", err)
+	}
+
+	// Wait for the envoy-gateway-managed data-plane Pod to come
+	// online (the LoadBalancer Service that klipper-lb binds to
+	// host:80 only appears once envoy-gateway provisions the
+	// data plane in response to the Gateway resource). Wait via
+	// kubectl wait on the deployment label envoy-gateway sets.
+	waitDP := exec.CommandContext(ctx,
+		"kubectl", "--context="+ctxName,
+		"-n", "envoy-gateway-system",
+		"wait", "--for=condition=Available",
+		"deployment", "-l", "gateway.envoyproxy.io/owning-gateway-name="+hetzner.DefaultGatewayName,
+		"--timeout=120s",
+	)
+	waitDP.Stdout, waitDP.Stderr = os.Stdout, os.Stderr
+	if err := waitDP.Run(); err != nil {
+		t.Fatalf("wait for envoy-gateway data plane: %v", err)
+	}
+
+	// curl --resolve so /etc/hosts stays untouched. -k accepts
+	// the LB's self-signed cert; --max-time guards a hung
+	// request. We poll up to 60s because envoy-gateway's xDS
+	// programming and the LB's health check take a moment to
+	// converge after the data plane comes up.
+	deadline := time.Now().Add(90 * time.Second)
+	var lastOut, lastErr []byte
+	for time.Now().Before(deadline) {
+		var stdout, stderr bytes.Buffer
+		curl := exec.CommandContext(ctx, "curl",
+			"-sk",
+			"--max-time", "10",
+			"--resolve", hostname+":443:"+lbIP,
+			"https://"+hostname,
+		)
+		curl.Stdout, curl.Stderr = &stdout, &stderr
+		runErr := curl.Run()
+		lastOut, lastErr = stdout.Bytes(), stderr.Bytes()
+		if runErr == nil && strings.Contains(string(lastOut), example.PublicResponse) {
+			t.Logf("curl --resolve hit the example workload: %q", strings.TrimSpace(string(lastOut)))
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("curl never returned the expected response within 90s\nlast stdout: %s\nlast stderr: %s",
+		string(lastOut), string(lastErr))
 }
