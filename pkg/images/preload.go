@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/minio/minio-go/v7"
 	"go.uber.org/zap"
 )
@@ -189,7 +190,97 @@ func BuildPreloadScript(entry IndexEntry, urls map[string]string) string {
 	}
 	// tar | ctr import. -n k8s.io is the namespace kubelet reads.
 	b.WriteString("tar -cf - -C \"$LAYOUT\" . | sudo k3s ctr -n k8s.io image import -\n")
+	// Re-tag under every form kubelet might canonicalize to.
+	// `ctr image import` stores under the OCI layout's
+	// `org.opencontainers.image.ref.name` annotation -- which is
+	// the operator's input ref (e.g. "hashicorp/http-echo:1.0.0").
+	// kubelet, asked to schedule a Pod with image
+	// "hashicorp/http-echo:1.0.0", canonicalizes to
+	// "docker.io/hashicorp/http-echo:1.0.0" before consulting
+	// containerd, finds nothing under that ref, and pulls.
+	//
+	// Add an alias under the canonical Docker Hub forms so the
+	// pre-load is actually visible to kubelet. ctr image tag exits
+	// non-zero when source == target; `|| true` swallows that
+	// (intentional no-op on already-canonical refs like
+	// `registry.k8s.io/pause:3.10`).
+	for _, alias := range canonicalAliasesForKubelet(entry.Ref) {
+		b.WriteString("sudo k3s ctr -n k8s.io image tag --force ")
+		b.WriteString(shellSingleQuote(entry.Ref))
+		b.WriteString(" ")
+		b.WriteString(shellSingleQuote(alias))
+		b.WriteString(" >/dev/null 2>&1 || true\n")
+	}
 	return b.String()
+}
+
+// canonicalAliasesForKubelet returns the ref forms kubelet may
+// canonicalize an image: tag to before consulting containerd. Two
+// cases matter:
+//
+//   - Docker Hub refs (no registry, or "index.docker.io" / "docker.io"
+//     prefix) get aliased to BOTH "docker.io/<repo>:<tag>" and
+//     "index.docker.io/<repo>:<tag>" -- containerd treats them as
+//     the same registry, but the stored ref-string in the image
+//     store can be either, and kubelet's lookup uses
+//     "docker.io/...".
+//   - Refs already pinned to an explicit registry (registry.k8s.io,
+//     ghcr.io, quay.io, etc.) need no alias -- the imported ref
+//     already matches kubelet's canonicalization.
+//
+// Returns refs distinct from the input, so the script never tries
+// `ctr image tag X X` (which would fail with "image already exists
+// with this name").
+func canonicalAliasesForKubelet(ref string) []string {
+	parsed, err := name.ParseReference(ref)
+	if err != nil {
+		// Best-effort: an unparsable ref shouldn't have made it
+		// through `images push`, but if it did, return no aliases
+		// so the script just runs the import and skips tagging.
+		return nil
+	}
+	registry := parsed.Context().RegistryStr()
+	repo := parsed.Context().RepositoryStr()
+	identifier := parsed.Identifier() // tag or digest part
+	// parsed.Name() returns "index.docker.io/<repo>:<tag>" for the
+	// Docker Hub case. The Identifier() boundary is `:` for tags
+	// and `@` for digests; reproduce the original separator.
+	sep := ":"
+	if strings.HasPrefix(identifier, "sha256:") {
+		sep = "@"
+	}
+	var aliases []string
+	if registry == "index.docker.io" {
+		// Standard kubelet canonicalisation: "docker.io/<repo>:<tag>".
+		// Also keep "index.docker.io/<repo>:<tag>" so a kubelet that
+		// canonicalizes to either form finds the image.
+		aliases = append(aliases,
+			"docker.io/"+repo+sep+identifier,
+			"index.docker.io/"+repo+sep+identifier,
+		)
+	} else {
+		// Already-canonical (registry.k8s.io, ghcr.io, etc.): the
+		// imported ref form matches kubelet's lookup as-is.
+		aliases = append(aliases, registry+"/"+repo+sep+identifier)
+	}
+	// Drop any alias that equals the input ref (would fail tag
+	// "X X"; nothing to add).
+	out := aliases[:0]
+	for _, a := range aliases {
+		if a != ref {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// shellSingleQuote wraps a string for safe inclusion as a single
+// shell argument inside `'...'` quotes. Mirrors the URL escaping
+// in BuildPreloadScript but for refs (which can contain `'` in
+// pathological cases -- registry.k8s.io is fine, but operator-
+// invented test repos might not be).
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // dirOf returns the parent directory of a relative path. For

@@ -119,6 +119,80 @@ func TestBuildPreloadScript_V2_SharedBlobs(t *testing.T) {
 	}
 }
 
+// TestCanonicalAliasesForKubelet pins the kubelet-canonicalisation
+// rules. The shipping bug this guards against: pre-loaded image
+// is in containerd's k8s.io namespace under "hashicorp/http-echo:1.0.0",
+// kubelet schedules a Pod with image "hashicorp/http-echo:1.0.0",
+// canonicalises to "docker.io/hashicorp/http-echo:1.0.0" before
+// the containerd lookup, finds nothing, and pulls. Adding the
+// "docker.io/..." alias closes that gap.
+func TestCanonicalAliasesForKubelet(t *testing.T) {
+	cases := map[string][]string{
+		// Docker Hub two-segment: aliases under both forms.
+		"hashicorp/http-echo:1.0.0": {
+			"docker.io/hashicorp/http-echo:1.0.0",
+			"index.docker.io/hashicorp/http-echo:1.0.0",
+		},
+		// Docker Hub one-segment (library/...): same shape.
+		"hello-world:latest": {
+			"docker.io/library/hello-world:latest",
+			"index.docker.io/library/hello-world:latest",
+		},
+		// Already-canonical (non-Docker Hub registry): no
+		// alias needed (the ref form matches kubelet's lookup
+		// already; tagging X to X would fail).
+		"registry.k8s.io/pause:3.10": nil,
+		"ghcr.io/yolean/foo:v1":      nil,
+		// Already prefixed with docker.io: produce an
+		// index.docker.io/... alias (and skip the docker.io/
+		// alias since it equals input).
+		"docker.io/library/redis:7.2": {
+			"index.docker.io/library/redis:7.2",
+		},
+		// Digest form: separator becomes `@` not `:`.
+		"hashicorp/http-echo@sha256:abcdef0000000000000000000000000000000000000000000000000000000000": {
+			"docker.io/hashicorp/http-echo@sha256:abcdef0000000000000000000000000000000000000000000000000000000000",
+			"index.docker.io/hashicorp/http-echo@sha256:abcdef0000000000000000000000000000000000000000000000000000000000",
+		},
+	}
+	for ref, want := range cases {
+		got := canonicalAliasesForKubelet(ref)
+		if len(got) != len(want) {
+			t.Errorf("%q: got %v aliases (%d), want %v (%d)", ref, got, len(got), want, len(want))
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("%q[%d]: got %q, want %q", ref, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// TestBuildPreloadScript_TagsCanonicalAliases: the script the
+// node runs must include a `ctr image tag` step for each
+// canonical alias. Verifies the tag command is in scope.
+func TestBuildPreloadScript_TagsCanonicalAliases(t *testing.T) {
+	entry := IndexEntry{
+		Ref:    "hashicorp/http-echo:1.0.0",
+		Digest: "sha256:abc",
+		Prefix: "oci/hashicorp_http-echo--1.0.0/sha256-abc/",
+		Files:  []string{"index.json"},
+	}
+	got := BuildPreloadScript(entry, map[string]string{
+		"index.json": "https://example.test/index.json",
+	})
+	for _, want := range []string{
+		"ctr -n k8s.io image tag --force 'hashicorp/http-echo:1.0.0' 'docker.io/hashicorp/http-echo:1.0.0'",
+		"ctr -n k8s.io image tag --force 'hashicorp/http-echo:1.0.0' 'index.docker.io/hashicorp/http-echo:1.0.0'",
+		"|| true", // swallow tag-when-already-equal failures
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preload script missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestBuildPreloadScript_V1_BackCompat: a v1 entry (BlobDigests
 // empty, blob paths in Files) still produces a working script.
 // Pre-load must remain backward-compatible so an operator who
