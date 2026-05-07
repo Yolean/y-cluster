@@ -681,7 +681,7 @@ mkdir -p "$CFG_DIR"
     echo "name: $NAME"
     echo "context: $KUBECTX"
     [ -n "${APP_SSH_PORT:-}" ] && printf 'sshPort: "%s"\n' "$APP_SSH_PORT"
-    echo 'memory: "4096"'
+    echo 'memory: "8192"'
     echo 'cpus: "2"'
     echo 'diskSize: "40G"'
     if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_HTTPS_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
