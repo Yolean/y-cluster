@@ -81,3 +81,15 @@ func deleteState(cacheDir, context string) error {
 	}
 	return nil
 }
+
+// HasState reports whether a hetzner state sidecar exists for the
+// given context in the default cache dir. Lifecycle subcommands
+// that operate on a stopped cluster (start, prepare-export) cannot
+// use cluster.Lookup -- a stopped Hetzner server still exists in
+// the project, but the predicate-style probes prefer not to hit the
+// API just to disambiguate which provisioner shipped the context.
+// Sidecar presence is a cheap, file-system-only signal.
+func HasState(contextName string) bool {
+	_, err := os.Stat(statePath(CacheDir(), contextName))
+	return err == nil
+}

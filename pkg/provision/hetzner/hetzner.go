@@ -496,6 +496,84 @@ func (c *Cluster) PublicIPv4() string { return c.state.IPv4 }
 // to assert what Provision wrote without poking the file directly.
 func (c *Cluster) State() state { return c.state }
 
+// Stop issues a graceful ACPI shutdown via the Hetzner API. The
+// server stays in the project (and thus continues billing the disk;
+// Hetzner has no "stopped, not billed" state for cx-class servers);
+// the value of stop/start over teardown/provision is preserving the
+// cluster identity (server ID, IPv4, kubeconfig context, in-cluster
+// state) across breaks without re-installing k3s.
+//
+// Operators wanting to free billing entirely should run
+// `y-cluster teardown` instead.
+func Stop(ctx context.Context, contextName string, logger *zap.Logger) error {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	hc, err := newClient()
+	if err != nil {
+		return err
+	}
+	srv, _, err := hc.Server.GetByName(ctx, contextName)
+	if err != nil {
+		return fmt.Errorf("describe server %q: %w", contextName, err)
+	}
+	if srv == nil {
+		return fmt.Errorf("no Hetzner server named %q in this project", contextName)
+	}
+	logger.Info("hcloud server shutdown",
+		zap.Int64("id", srv.ID), zap.String("name", srv.Name))
+	action, _, err := hc.Server.Shutdown(ctx, srv)
+	if err != nil {
+		return fmt.Errorf("shutdown server: %w", err)
+	}
+	if action != nil {
+		if err := waitForActions(ctx, hc, []*hcloud.Action{action}); err != nil {
+			return fmt.Errorf("wait for shutdown: %w", err)
+		}
+	}
+	return nil
+}
+
+// Start powers on a server stopped by Stop. Returns the refreshed
+// public IPv4 in case Hetzner rotated it (it doesn't, in practice,
+// but the contract leaves the door open for floating-IP setups).
+func Start(ctx context.Context, contextName string, logger *zap.Logger) (string, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	hc, err := newClient()
+	if err != nil {
+		return "", err
+	}
+	srv, _, err := hc.Server.GetByName(ctx, contextName)
+	if err != nil {
+		return "", fmt.Errorf("describe server %q: %w", contextName, err)
+	}
+	if srv == nil {
+		return "", fmt.Errorf("no Hetzner server named %q in this project; nothing to start (run `y-cluster provision` to create one)", contextName)
+	}
+	logger.Info("hcloud server poweron",
+		zap.Int64("id", srv.ID), zap.String("name", srv.Name))
+	action, _, err := hc.Server.Poweron(ctx, srv)
+	if err != nil {
+		return "", fmt.Errorf("poweron server: %w", err)
+	}
+	if action != nil {
+		if err := waitForActions(ctx, hc, []*hcloud.Action{action}); err != nil {
+			return "", fmt.Errorf("wait for poweron: %w", err)
+		}
+	}
+	// Re-fetch to pick up the post-boot public-net snapshot.
+	srv, _, err = hc.Server.GetByID(ctx, srv.ID)
+	if err != nil {
+		return "", fmt.Errorf("re-describe server id=%d: %w", srv.ID, err)
+	}
+	if srv != nil && srv.PublicNet.IPv4.IP != nil {
+		return srv.PublicNet.IPv4.IP.String(), nil
+	}
+	return "", nil
+}
+
 // waitForSSH polls the configured ystack@<ipv4>:22 until a trivial
 // remote `true` succeeds or timeout fires. Hetzner servers usually
 // reach SSH within ~30s of create-action completion; the longer

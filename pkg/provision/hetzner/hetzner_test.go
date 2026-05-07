@@ -112,3 +112,26 @@ func TestCacheDir_EnvOverride(t *testing.T) {
 		t.Errorf("CacheDir env override: got %q, want %q", got, tmp)
 	}
 }
+
+// TestHasState pins the sidecar-presence predicate the lifecycle
+// commands (start, prepare-export) use to decide whether a context
+// was provisioned by the hetzner backend without hitting the
+// Hetzner API. Sidecar-present <=> hetzner-provisioned.
+func TestHasState(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv(CacheDirEnv, tmp)
+	if HasState("never-provisioned") {
+		t.Errorf("HasState should be false for an unknown context")
+	}
+	if err := saveState(tmp, state{
+		Context:  "alice-dev",
+		ServerID: 1,
+		IPv4:     "203.0.113.1",
+		SSHUser:  "ystack",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !HasState("alice-dev") {
+		t.Errorf("HasState should be true after saveState")
+	}
+}
