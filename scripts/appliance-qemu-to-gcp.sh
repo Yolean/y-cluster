@@ -97,6 +97,21 @@ Environment:
   ASSUME_YES        Skip BOTH confirmations and proceed end-to-end.
                     Also suppresses the optional TLS-LB prompt; set
                     TLS_DOMAINS alongside to opt in unattended.
+  APPLIANCE_SEED_CMD  Optional shell cmd to run after echo install,
+                      before PROMPT 1. Receives the
+                      Y_CLUSTER_CURRENT_* env surface (build-side
+                      ports, kubeconfig context, ssh-key path).
+                      Typical: cd into a customer repo and apply
+                      kustomize bases that populate /data/yolean.
+                      Non-zero exit aborts; local cluster left up.
+  APPLIANCE_VERIFY_CMD  Optional shell cmd to run after the GCP
+                        deploy + optional TLS LB, before final
+                        summary. Receives the same Y_CLUSTER_CURRENT_*
+                        surface plus REMOTE_VM_IP / REMOTE_LB_IP /
+                        REMOTE_DOMAINS / REMOTE_SCHEME so a remote
+                        probe can curl --resolve through the
+                        deployed VM. Non-zero exit aborts; VM and
+                        LB stay up for inspection.
   TLS_DOMAINS       Comma-separated FQDNs for an optional regional
                     External HTTPS LoadBalancer with a self-signed
                     cert (e.g., appliance.example.com,admin.appliance.example.com).
@@ -186,6 +201,42 @@ prompt_yes_default() {
         n|no) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+# current_env exports the Y_CLUSTER_CURRENT_* surface a hook
+# cmd reads via printenv. Call right before invoking the cmd
+# so any vars computed since the last invocation (PUBLIC_IP,
+# BUNDLE_DIR, TLS-LB IP) are picked up. Vars not yet known at
+# the call site are exported as empty strings (not unset) so
+# a verify script can read them unconditionally.
+current_env() {
+    export Y_CLUSTER_CURRENT_NAME="$NAME"
+    export Y_CLUSTER_CURRENT_KUBECTX="$KUBECTX"
+    export Y_CLUSTER_CURRENT_LOCAL_HTTP_PORT="${APP_HTTP_PORT:-80}"
+    export Y_CLUSTER_CURRENT_LOCAL_HTTPS_PORT="${APP_HTTPS_PORT:-443}"
+    export Y_CLUSTER_CURRENT_LOCAL_API_PORT="${APP_API_PORT:-6443}"
+    export Y_CLUSTER_CURRENT_LOCAL_SSH_PORT="${APP_SSH_PORT:-2222}"
+    export Y_CLUSTER_CURRENT_LOCAL_SSH_KEY="${CACHE_DIR:-}/${NAME}-ssh"
+    export Y_CLUSTER_CURRENT_BUNDLE_DIR="${BUNDLE_DIR:-}"
+    export Y_CLUSTER_CURRENT_REMOTE_VM_NAME="${VM_NAME:-}"
+    export Y_CLUSTER_CURRENT_REMOTE_VM_IP="${PUBLIC_IP:-}"
+    export Y_CLUSTER_CURRENT_REMOTE_DOMAINS="${TLS_DOMAINS:-}"
+    if [[ -n "${TLS_DOMAINS:-}" ]]; then
+        # do_tls_frontend keeps lb_ip in local scope; re-query
+        # gcloud here so the verify hook can read it.
+        Y_CLUSTER_CURRENT_REMOTE_LB_IP=$(gcloud compute addresses describe "${NAME}-tls-ip" \
+            --project="$GCP_PROJECT" --region="$GCP_REGION" \
+            --format='value(address)' 2>/dev/null \
+            || true) # y-script-lint:disable=or-true # absent IP -> empty var, hook decides
+        export Y_CLUSTER_CURRENT_REMOTE_LB_IP
+        export Y_CLUSTER_CURRENT_REMOTE_SCHEME=https
+    else
+        export Y_CLUSTER_CURRENT_REMOTE_LB_IP=""
+        export Y_CLUSTER_CURRENT_REMOTE_SCHEME=http
+    fi
+    export Y_CLUSTER_CURRENT_GCP_PROJECT="$GCP_PROJECT"
+    export Y_CLUSTER_CURRENT_GCP_ZONE="$GCP_ZONE"
+    export Y_CLUSTER_CURRENT_GCP_REGION="$GCP_REGION"
 }
 
 # do_teardown deletes GCP resources owned by this script's
@@ -733,6 +784,23 @@ stage "installing echo workload (Gateway listener + baseline route)"
 kubectl --context="$KUBECTX" -n y-cluster wait \
     --for=condition=Available deployment/echo --timeout=180s
 
+# Seed hook: caller-supplied cmd runs after echo is up but
+# before PROMPT 1 / TLS_DOMAINS=auto resolution. Customer
+# workloads applied here (mariadb, kafka, keycloak, HTTPRoute /
+# GRPCRoute resources, etc.) populate /data/yolean for the data-seed
+# extraction in prepare-export AND give TLS_DOMAINS=auto real
+# hostnames to derive from. Non-zero exit aborts; local
+# cluster stays up for inspection (set -e + the
+# "aborted; local cluster left running" semantics of the
+# upcoming PROMPT 1 path are what the operator falls back on).
+if [[ -n "${APPLIANCE_SEED_CMD:-}" ]]; then
+    stage "applying seed (APPLIANCE_SEED_CMD)"
+    current_env
+    # set -o pipefail so a `cmd | tee log` chain in the
+    # caller's string doesn't swallow upstream failures.
+    bash -c "set -o pipefail; $APPLIANCE_SEED_CMD"
+fi
+
 # === Stage 2: hands-on prompt ===
 SSH_KEY="$CACHE_DIR/$NAME-ssh"
 cat <<EOF
@@ -1149,6 +1217,20 @@ if [[ -z "${TLS_DOMAINS:-}" && -z "${ASSUME_YES:-}" ]]; then
 fi
 if [[ -n "${TLS_DOMAINS:-}" ]]; then
     do_tls_frontend "$TLS_DOMAINS"
+fi
+
+# Verify hook: caller-supplied cmd runs after the GCE VM is
+# up + optional TLS LB is configured. Receives the full
+# Y_CLUSTER_CURRENT_* surface including REMOTE_VM_IP,
+# REMOTE_LB_IP (re-queried by current_env), REMOTE_DOMAINS,
+# REMOTE_SCHEME -- enough to compose curl --resolve probes
+# without /etc/hosts. Non-zero exit aborts; the VM and LB
+# stay up for inspection.
+if [[ -n "${APPLIANCE_VERIFY_CMD:-}" ]]; then
+    stage "remote verify (APPLIANCE_VERIFY_CMD)"
+    current_env
+    # Same pipefail discipline as APPLIANCE_SEED_CMD.
+    bash -c "set -o pipefail; $APPLIANCE_VERIFY_CMD"
 fi
 
 if [[ -z "${KEEP_LOCAL:-}" ]]; then
