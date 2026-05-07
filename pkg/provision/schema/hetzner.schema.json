@@ -42,6 +42,10 @@
           "$ref": "#/$defs/GatewayConfig",
           "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs"
         },
+        "imageCache": {
+          "$ref": "#/$defs/HetznerImageCache",
+          "description": "Hetzner Object Storage-backed image cache. Leave bucket empty to disable; see HETZNER_PROVISIONER.md phase 6."
+        },
         "k3s": {
           "$ref": "#/$defs/K3sConfig",
           "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
@@ -104,6 +108,29 @@
       "required": [
         "provider"
       ],
+      "type": "object"
+    },
+    "HetznerImageCache": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "description": "Hetzner Object Storage bucket holding the OCI layouts + index.json. Empty disables the image-cache feature.",
+          "type": "string"
+        },
+        "indexKey": {
+          "description": "Object key within Bucket holding the cache index. Defaults to index.json when bucket is set.",
+          "type": "string"
+        },
+        "region": {
+          "description": "Hetzner Object Storage region (hel1 / fsn1 / nbg1). Defaults to hel1 when bucket is set.",
+          "type": "string"
+        },
+        "rejectUpstream": {
+          "default": false,
+          "description": "When true",
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "K3sConfig": {

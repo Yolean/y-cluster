@@ -64,9 +64,83 @@ type HetznerConfig struct {
 	// miss never accidentally routes to a real domain.
 	FQDNDomain string `yaml:"fqdnDomain,omitempty"  json:"fqdnDomain,omitempty"  jsonschema:"default=local.test,description=Parent domain for per-context FQDNs. Per-context FQDN is <context>.<lbGroup>.<fqdnDomain>. Default uses the RFC 6761 reserved test TLD."`
 
+	// ImageCache configures the Hetzner Object Storage-backed image
+	// cache (phase 6 in HETZNER_PROVISIONER.md). Empty Bucket
+	// disables the feature entirely; defaults preserve the
+	// pull-from-upstream behavior of phases 1-5.
+	ImageCache HetznerImageCache `yaml:"imageCache,omitempty" json:"imageCache,omitempty" jsonschema:"description=Hetzner Object Storage-backed image cache. Leave bucket empty to disable; see HETZNER_PROVISIONER.md phase 6."`
+
 	// Dir is filled at load time from the absolute path of the
 	// directory the config came from. Not part of the schema.
 	Dir string `yaml:"-" json:"-" jsonschema:"-"`
+}
+
+// HetznerImageCache configures the per-cluster S3-backed image
+// cache. The fields land on HetznerConfig.ImageCache and the
+// validation rules live on this type so Validate's call site
+// stays readable.
+//
+// All fields are optional. The cache is OFF unless Bucket is set;
+// the other fields fill in regional defaults when Bucket is set
+// and the operator left them blank.
+type HetznerImageCache struct {
+	// Bucket is the Hetzner Object Storage bucket holding the
+	// per-cluster index + OCI layouts. Empty disables the cache.
+	Bucket string `yaml:"bucket,omitempty" json:"bucket,omitempty" jsonschema:"description=Hetzner Object Storage bucket holding the OCI layouts + index.json. Empty disables the image-cache feature."`
+
+	// Region is the Hetzner Object Storage region. Defaults to
+	// hel1 (matching the cluster Location default) at runtime --
+	// applyDefaults only fires when Bucket is set, so the
+	// jsonschema tag intentionally omits a `default=` to keep
+	// the reflection-based applyTagDefaults from auto-populating
+	// regional surface area on a disabled cache.
+	Region string `yaml:"region,omitempty" json:"region,omitempty" jsonschema:"description=Hetzner Object Storage region (hel1 / fsn1 / nbg1). Defaults to hel1 when bucket is set."`
+
+	// IndexKey is the object key within Bucket holding the
+	// (ref -> digest -> layout-prefix) map. Defaults to index.json
+	// at the bucket root, applied at runtime only when the cache
+	// is enabled (see Region's note above).
+	IndexKey string `yaml:"indexKey,omitempty" json:"indexKey,omitempty" jsonschema:"description=Object key within Bucket holding the cache index. Defaults to index.json when bucket is set."`
+
+	// RejectUpstream, when true, drops a /etc/rancher/k3s/registries.yaml
+	// on the node that maps every wildcard mirror to the empty set,
+	// turning any upstream image pull into a hard error. Off by
+	// default; intended for e2e runs that need to surface cache
+	// misses instead of silently pulling from upstream.
+	RejectUpstream bool `yaml:"rejectUpstream,omitempty" json:"rejectUpstream,omitempty" jsonschema:"default=false,description=When true, k3s refuses to pull from any upstream registry. Cache misses become hard errors. Off by default."`
+}
+
+// Enabled is the canonical "is the cache configured" check. Empty
+// Bucket = disabled regardless of other fields, so a partially-
+// filled config (e.g. only Region set) doesn't accidentally
+// activate the feature.
+func (c HetznerImageCache) Enabled() bool { return c.Bucket != "" }
+
+// hetznerImageCacheRegions is the union of regions Hetzner Object
+// Storage currently exposes. Validate against the union so a typo
+// (`hel-1`, `helsinki`) fails at config-load time, not deep inside
+// a request that the regional endpoint won't resolve.
+var hetznerImageCacheRegions = map[string]bool{
+	"hel1": true,
+	"fsn1": true,
+	"nbg1": true,
+}
+
+func (c HetznerImageCache) validate() error {
+	if !c.Enabled() {
+		// Surface obvious config mistakes: a region or
+		// rejectUpstream set without a bucket is dead weight at
+		// best and a "did the operator forget the bucket?"
+		// landmine at worst.
+		if c.Region != "" || c.IndexKey != "" || c.RejectUpstream {
+			return errInvalid("imageCache fields set but bucket is empty; either set bucket or remove the other imageCache fields")
+		}
+		return nil
+	}
+	if !hetznerImageCacheRegions[c.Region] {
+		return errInvalid("imageCache.region %q is not a known Hetzner Object Storage region; expected one of hel1, fsn1, nbg1", c.Region)
+	}
+	return nil
 }
 
 // SetDir satisfies configfile.DirAware so the provisioner can
@@ -114,6 +188,23 @@ func (c *HetznerConfig) ApplyDefaults() {
 	if c.AutoTeardownHours == 0 {
 		c.AutoTeardownHours = 8
 	}
+	c.ImageCache.applyDefaults()
+}
+
+// applyDefaults fills in regional defaults for an enabled cache;
+// a disabled cache (empty Bucket) keeps zero-values across the
+// board so the operator can `git diff` a config without seeing
+// noise from defaults that don't actually do anything.
+func (c *HetznerImageCache) applyDefaults() {
+	if !c.Enabled() {
+		return
+	}
+	if c.Region == "" {
+		c.Region = "hel1"
+	}
+	if c.IndexKey == "" {
+		c.IndexKey = "index.json"
+	}
 }
 
 // Validate checks the discriminator and Hetzner-specific
@@ -153,6 +244,9 @@ func (c *HetznerConfig) Validate() error {
 	case "", "airgap", "script":
 	default:
 		return errInvalid("k3s.install must be one of {airgap, script}, got %q", c.K3s.Install)
+	}
+	if err := c.ImageCache.validate(); err != nil {
+		return err
 	}
 	return nil
 }

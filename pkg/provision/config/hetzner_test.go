@@ -201,3 +201,81 @@ func TestHetzner_Validate_HappyPath(t *testing.T) {
 		t.Fatalf("happy path should pass: %v", err)
 	}
 }
+
+// TestHetzner_ImageCache_DisabledByDefault: an unconfigured
+// HetznerConfig must keep the cache disabled (Bucket empty) AND
+// must not auto-populate the region / index defaults. Defaults
+// are deliberately silent on a disabled cache so an operator who
+// `cat`s the loaded config sees zero-values, not vestigial
+// surface area.
+func TestHetzner_ImageCache_DisabledByDefault(t *testing.T) {
+	c := &HetznerConfig{CommonConfig: CommonConfig{
+		Provider: ProviderHetzner, Context: "alice-dev",
+	}}
+	c.ApplyDefaults()
+	if c.ImageCache.Enabled() {
+		t.Errorf("ImageCache.Enabled() = true on default config; want false")
+	}
+	if c.ImageCache.Region != "" || c.ImageCache.IndexKey != "" {
+		t.Errorf("ImageCache regional defaults applied to a disabled cache: %+v", c.ImageCache)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("disabled-cache config should validate: %v", err)
+	}
+}
+
+// TestHetzner_ImageCache_Defaults: enabling the cache (Bucket set)
+// makes Region + IndexKey fall back to hel1 / index.json.
+func TestHetzner_ImageCache_Defaults(t *testing.T) {
+	c := &HetznerConfig{
+		CommonConfig: CommonConfig{Provider: ProviderHetzner, Context: "alice-dev"},
+		ImageCache:   HetznerImageCache{Bucket: "y-cluster-examples"},
+	}
+	c.ApplyDefaults()
+	if c.ImageCache.Region != "hel1" {
+		t.Errorf("ImageCache.Region: %q (want hel1)", c.ImageCache.Region)
+	}
+	if c.ImageCache.IndexKey != "index.json" {
+		t.Errorf("ImageCache.IndexKey: %q (want index.json)", c.ImageCache.IndexKey)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("enabled-cache happy path should validate: %v", err)
+	}
+}
+
+// TestHetzner_ImageCache_RejectsBareFields: an operator who sets
+// rejectUpstream / region / indexKey but forgot the bucket gets a
+// loud error at config-load time, not a silent no-op when the
+// pre-load step skips because Bucket is empty.
+func TestHetzner_ImageCache_RejectsBareFields(t *testing.T) {
+	cases := []HetznerImageCache{
+		{Region: "hel1"},
+		{IndexKey: "alt-index.json"},
+		{RejectUpstream: true},
+	}
+	for _, ic := range cases {
+		c := &HetznerConfig{
+			CommonConfig: CommonConfig{Provider: ProviderHetzner, Context: "alice-dev"},
+			ImageCache:   ic,
+		}
+		c.ApplyDefaults()
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "bucket is empty") {
+			t.Errorf("imageCache=%+v should fail with bucket-empty error, got %v", ic, err)
+		}
+	}
+}
+
+// TestHetzner_ImageCache_RejectsUnknownRegion: typos in the region
+// (`hel-1`, `helsinki`) fail before any S3 endpoint is constructed.
+func TestHetzner_ImageCache_RejectsUnknownRegion(t *testing.T) {
+	c := &HetznerConfig{
+		CommonConfig: CommonConfig{Provider: ProviderHetzner, Context: "alice-dev"},
+		ImageCache:   HetznerImageCache{Bucket: "x", Region: "helsinki"},
+	}
+	c.ApplyDefaults()
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "not a known Hetzner") {
+		t.Errorf("region typo should fail with known-region error, got %v", err)
+	}
+}
