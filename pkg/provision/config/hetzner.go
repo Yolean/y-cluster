@@ -35,18 +35,20 @@ type HetznerConfig struct {
 	// qemu provisioner's convention.
 	SSHUser string `yaml:"sshUser,omitempty"     json:"sshUser,omitempty"     jsonschema:"default=ystack,description=Unprivileged user the y-cluster CLI SSHes as. Created by cloud-init at first boot."`
 
-	// AutoTeardownHours schedules a host-side at(1) job that
-	// runs `y-cluster teardown -c <dir>` after the configured
-	// duration. Default 8 hours, mandatory (zero / unset is
-	// treated as "use default" -- this is a dev-cluster, not a
-	// long-lived production VM, and a permanent dev cluster is
-	// what we're trying to prevent).
+	// AutoTeardownHours sets the deadline for the in-cluster
+	// reaper Job (see pkg/provision/hetzner/reaper.go). The Job
+	// sleeps the configured duration then issues hcloud delete
+	// calls for the server and (if no other lb-group members
+	// remain) the LB. Default 8 hours, mandatory (zero / unset
+	// is treated as "use default" -- this is a dev-cluster, not
+	// a long-lived production VM, and a permanent dev cluster
+	// is what we're trying to prevent).
 	//
-	// The trade is documented in HETZNER_PROVISIONER.md: if the
-	// dev's machine is offline at deadline, the job doesn't fire
-	// and the cluster leaks until the dev reboots. A server-side
-	// reaper is the planned mitigation but lives outside this
-	// branch.
+	// Trade documented in HETZNER_PROVISIONER.md: a cluster-side
+	// reaper survives operator-host loss; a node reboot resets
+	// the timer (acceptable for dev). An earlier on-host at(1)
+	// approach got reverted because a wiped operator laptop
+	// stranded paid Hetzner resources.
 	AutoTeardownHours int `yaml:"autoTeardownHours,omitempty" json:"autoTeardownHours,omitempty" jsonschema:"default=8,description=Hours until host-side auto-teardown fires. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24)."`
 
 	// LBGroup keys the per-developer shared LoadBalancer. Default

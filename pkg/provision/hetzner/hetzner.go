@@ -18,10 +18,11 @@
 //
 // Later phases bolt on:
 //
-//   - k3s install + envoy-gateway (phase 1 finish)
-//   - Auto-teardown via at(1)               (phase 2)
+//   - k3s install + envoy-gateway           (phase 1 finish)
+//   - Auto-teardown via in-cluster reaper Job (phase 2;
+//     supersedes the reverted at(1)-on-host approach)
 //   - Shared LB + TLS + dns-hint-ip          (phase 3)
-//   - images load --from-url=                (phase 4)
+//   - images load <archive|-|url>            (phase 4)
 //   - Per-dev .env defaults + polish         (phase 5)
 //
 // See specs/y-cluster/HETZNER_PROVISIONER.md.
