@@ -456,6 +456,18 @@ do_tls_frontend() {
         gcloud compute network-endpoint-groups create "${NAME}-tls-neg" \
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
             --network-endpoint-type=GCE_VM_IP_PORT --default-port=80 >/dev/null
+    fi
+    # Always (re-)attach the VM endpoint, regardless of whether
+    # the NEG already existed. GCE auto-removes endpoints when
+    # the instance they reference is deleted, which Stage 9 does
+    # on every build (delete+recreate the VM for idempotency).
+    # If the NEG survived from a prior run but the VM was recreated,
+    # its endpoint reference is gone and the LB has no backend.
+    # Skip the add when the endpoint is already attached so re-runs
+    # without VM recreation stay quiet.
+    if ! gcloud compute network-endpoint-groups list-network-endpoints "${NAME}-tls-neg" \
+            --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+            --format='value(instance)' 2>/dev/null | grep -Fxq "$VM_NAME"; then
         gcloud compute network-endpoint-groups update "${NAME}-tls-neg" \
             --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
             --add-endpoint="instance=$VM_NAME,port=80" >/dev/null
@@ -1264,14 +1276,17 @@ Appliance live in GCP.
                                 VMware -- same disk state)
 
 Connect:
-  ssh -i $SSH_KEY ystack@$PUBLIC_IP
-  curl http://$PUBLIC_IP/<your-route>
-
-kubectl from your laptop (apiserver not externally exposed):
-  ssh -L 6443:127.0.0.1:6443 -N -i $SSH_KEY ystack@$PUBLIC_IP &
+  # One-time per appliance, fetch the kubeconfig onto the laptop.
+  # (ssh can't stream a remote file to a local path AND give you
+  # an interactive shell on the same connection -- stdin/stdout
+  # is owned by the shell -- so this fetch is its own one-shot
+  # ssh, separate from the interactive one below.)
   ssh -i $SSH_KEY ystack@$PUBLIC_IP sudo cat /etc/rancher/k3s/k3s.yaml \\
-    > k3s-$VM_NAME.yaml
-  KUBECONFIG=k3s-$VM_NAME.yaml kubectl get nodes
+    > ~/.kube/y-appliance-portforwarded
+
+  # Interactive shell + apiserver tunnel; the tunnel stays up
+  # until you exit the shell.
+  ssh -i $SSH_KEY -L 6443:127.0.0.1:6443 ystack@$PUBLIC_IP
 
 Teardown when done:
   $0 teardown
