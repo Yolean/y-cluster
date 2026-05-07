@@ -139,6 +139,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(crictlCmd())
 	root.AddCommand(cacheCmd())
 	root.AddCommand(echoCmd())
+	root.AddCommand(gatewayCmd())
 	root.AddCommand(localstorageCmd())
 
 	return root

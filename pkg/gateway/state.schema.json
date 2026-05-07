@@ -1,0 +1,593 @@
+{
+  "$defs": {
+    "BackendTrafficPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "spec": true,
+        "status": {
+          "$ref": "#/$defs/PolicyStatus"
+        },
+        "targetRefs": true
+      },
+      "required": [
+        "namespace",
+        "name",
+        "spec",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ClientTrafficPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "spec": true,
+        "status": {
+          "$ref": "#/$defs/PolicyStatus"
+        },
+        "targetRefs": true
+      },
+      "required": [
+        "namespace",
+        "name",
+        "spec",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Envoy": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "object"
+        },
+        "source": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "GRPCRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "hostnames": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "parentRefs": true,
+        "rules": true,
+        "status": {
+          "$ref": "#/$defs/RouteStatus"
+        }
+      },
+      "required": [
+        "namespace",
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Gateway": {
+      "additionalProperties": false,
+      "properties": {
+        "gatewayClassName": {
+          "type": "string"
+        },
+        "listeners": {
+          "items": {
+            "$ref": "#/$defs/Listener"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/GatewayStatus"
+        }
+      },
+      "required": [
+        "namespace",
+        "name",
+        "gatewayClassName",
+        "listeners",
+        "status"
+      ],
+      "type": "object"
+    },
+    "GatewayClass": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "controllerName": {
+          "type": "string"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "controllerName"
+      ],
+      "type": "object"
+    },
+    "GatewayStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "listeners": {
+          "items": {
+            "$ref": "#/$defs/ListenerStatus"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "HTTPRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "hostnames": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "parentRefs": true,
+        "rules": true,
+        "status": {
+          "$ref": "#/$defs/RouteStatus"
+        }
+      },
+      "required": [
+        "namespace",
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "Listener": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedRoutes": true,
+        "hostname": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "tls": true
+      },
+      "required": [
+        "name",
+        "port",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "ListenerStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "attachedRoutes": {
+          "type": "integer"
+        },
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "programmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "attachedRoutes",
+        "programmed"
+      ],
+      "type": "object"
+    },
+    "PolicyAncestorStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "ancestorRef": true,
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "controllerName": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PolicyStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "ancestors": {
+          "items": {
+            "$ref": "#/$defs/PolicyAncestorStatus"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RouteParentStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "controllerName": {
+          "type": "string"
+        },
+        "parentRef": true
+      },
+      "type": "object"
+    },
+    "RouteStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "parents": {
+          "items": {
+            "$ref": "#/$defs/RouteParentStatus"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "State": {
+      "additionalProperties": false,
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "backendTrafficPolicies": {
+          "items": {
+            "$ref": "#/$defs/BackendTrafficPolicy"
+          },
+          "type": "array"
+        },
+        "clientTrafficPolicies": {
+          "items": {
+            "$ref": "#/$defs/ClientTrafficPolicy"
+          },
+          "type": "array"
+        },
+        "envoy": {
+          "$ref": "#/$defs/Envoy"
+        },
+        "fetchedAt": {
+          "type": "string"
+        },
+        "gatewayClass": {
+          "$ref": "#/$defs/GatewayClass"
+        },
+        "gateways": {
+          "items": {
+            "$ref": "#/$defs/Gateway"
+          },
+          "type": "array"
+        },
+        "grpcRoutes": {
+          "items": {
+            "$ref": "#/$defs/GRPCRoute"
+          },
+          "type": "array"
+        },
+        "httpRoutes": {
+          "items": {
+            "$ref": "#/$defs/HTTPRoute"
+          },
+          "type": "array"
+        },
+        "schemaVersion": {
+          "enum": [
+            "1"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
+        }
+      },
+      "required": [
+        "gateways",
+        "httpRoutes",
+        "grpcRoutes",
+        "clientTrafficPolicies",
+        "backendTrafficPolicies",
+        "fetchedAt",
+        "schemaVersion"
+      ],
+      "type": "object"
+    },
+    "Summary": {
+      "additionalProperties": false,
+      "properties": {
+        "listeners": {
+          "items": {
+            "$ref": "#/$defs/SummaryListener"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "listeners"
+      ],
+      "type": "object"
+    },
+    "SummaryBackend": {
+      "additionalProperties": false,
+      "properties": {
+        "redirect": {
+          "$ref": "#/$defs/SummaryRedirect"
+        },
+        "service": {
+          "$ref": "#/$defs/SummaryService"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "SummaryHost": {
+      "additionalProperties": false,
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "routes": {
+          "items": {
+            "$ref": "#/$defs/SummaryRoute"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "hostname",
+        "routes"
+      ],
+      "type": "object"
+    },
+    "SummaryListener": {
+      "additionalProperties": false,
+      "properties": {
+        "gateway": {
+          "type": "string"
+        },
+        "hosts": {
+          "items": {
+            "$ref": "#/$defs/SummaryHost"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "programmed": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "xForwardedFor": {
+          "$ref": "#/$defs/XForwardedForSettings"
+        }
+      },
+      "required": [
+        "gateway",
+        "name",
+        "port",
+        "protocol",
+        "programmed",
+        "hosts"
+      ],
+      "type": "object"
+    },
+    "SummaryMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SummaryRedirect": {
+      "additionalProperties": false,
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "scheme": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SummaryRoute": {
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "items": {
+            "$ref": "#/$defs/SummaryBackend"
+          },
+          "type": "array"
+        },
+        "matches": {
+          "items": {
+            "$ref": "#/$defs/SummaryMatch"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "matches",
+        "backends"
+      ],
+      "type": "object"
+    },
+    "SummaryService": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "XForwardedForSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "numTrustedHops": {
+          "type": "integer"
+        },
+        "trustedCIDRs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://yolean.se/y-cluster/schema/gateway-state.schema.json",
+  "$ref": "#/$defs/State",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

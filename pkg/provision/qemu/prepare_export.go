@@ -3,12 +3,15 @@ package qemu
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"go.uber.org/zap"
+
+	"github.com/Yolean/y-cluster/pkg/gateway"
 )
 
 // prepareInguestScript is the shared identity-reset script. The
@@ -30,22 +33,33 @@ import (
 //go:embed prepare_inguest.sh
 var prepareInguestScript string
 
-// PrepareExport strips host-specific identity from the offline
-// disk image so the same disk boots cleanly when imported on a
-// different hypervisor (VMware, KVM, cloud providers). It uses
-// libguestfs's virt-customize to mount the qcow2 (no boot, no
-// SSH, no host kernel involvement) and run the embedded
-// prepare-inguest.sh script inside the chrooted filesystem.
+// PrepareExport prepares the cluster's qcow2 for shipping as an
+// appliance image. Runs in two phases:
 //
-// The same script also runs on the Hetzner Packer build path
-// (inline, in a live VM); see prepareInguestScript above.
+//   - LIVE phase (cluster running): clears the per-deploy
+//     yolean.se/dns-hint-ip GatewayClass annotation so the
+//     customer's snapshot doesn't carry our LB IP, then dumps
+//     the reconciled Gateway state to <cacheDir>/<name>-
+//     gateway-state.json so the bundle ships a record of what
+//     the appliance looked like at export time. Then stops
+//     the cluster.
+//   - OFFLINE phase (cluster stopped): builds the data-seed
+//     tarball + runs virt-customize to identity-reset the
+//     filesystem, same as the prior behavior.
 //
-// VM must be stopped first; virt-customize refuses to operate
-// on a disk in use by a running qemu. Run order:
+// The same shared inguest script also runs on the Hetzner
+// Packer build path (inline, in a live VM); see
+// prepareInguestScript above.
+//
+// VM MUST BE RUNNING when invoked. Earlier versions of
+// PrepareExport required the VM to be stopped first (operator
+// ran `y-cluster stop && y-cluster prepare-export`). The new
+// live-phase steps need the apiserver, so callers should drop
+// the explicit `y-cluster stop` -- prepare-export stops the VM
+// itself between the live and offline phases. Reordered run:
 //
 //	y-cluster provision
-//	y-cluster stop
-//	y-cluster prepare-export
+//	y-cluster prepare-export   # prepare-export now stops internally
 //
 // Idempotent. A prepared appliance is no longer a usable dev
 // cluster locally; the next start runs cloud-init re-init and
@@ -55,6 +69,19 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	// Preflight tool checks first: surface "missing tool" errors
+	// before doing any cluster-side work that we'd then have to
+	// undo. virt-customize is needed in the offline phase;
+	// kubectl is needed in the live phase. Both should be
+	// addressable by a single `apt install` so it's reasonable
+	// to surface either error up front.
+	if _, err := exec.LookPath("virt-customize"); err != nil {
+		return fmt.Errorf("virt-customize not found in PATH; install with: sudo apt install libguestfs-tools")
+	}
+	if _, err := exec.LookPath("kubectl"); err != nil {
+		return fmt.Errorf("kubectl not found in PATH; install kubectl (prepare-export now snapshots reconciled Gateway state, which needs kubectl)")
+	}
+
 	cfg, err := loadState(cacheDir, name)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -62,16 +89,45 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 		}
 		return fmt.Errorf("load state: %w", err)
 	}
-	if running, _ := cfg.IsRunning(); running {
-		return fmt.Errorf("VM %q is running; run `y-cluster stop` first (virt-customize needs an offline disk)", name)
-	}
-	if _, err := exec.LookPath("virt-customize"); err != nil {
-		return fmt.Errorf("virt-customize not found in PATH; install with: sudo apt install libguestfs-tools")
+	if running, _ := cfg.IsRunning(); !running {
+		return fmt.Errorf("VM %q is not running; start the cluster first (prepare-export now needs the apiserver up to snapshot reconciled Gateway state and clear the per-deploy dns-hint-ip annotation -- it stops the VM internally before the offline phase)", name)
 	}
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if _, err := os.Stat(diskPath); err != nil {
 		return fmt.Errorf("disk image not found at %s: %w", diskPath, err)
 	}
+
+	// --- LIVE phase ---
+	// Clear the per-deploy dns-hint-ip annotation so the snapshot
+	// doesn't ship our LB IP. Then dump reconciled gateway state
+	// for the bundle. Both steps need the apiserver up.
+	logger.Info("clearing yolean.se/dns-hint-ip annotation on GatewayClass",
+		zap.String("context", cfg.Context))
+	if err := gateway.ClearDNSHintIPAnnotation(ctx, cfg.Context, "y-cluster"); err != nil {
+		return fmt.Errorf("clear dns-hint-ip: %w", err)
+	}
+	gatewayStatePath := filepath.Join(cacheDir, name+"-gateway-state.json")
+	logger.Info("snapshotting reconciled gateway state", zap.String("path", gatewayStatePath))
+	state, err := gateway.Fetch(ctx, cfg.Context)
+	if err != nil {
+		return fmt.Errorf("fetch gateway state: %w", err)
+	}
+	stateJSON, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal gateway state: %w", err)
+	}
+	if err := os.WriteFile(gatewayStatePath, append(stateJSON, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write gateway state: %w", err)
+	}
+
+	// Stop the VM. virt-customize (offline phase) needs the disk
+	// not in use by qemu; libguestfs does its own loopback mount.
+	logger.Info("stopping VM before offline phase", zap.String("name", name))
+	if err := Stop(cacheDir, name, logger); err != nil {
+		return fmt.Errorf("stop VM: %w", err)
+	}
+
+	// --- OFFLINE phase ---
 
 	scriptPath, err := WritePrepareInguestScript("")
 	if err != nil {

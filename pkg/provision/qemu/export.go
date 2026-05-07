@@ -238,6 +238,24 @@ func Export(ctx context.Context, opts ExportOptions) error {
 		return fmt.Errorf("copy keypair: %w", err)
 	}
 
+	// Copy the reconciled gateway-state.json that PrepareExport
+	// dumped during its live phase. Best-effort: a build that
+	// skipped prepare-export (or one that ran before this file
+	// existed) won't have the sibling -- log + skip rather than
+	// fail the export. The maintainer / customer can re-run
+	// `y-cluster gateway state` against any boot of the appliance
+	// to regenerate.
+	gatewayStateSrc := filepath.Join(cfg.CacheDir, cfg.Name+"-gateway-state.json")
+	gatewayStateDst := filepath.Join(opts.BundleDir, "gateway-state.json")
+	if err := copyFile(gatewayStateSrc, gatewayStateDst, 0o644); err != nil {
+		if os.IsNotExist(err) {
+			logger.Warn("gateway-state.json not found in cache; bundle ships without it -- run y-cluster prepare-export against a running cluster to produce one",
+				zap.String("expected", gatewayStateSrc))
+		} else {
+			return fmt.Errorf("copy gateway-state.json: %w", err)
+		}
+	}
+
 	vmdkSub := opts.VMDKSubformat
 	if vmdkSub == "" {
 		vmdkSub = VMDKSubformatDefault
