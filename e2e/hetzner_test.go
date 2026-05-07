@@ -170,3 +170,122 @@ func TestHetzner_PreloadFromS3(t *testing.T) {
 		t.Errorf("expected hello-world in containerd's k8s.io namespace after preload; got:\n%s", listed)
 	}
 }
+
+// TestHetzner_RejectUpstream covers phase 6.d: with
+// HetznerConfig.ImageCache.RejectUpstream true, after Provision
+// returns:
+//
+//  1. /etc/rancher/k3s/registries.yaml on the node contains the
+//     wildcard reject mirror; and
+//  2. an upstream `crictl pull` for an uncached image fails (DNS
+//     never resolves the .invalid mirror endpoint).
+//
+// Inherits TestHetzner_PreloadFromS3's env requirements.
+func TestHetzner_RejectUpstream(t *testing.T) {
+	if os.Getenv("HCLOUD_TOKEN") == "" {
+		t.Skip("HCLOUD_TOKEN unset; opt in to the hetzner e2e by exporting it")
+	}
+	if os.Getenv("H_S3_ACCESS_KEY") == "" || os.Getenv("H_S3_SECRET_KEY") == "" ||
+		os.Getenv("H_S3_BUCKET") == "" || os.Getenv("H_S3_REGION") == "" {
+		t.Skip("H_S3_* env vars unset; opt in by sourcing y-cluster-hetzner.env")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	logger, _ := zap.NewDevelopment()
+
+	ctxName := "y-c-e2e-" + strings.ToLower(strings.ReplaceAll(t.Name(), "_", "-"))
+	if len(ctxName) > 50 {
+		ctxName = ctxName[:50]
+	}
+	t.Setenv(hetzner.CacheDirEnv, t.TempDir())
+
+	cfg := config.HetznerConfig{
+		CommonConfig: config.CommonConfig{
+			Provider: config.ProviderHetzner,
+			Context:  ctxName,
+		},
+		ImageCache: config.HetznerImageCache{
+			Bucket:         os.Getenv("H_S3_BUCKET"),
+			Region:         os.Getenv("H_S3_REGION"),
+			RejectUpstream: true,
+		},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	cluster, err := hetzner.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Logf("teardown: %v", err)
+		}
+	})
+
+	// (1) registries.yaml is present (k3s source-of-truth, used
+	// to regenerate certs.d on a future k3s restart).
+	out, err := cluster.SSH(ctx, "sudo cat /etc/rancher/k3s/registries.yaml")
+	if err != nil {
+		t.Fatalf("read registries.yaml: %v", err)
+	}
+	got := string(out)
+	for _, want := range []string{`"*":`, "reject-upstream-by-y-cluster.invalid"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("registries.yaml missing %q:\n%s", want, got)
+		}
+	}
+
+	// (2) hosts.toml is present for _default and the major
+	// registries; this is the file containerd actually consults
+	// at pull time.
+	hostsToml, err := cluster.SSH(ctx, "sudo cat /var/lib/rancher/k3s/agent/etc/containerd/certs.d/_default/hosts.toml")
+	if err != nil {
+		t.Fatalf("read _default/hosts.toml: %v", err)
+	}
+	for _, want := range []string{
+		`server = "http://reject-upstream-by-y-cluster.invalid:9999"`,
+		`capabilities = ["pull", "resolve"]`,
+	} {
+		if !strings.Contains(string(hostsToml), want) {
+			t.Errorf("_default/hosts.toml missing %q:\n%s", want, string(hostsToml))
+		}
+	}
+
+	// (3) An uncached image pull fails. We use a registry path
+	// that's not in the cache (the bucket only has hello-world)
+	// and is unlikely to be in containerd's store from any
+	// bootstrap step. busybox:1.36-musl is small, on docker.io,
+	// and not pulled by k3s/envoy-gateway/reaper.
+	//
+	// `crictl pull` exits non-zero on failure; we OR with `echo
+	// PULL_FAILED` so the SSH command itself doesn't error and
+	// we can grep the output deterministically.
+	pull, err := cluster.SSH(ctx, "sudo k3s crictl pull busybox:1.36-musl 2>&1 || echo PULL_FAILED")
+	if err != nil {
+		t.Fatalf("crictl pull (cmd-level): %v", err)
+	}
+	pullOut := string(pull)
+	if !strings.Contains(pullOut, "PULL_FAILED") {
+		t.Errorf("expected pull to fail with rejectUpstream on, got:\n%s", pullOut)
+	}
+
+	// (4) The reaper Pod must be Running (or already Succeeded)
+	// despite the lockdown -- the script's wait-for-reaper gate
+	// is the only thing that prevents the lockdown from racing
+	// the reaper's first pull of hetznercloud/cli. If the gate
+	// regresses, this assertion catches it.
+	phase, err := cluster.SSH(ctx, "sudo k3s kubectl -n y-cluster-reaper get pods -l job-name=reaper -o jsonpath='{.items[0].status.phase}'")
+	if err != nil {
+		t.Fatalf("get reaper Pod phase: %v", err)
+	}
+	switch strings.TrimSpace(string(phase)) {
+	case "Running", "Succeeded":
+		// expected
+	default:
+		t.Errorf("reaper Pod phase = %q after rejectUpstream; want Running/Succeeded (lockdown raced the image pull?)", string(phase))
+	}
+}

@@ -343,6 +343,16 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 	logger.Info("auto-teardown reaper installed",
 		zap.Int("hours", cfg.AutoTeardownHours))
 
+	// Phase 6.d: lock down upstream pulls. Lands LAST so the
+	// bootstrap (pre-load, envoy-gateway, reaper apply) finishes
+	// against an upstream-pull-allowed k3s and only the workload
+	// image-pull surface tightens up.
+	if cfg.ImageCache.Enabled() && cfg.ImageCache.RejectUpstream {
+		if err := c.applyRejectUpstream(ctx); err != nil {
+			return nil, fmt.Errorf("apply rejectUpstream: %w", err)
+		}
+	}
+
 	logger.Info("cluster ready", zap.String("context", c.cfg.Context))
 
 	return c, nil
