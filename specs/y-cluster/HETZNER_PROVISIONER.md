@@ -315,19 +315,38 @@ Idempotent: a push of the same digest is a no-op (object existence check).
 
 ### `imageCache.rejectUpstream` semantics
 
-Dropping `/etc/rancher/k3s/registries.yaml` with content:
+Implemented (post-design): the wildcard mirror in
+`/etc/rancher/k3s/registries.yaml` alone wasn't sufficient. K3s
+v1.35.4 still falls back to the original registry in practice --
+verified via e2e: a `crictl pull alpine:3.20` succeeded despite
+the wildcard reject mirror. The shipped lockdown drops a
+containerd `hosts.toml` directly under
+`/var/lib/rancher/k3s/agent/etc/containerd/certs.d/<reg>/`
+for `_default` plus the major upstream registries:
 
-```yaml
-mirrors:
-  "*":
-    endpoint: []
+```toml
+server = "http://reject-upstream-by-y-cluster.invalid:9999"
+
+[host."http://reject-upstream-by-y-cluster.invalid:9999"]
+  capabilities = ["pull", "resolve"]
 ```
 
-…makes containerd refuse to resolve any image not already in
-its local store. Pulls fail fast; the operator either pushes the
-missing image to S3 + re-runs the pre-load, or runs an ad-hoc
-`y-cluster images load <archive|-|url>` against the running
-cluster.
+When containerd finds a `hosts.toml` in a registry's certs.d
+directory, it treats the file as authoritative and does NOT fall
+back to the registry's real hostname. DNS on the `.invalid` URL
+fails (RFC 6761 reserved), and the pull errors out instead of
+being silently satisfied by docker.io.
+
+`registries.yaml` is still written (with the `"*"` wildcard) so
+a future `k3s server restart` regenerates certs.d the same way.
+Both files are in sync; either one is sufficient on its own,
+together they survive the restart edge case.
+
+Race fix: applyRejectUpstream waits for the in-cluster reaper
+Pod to reach Running before dropping hosts.toml. Without that
+gate, the lockdown lands mid-pull of `hetznercloud/cli` and the
+reaper ends up ImagePullBackOff -- killing the auto-teardown
+safety net. The wait costs ~6s on a fresh node.
 
 This option is OFF by default. Its purpose is to enforce a "no
 cache miss = no provisioning surprise" workflow during e2e runs
