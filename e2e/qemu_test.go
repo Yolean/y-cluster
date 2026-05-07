@@ -65,11 +65,19 @@ func e2eQEMURuntime() qemu.Config {
 }
 
 // e2eUniqueForwards builds a port-forward list that won't collide
-// with another e2e test running on the same machine. Required since
-// Provision now installs k3s and needs a forward to guest 6443 to
-// extract a working kubeconfig.
-func e2eUniqueForwards(apiPort string) []qemu.PortForward {
-	return []qemu.PortForward{{Host: apiPort, Guest: "6443"}}
+// with another e2e test running on the same machine. Two forwards:
+//
+//   - apiPort -> guest 6443: required for Provision to extract a
+//     working kubeconfig from the booted VM's k3s API.
+//   - httpPort -> guest 80: required so any setup script that pokes
+//     the gateway's HTTP listener (e.g. `curl 127.0.0.1:<httpPort>/...`
+//     against an HTTPRoute / GRPCRoute the test installs) reaches
+//     the VM. Several Yolean dev scripts assume this forward exists.
+func e2eUniqueForwards(apiPort, httpPort string) []qemu.PortForward {
+	return []qemu.PortForward{
+		{Host: apiPort, Guest: "6443"},
+		{Host: httpPort, Guest: "80"},
+	}
 }
 
 func TestQemu_ProvisionTeardown(t *testing.T) {
@@ -88,7 +96,7 @@ func TestQemu_ProvisionTeardown(t *testing.T) {
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2223" // avoid conflict with real cluster on 2222
-	cfg.PortForwards = e2eUniqueForwards("26443")
+	cfg.PortForwards = e2eUniqueForwards("26443", "28443")
 	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
 	if cfg.Kubeconfig == "" {
 		t.Skip("KUBECONFIG must be set")
@@ -186,7 +194,7 @@ func TestQemu_TeardownKeepDisk(t *testing.T) {
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2225"
-	cfg.PortForwards = e2eUniqueForwards("26444")
+	cfg.PortForwards = e2eUniqueForwards("26444", "28444")
 	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
 	if cfg.Kubeconfig == "" {
 		t.Skip("KUBECONFIG must be set")
@@ -223,7 +231,7 @@ func TestQemu_ExportImport(t *testing.T) {
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2224"
-	cfg.PortForwards = e2eUniqueForwards("26445")
+	cfg.PortForwards = e2eUniqueForwards("26445", "28445")
 	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
 	if cfg.Kubeconfig == "" {
 		t.Skip("KUBECONFIG must be set")
@@ -313,7 +321,7 @@ func TestQemu_StopStart(t *testing.T) {
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2226"
-	cfg.PortForwards = e2eUniqueForwards("26446")
+	cfg.PortForwards = e2eUniqueForwards("26446", "28446")
 	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
 	if cfg.Kubeconfig == "" {
 		t.Skip("KUBECONFIG must be set")
@@ -412,7 +420,7 @@ func TestQemu_Seed_GateAndBypass(t *testing.T) {
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2227"
-	cfg.PortForwards = e2eUniqueForwards("26447")
+	cfg.PortForwards = e2eUniqueForwards("26447", "28447")
 	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
 	if cfg.Kubeconfig == "" {
 		t.Skip("KUBECONFIG must be set")
