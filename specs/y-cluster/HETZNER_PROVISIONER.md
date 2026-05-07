@@ -238,6 +238,110 @@ Decisions referenced:
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ```
 
+## Image cache via Hetzner S3 (proposed phase 6)
+
+The end goal is a remote dev cluster that *feels* like a local
+one. On local, image pulls hit a kind/multipass disk in
+microseconds. On Hetzner, image pulls cross the public internet
+to Docker Hub / quay / GHCR and are subject to rate-limiting
+and ~hundreds-of-MB-per-image latency. That's the dominant
+"it's slow" experience we're trying to delete.
+
+Solution shape: keep all required images in **Hetzner Object
+Storage in the same region as the cluster** (`hel1`). Pulls
+become intra-region GETs, ~ms-class. Layered on top: an opt-in
+**pull-rejection mode** that makes upstream pulls a hard error,
+forcing the cache to stay complete.
+
+### End goals
+
+1. Operator runs `y-cluster images push <ref>` and the image
+   lands in S3 in a containerd-loadable shape, idempotent on
+   the resolved digest.
+2. `y-cluster provision` (when `imageCache.bucket` is set) lists
+   the bucket's image index and pre-loads every entry into
+   the node's containerd before kubelet ever schedules a pod.
+   No upstream-registry traffic during the dev loop.
+3. Optional `imageCache.rejectUpstream: true` drops a k3s
+   `registries.yaml` that maps every registry to the empty
+   mirror set. Any image-ref that isn't already in containerd's
+   store fails loudly. The dev iterates against the cache, not
+   around it.
+
+### Decisions (locked, image-cache scope)
+
+| Decision | Choice | Trade |
+|---|---|---|
+| Storage backend | Hetzner Object Storage (S3-compat), region `hel1`, default bucket `y-cluster-examples`. Endpoint `https://<region>.your-objectstorage.com`. | Same blast-radius scope as the cluster itself; latency negligible intra-region. Outbound from S3 is free for traffic to Hetzner Cloud servers in the same project. |
+| On-S3 layout | Per-image OCI v1 image-layout under `s3://<bucket>/oci/<safe-ref>/<digest>/` (mirrors the local `<cacheRoot>/images/<digest>/` shape `pkg/images.Cache` already produces). Layer dedup is a phase-7 follow-up if needed. | Each `images push` uploads one self-contained directory. Listing the bucket with prefix `oci/` is the index. |
+| Index | A flat object at `s3://<bucket>/index.json` mapping `<original-ref>` → `<digest>` → `<oci-layout-prefix>`. Updated on every push. | One source of truth for "what's available"; no listing-API parsing. Concurrent pushes need an etag-based update (CAS); v1 ships single-writer. |
+| Operator-side S3 client | `github.com/minio/minio-go/v7`. Minimum-surface S3 client (no AWS SDK chains), Hetzner-tested, ~few MB module. | Adds one direct dep; we already have `go-containerregistry` for the OCI side. |
+| Cluster-side S3 fetch | Use the `hetznercloud/cli` image (already pulled by the reaper) plus `wget`/`curl` against pre-signed URLs generated at provision time. | No AWS CLI install on the node; signed URLs scope cluster credentials away from the host. URLs expire (default 1h); we issue them just before the load step. |
+| Sideload mechanism | For each image: download the OCI layout to a tmpdir on the node, `tar -cf - .` over the layout dir, pipe to `ctr -n k8s.io image import -`. Same pipeline `images load` already drives — symmetry over re-implementation. | Tar-of-layout is `ctr image import`-compatible. Parallelism: serial for v1 (one image at a time); we can parallelize once the slow case is measured. |
+| Config field | `imageCache: { bucket: "...", region: "hel1", indexKey: "index.json", rejectUpstream: false }` on `HetznerConfig`. Empty `bucket` disables the whole feature. | Per-cluster opt-in; defaults preserve the current "pull from upstream" behavior. |
+| Lockdown mechanism | Drop `/etc/rancher/k3s/registries.yaml` with every wildcard mirror set to `endpoint: []` and `rewrite` blank. K3s's documented knob; survives k3s restart. | k3s-specific (acceptable: hetzner provisioner ships k3s anyway). Errors during a missed cache fall on the operator immediately, which is the goal. |
+| Credentials shape | Operator: same `~/Yolean/.yolean-bots-device/y-cluster-hetzner.env` already carrying `HCLOUD_TOKEN`. New keys: `H_S3_ACCESS_KEY`, `H_S3_SECRET_KEY`, `H_S3_REGION`, `H_S3_BUCKET`. Cluster: receives pre-signed URLs (no key material on disk). | Single source of truth for credentials. Pre-signed URLs avoid baking long-lived keys into a node Secret. |
+
+### `images push` flow
+
+```
+  y-cluster images push <ref> [--bucket=...] [--region=hel1]
+
+  -> resolve <ref> via go-containerregistry remote.Head  (same as `images cache`)
+  -> if local OCI layout under <cacheRoot>/images/<digest>/ doesn't exist:
+       run pkg/images.Cache to populate it
+  -> walk the layout, PUT every blob + manifest under s3://<bucket>/oci/<safe-ref>/<digest>/
+  -> read+update s3://<bucket>/index.json: add (ref, digest, prefix)
+  -> log the digest-pinned ref (so the operator can paste it into kustomize / a deployment)
+```
+
+Idempotent: a push of the same digest is a no-op (object existence check).
+
+### Provision-time pre-load flow
+
+```
+  y-cluster provision  (with imageCache.bucket set)
+
+  -> SSH into the new node
+  -> for each (ref, digest, prefix) in s3://<bucket>/index.json:
+       generate a presigned GET URL for the manifest + each blob
+       wget/curl the OCI layout directory tree into /tmp/oci-load/<digest>/
+       tar -cf - -C /tmp/oci-load/<digest> . | sudo k3s ctr -n k8s.io image import -
+       ctr -n k8s.io image tag <ref> <ref>@<digest>   (same digest-alias step as `images load`)
+  -> if imageCache.rejectUpstream:
+       write /etc/rancher/k3s/registries.yaml with empty-mirror wildcard
+       sudo systemctl restart k3s
+```
+
+### `imageCache.rejectUpstream` semantics
+
+Dropping `/etc/rancher/k3s/registries.yaml` with content:
+
+```yaml
+mirrors:
+  "*":
+    endpoint: []
+```
+
+…makes containerd refuse to resolve any image not already in
+its local store. Pulls fail fast; the operator either pushes the
+missing image to S3 + re-runs the pre-load, or runs an ad-hoc
+`y-cluster images load <archive|-|url>` against the running
+cluster.
+
+This option is OFF by default. Its purpose is to enforce a "no
+cache miss = no provisioning surprise" workflow during e2e runs
+that are sensitive to upstream registry availability.
+
+### Phase split
+
+| # | Deliverable | Tests |
+|---|---|---|
+| 6.a | `imageCache` config field + validation (no behavior change yet) | Unit tests for config defaults + empty-bucket-disables-everything |
+| 6.b | `y-cluster images push` against Hetzner S3 (operator side); minio-go dep added | Unit tests for OCI-layout-walking + S3 key construction; e2e `images-push` tag for one round-trip |
+| 6.c | Provision-time pre-load when `imageCache.bucket` is set | e2e: push-then-provision-then-`crictl images` shows the cached set; no upstream pulls in the kubelet log |
+| 6.d | `rejectUpstream` toggle (k3s registries.yaml) | e2e: a Pod referencing an uncached image stays `ImagePullBackOff` instead of pulling |
+
 ## Out of scope on this branch
 
 - Real-cert path via cert-manager → upload. The hooks are in
