@@ -168,6 +168,10 @@ type Cluster struct {
 	pidFile    string
 	logger     *zap.Logger
 	Kubeconfig *kubeconfig.Manager
+	// extraDisks is appended after boot+seed in startVM. Set by
+	// StartForDiagnosticWithDisks for tests that need a labeled
+	// data volume attached; production code paths leave it nil.
+	extraDisks []string
 }
 
 // CheckPrerequisites verifies that required binaries and /dev/kvm exist.
@@ -398,11 +402,42 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		logger.Info("teardown complete, disk preserved", zap.String("disk", diskPath))
 		return nil
 	}
+	var removed []string
 	for _, p := range perVMArtefacts(cfg.CacheDir, cfg.Name) {
-		_ = os.Remove(p)
+		err := os.Remove(p)
+		switch {
+		case err == nil:
+			removed = append(removed, filepath.Base(p))
+		case os.IsNotExist(err):
+			// Artefact already gone -- idempotent teardown, no
+			// log spam.
+		default:
+			logger.Warn("teardown could not remove artefact",
+				zap.String("path", p), zap.Error(err))
+		}
 	}
-	_ = removeState(cfg.CacheDir, cfg.Name)
-	logger.Info("teardown complete, disk and keypair deleted")
+	stateFile := statePath(cfg.CacheDir, cfg.Name)
+	hadState := false
+	if _, err := os.Stat(stateFile); err == nil {
+		hadState = true
+	}
+	if err := removeState(cfg.CacheDir, cfg.Name); err != nil {
+		logger.Warn("teardown could not remove state file", zap.Error(err))
+	} else if hadState {
+		removed = append(removed, filepath.Base(stateFile))
+	}
+	if len(removed) == 0 {
+		// Nothing to do means the cache dir didn't have anything for
+		// this name -- a previous teardown ran, or provision never
+		// ran. Either way, lying with a "deleted" log would mask
+		// real bugs (e.g. wrong --cacheDir).
+		logger.Info("teardown complete, no artefacts found to delete",
+			zap.String("cacheDir", cfg.CacheDir),
+			zap.String("name", cfg.Name))
+	} else {
+		logger.Info("teardown complete",
+			zap.Strings("removed", removed))
+	}
 	return nil
 }
 
@@ -714,6 +749,9 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 	}
 	if seedPath != "" {
 		args = append(args, "-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", seedPath))
+	}
+	for _, d := range c.extraDisks {
+		args = append(args, "-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", d))
 	}
 	args = append(args,
 		"-netdev", c.buildNetdev(),

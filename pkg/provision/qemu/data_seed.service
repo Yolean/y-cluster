@@ -1,10 +1,16 @@
 [Unit]
 Description=y-cluster appliance data-dir first-boot seed
 DefaultDependencies=no
-RequiresMountsFor=/data/yolean
-After=local-fs.target systemd-tmpfiles-setup.service
+After=local-fs.target systemd-tmpfiles-setup.service cloud-init.service
 Before=k3s.service
 ConditionPathExists=/var/lib/y-cluster/data-seed.tar.zst
+# No RequiresMountsFor= for /data/yolean: with the fstab nofail
+# entry the mount may legitimately not be present (Hetzner QA
+# bypass shape, or a customer who forgot to attach their volume),
+# and the script handles the missing-mount cases itself. A hard
+# Requires would prevent the script from running and reporting
+# the actionable failure. After=local-fs.target still ensures
+# the fstab mount has been attempted before we look.
 
 [Service]
 Type=oneshot

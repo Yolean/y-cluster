@@ -154,6 +154,59 @@ func guestPoweroff(cacheDir, name string, pid int, logger *zap.Logger) error {
 // then re-imports the kubeconfig so the host-side context is
 // fresh even if it was cleaned while the cluster was down.
 func Start(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Cluster, error) {
+	c, err := startVMReady(ctx, cacheDir, name, nil, logger)
+	if err != nil {
+		return nil, err
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	logger.Info("VM up; waiting for k3s")
+	if err := c.waitForK3sReady(ctx); err != nil {
+		return nil, fmt.Errorf("wait for k3s: %w", err)
+	}
+
+	rawKubeconfig, err := c.extractKubeconfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("extract kubeconfig: %w", err)
+	}
+	if err := c.Kubeconfig.Import(rawKubeconfig); err != nil {
+		return nil, fmt.Errorf("merge kubeconfig: %w", err)
+	}
+	logger.Info("k3s ready", zap.String("context", c.cfg.Context))
+	return c, nil
+}
+
+// StartForDiagnostic boots the VM from saved state and waits for SSH
+// but does NOT wait for k3s readiness. Used when the appliance is in
+// a state that intentionally blocks k3s (e.g., the data-seed unit
+// failed because the customer hasn't attached their /data/yolean
+// volume) and the operator -- or a test -- needs to SSH in to
+// inspect the journal and recover. The returned *Cluster has SSH /
+// SCP wired up; Kubeconfig is initialised but no kubeconfig has
+// been imported.
+func StartForDiagnostic(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Cluster, error) {
+	return startVMReady(ctx, cacheDir, name, nil, logger)
+}
+
+// StartForDiagnosticWithDisks is StartForDiagnostic with extra qcow2
+// or raw disks attached as additional virtio drives. Used by tests
+// that exercise the appliance's pre-baked LABEL fstab against a
+// real labeled data volume -- the qemu provisioner itself doesn't
+// manage data disks (the appliance contract is "customer attaches a
+// labeled volume", not "y-cluster wires a fleet of disks"), so this
+// API surface is deliberately minimal: the caller owns the disk
+// files' lifecycle and just passes their paths.
+func StartForDiagnosticWithDisks(ctx context.Context, cacheDir, name string, extraDisks []string, logger *zap.Logger) (*Cluster, error) {
+	return startVMReady(ctx, cacheDir, name, extraDisks, logger)
+}
+
+// startVMReady is the prefix shared by Start and StartForDiagnostic:
+// load state, boot the VM, wait for SSH. Anything that requires k3s
+// to be up belongs in Start, not here. extraDisks is appended after
+// the boot disk + cidata seed; nil/empty means "boot disk + seed
+// only", the default.
+func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []string, logger *zap.Logger) (*Cluster, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -185,6 +238,7 @@ func Start(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Clu
 		pidFile:    pidFilePath(cfg.CacheDir, cfg.Name),
 		logger:     logger,
 		Kubeconfig: kubecfg,
+		extraDisks: extraDisks,
 	}
 
 	if err := c.startVM(ctx, diskPath, ""); err != nil {
@@ -193,19 +247,6 @@ func Start(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Clu
 	if err := c.waitForSSH(ctx); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
-	logger.Info("VM up; waiting for k3s")
-	if err := c.waitForK3sReady(ctx); err != nil {
-		return nil, fmt.Errorf("wait for k3s: %w", err)
-	}
-
-	rawKubeconfig, err := c.extractKubeconfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("extract kubeconfig: %w", err)
-	}
-	if err := kubecfg.Import(rawKubeconfig); err != nil {
-		return nil, fmt.Errorf("merge kubeconfig: %w", err)
-	}
-	logger.Info("k3s ready", zap.String("context", cfg.Context))
 	return c, nil
 }
 

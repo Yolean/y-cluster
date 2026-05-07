@@ -18,7 +18,7 @@ import (
 
 // Embedded assets that travel with the appliance disk and run
 // on the customer's first boot. See
-// specs/y-cluster/APPLIANCE_UPGRADES.md for the design.
+// APPLIANCE_MAINTENANCE.md for the design.
 
 //go:embed data_seed.service
 var dataSeedUnit string

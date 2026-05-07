@@ -14,6 +14,11 @@ import (
 )
 
 // Check represents a single post-apply verification step.
+//
+// Fields are a flat union: each kind reads only the subset it
+// understands. The CUE schema (cue.mod/.../verify/schema.cue)
+// enforces which fields belong to which kind via #Wait /
+// #Rollout / #Exec / #Gateway.
 type Check struct {
 	Kind        string `json:"kind"`
 	Resource    string `json:"resource,omitempty"`
@@ -22,6 +27,15 @@ type Check struct {
 	Timeout     string `json:"timeout,omitempty"`
 	Command     string `json:"command,omitempty"`
 	Description string `json:"description,omitempty"`
+
+	// Gateway-only fields. URL is required; everything else has a
+	// documented default. See pkg/yconverge/gateway.go for the
+	// dial / discovery / validation semantics.
+	URL              string `json:"url,omitempty"`
+	ExpectCode       []int  `json:"expectCode,omitempty"`
+	ExpectLocation   string `json:"expectLocation,omitempty"`
+	Resolve          string `json:"resolve,omitempty"`
+	GatewayClassName string `json:"gatewayClassName,omitempty"`
 }
 
 // DefaultTimeout is used when a check does not specify a timeout.
@@ -92,8 +106,57 @@ func (r *CheckRunner) runOne(ctx context.Context, check Check) error {
 		return r.runRollout(ctx, check, ns, timeout)
 	case "exec":
 		return r.runExec(ctx, check, timeout)
+	case "gateway":
+		return r.runGateway(ctx, check, timeout)
 	default:
 		return fmt.Errorf("unknown check kind: %q", check.Kind)
+	}
+}
+
+// runGateway executes a `kind: "gateway"` check: discover the
+// Gateway address, launch an in-cluster curl Pod with --resolve
+// pinned to that address, validate the response code and (when
+// configured) Location header. Retries on failure until timeout
+// using the same 2s interval as runExec, since the common
+// transient failure modes (Gateway not yet programmed, HTTPRoute
+// not yet reconciled, backend not yet Ready) all resolve in
+// seconds.
+func (r *CheckRunner) runGateway(ctx context.Context, check Check, timeout time.Duration) error {
+	if check.URL == "" {
+		return fmt.Errorf("gateway check: url is required")
+	}
+	desc := check.Description
+	if desc == "" {
+		desc = fmt.Sprintf("gateway %s", check.URL)
+	}
+	r.Logger.Debug("check",
+		zap.String("kind", "gateway"),
+		zap.String("url", check.URL),
+		zap.String("description", desc),
+	)
+	opts := gatewayProbeOpts{
+		URL:              check.URL,
+		ExpectCodes:      check.ExpectCode,
+		ExpectLocation:   check.ExpectLocation,
+		Resolve:          check.Resolve,
+		GatewayClassName: check.GatewayClassName,
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := runGatewayProbe(ctx, r.Context, opts); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("gateway check timed out after %s: %w", timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

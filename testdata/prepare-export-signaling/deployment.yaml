@@ -1,0 +1,89 @@
+# Test workload for TestQemu_PrepareExport_GracefulShutdown.
+#
+# The Pod's trap runs for ~15 seconds in response to SIGTERM,
+# writing one file per second to a local-path PVC. local-path
+# PVs land under /data/yolean (the y-cluster bundled storage
+# root), which `y-cluster prepare-export` packs into the seed
+# tarball. The Go test cracks the tarball open afterwards and
+# asserts step-15.txt + done.txt are present, which proves
+# the kubelet honored the full terminationGracePeriodSeconds
+# during cluster shutdown.
+#
+# Failure modes the test catches via this workload:
+#   - SIGTERM not delivered to pods on `y-cluster stop` ->
+#     no markers past started.txt.
+#   - Grace period cut short (e.g. kubelet killed pods at 5s) ->
+#     step-N.txt for some N<15, no done.txt, no step-15.txt.
+#   - Healthy path -> all 15 step markers + done.txt.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prepare-export-signaling
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: markers
+  namespace: prepare-export-signaling
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shutdown-tester
+  namespace: prepare-export-signaling
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shutdown-tester
+  strategy:
+    type: Recreate    # PVC is RWO; rolling update would deadlock
+  template:
+    metadata:
+      labels:
+        app: shutdown-tester
+    spec:
+      # 30s budget: 15s for the trap + slack for the kubelet to
+      # propagate SIGTERM and reap. Production-realistic: matches
+      # the grace period y-cluster's spot-node Pods rely on.
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: tester
+        image: alpine:3
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -eu
+          mkdir -p /markers
+          # Startup marker: proves the Pod ran + reached the PV
+          # before stop fired.
+          date -u +%FT%T.%NZ > /markers/started.txt
+          sync
+          # SIGTERM handler: 15 step markers (one per second) +
+          # a final done.txt. The trap runs in the foreground,
+          # so the parent process exits with code 0 only after
+          # done.txt is on disk + sync'd.
+          trap 'for i in $(seq 1 15); do
+                  date -u +%FT%T.%NZ > /markers/step-$i.txt
+                  sync
+                  sleep 1
+                done
+                date -u +%FT%T.%NZ > /markers/done.txt
+                sync
+                exit 0' TERM
+          # Block forever; only the trap exits.
+          while true; do sleep 60 & wait; done
+        volumeMounts:
+        - name: markers
+          mountPath: /markers
+      volumes:
+      - name: markers
+        persistentVolumeClaim:
+          claimName: markers

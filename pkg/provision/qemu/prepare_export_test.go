@@ -90,6 +90,30 @@ func TestPrepareInguestScript_CloudInitClean(t *testing.T) {
 	}
 }
 
+// TestPrepareInguestScript_FstabLabel pins the fstab pre-bake.
+// LABEL-based mounting is the cross-hypervisor universal so the
+// customer doesn't have to edit fstab on VMware / VirtualBox /
+// Hetzner / GCP -- they just attach an ext4 volume labeled
+// y-cluster-data. nofail keeps boot moving when the volume isn't
+// attached; data_seed_check.sh's mount-required gate then surfaces
+// the actionable failure. The seed-check resolution text refers
+// to this same LABEL, so the two must stay in sync.
+func TestPrepareInguestScript_FstabLabel(t *testing.T) {
+	body := PrepareInguestScript()
+	for _, want := range []string{
+		`LABEL=y-cluster-data`,
+		`/data/yolean ext4`,
+		`nofail`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("prepare-inguest script missing %q:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(body, "grep -q 'LABEL=y-cluster-data' /etc/fstab") {
+		t.Errorf("fstab pre-bake must be idempotency-guarded by a grep:\n%s", body)
+	}
+}
+
 // TestPrepareInguestScript_DisablesCloudInitNetworkConfig pins
 // the cfg drop that prevents cloud-init from regenerating
 // /etc/netplan/50-cloud-init.yaml on the imported VM's first

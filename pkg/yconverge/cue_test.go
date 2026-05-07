@@ -123,7 +123,7 @@ language: version: "v0.16.0"
 	checks: [...#Check]
 }
 
-#Check: #Wait | #Rollout | #Exec
+#Check: #Wait | #Rollout | #Exec | #Gateway
 
 #Wait: {
 	kind:        "wait"
@@ -147,6 +147,17 @@ language: version: "v0.16.0"
 	command:     string
 	timeout:     *"60s" | string
 	description: string
+}
+
+#Gateway: {
+	kind:               "gateway"
+	url:                string
+	expectCode:         *[200] | [...int]
+	expectLocation?:    string
+	resolve?:           string
+	gatewayClassName?:  string
+	timeout:            *"60s" | string
+	description:        *"" | string
 }
 `)
 	return root
@@ -245,6 +256,81 @@ step: verify.#Step & {
 	}
 	if checks[0].For != "jsonpath={.status.phase}=Active" {
 		t.Fatalf("unexpected for: %s", checks[0].For)
+	}
+}
+
+// TestParseChecks_GatewayCheck pins the cue->Go round-trip for the
+// canonical gateway-check shape: 302 + Location regex pinning the
+// oauth redirect target. Verifies the new fields (URL, ExpectCode,
+// ExpectLocation) survive the JSON marshal in ParseChecks.
+func TestParseChecks_GatewayCheck(t *testing.T) {
+	root := setupCueModule(t)
+	writeFile(t, filepath.Join(root, "base/yconverge.cue"), `package base
+
+import "yolean.se/ystack/yconverge/verify"
+
+step: verify.#Step & {
+	checks: [{
+		kind:           "gateway"
+		url:            "http://dev.yolean.net/"
+		expectCode:     [302]
+		expectLocation: "^http://dev\\.yolean\\.net/auth/realms/[^/]+/.*"
+		timeout:        "120s"
+		description:    "dev.yolean.net unauth -> oauth2 redirect"
+	}]
+}
+`)
+	checks, err := ParseChecks(filepath.Join(root, "base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(checks))
+	}
+	c := checks[0]
+	if c.Kind != "gateway" {
+		t.Errorf("Kind: %q, want gateway", c.Kind)
+	}
+	if c.URL != "http://dev.yolean.net/" {
+		t.Errorf("URL: %q", c.URL)
+	}
+	if len(c.ExpectCode) != 1 || c.ExpectCode[0] != 302 {
+		t.Errorf("ExpectCode: %v, want [302]", c.ExpectCode)
+	}
+	if c.ExpectLocation != `^http://dev\.yolean\.net/auth/realms/[^/]+/.*` {
+		t.Errorf("ExpectLocation: %q", c.ExpectLocation)
+	}
+	if c.Timeout != "120s" {
+		t.Errorf("Timeout: %q", c.Timeout)
+	}
+}
+
+// TestParseChecks_GatewayCheck_DefaultCode pins the schema's
+// expectCode default: omitting the field yields [200] in Go.
+// Authors writing a 200-only probe don't need to specify the code
+// explicitly.
+func TestParseChecks_GatewayCheck_DefaultCode(t *testing.T) {
+	root := setupCueModule(t)
+	writeFile(t, filepath.Join(root, "base/yconverge.cue"), `package base
+
+import "yolean.se/ystack/yconverge/verify"
+
+step: verify.#Step & {
+	checks: [{
+		kind: "gateway"
+		url:  "http://echo.example/health"
+	}]
+}
+`)
+	checks, err := ParseChecks(filepath.Join(root, "base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check, got %d", len(checks))
+	}
+	if len(checks[0].ExpectCode) != 1 || checks[0].ExpectCode[0] != 200 {
+		t.Errorf("ExpectCode default: %v, want [200]", checks[0].ExpectCode)
 	}
 }
 
