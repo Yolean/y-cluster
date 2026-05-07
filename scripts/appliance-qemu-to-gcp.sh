@@ -102,6 +102,13 @@ Environment:
                     cert (e.g., appliance.example.com,admin.appliance.example.com).
                     Empty: skip the LB step. The HTTPRoutes must
                     already match these hostnames.
+                    Special value "auto": derive the FQDN list from
+                    `y-cluster gateway hostnames --csv` against the
+                    just-provisioned cluster -- reconciled
+                    HTTPRoute / GRPCRoute hostnames become the LB
+                    cert SAN list, so the two can never drift.
+                    Aborts with an error when "auto" is set but the
+                    cluster has no non-wildcard hostnames yet.
 
 Dependencies:
   go, qemu-system-x86_64, qemu-img, kubectl, ssh, ssh-keygen, curl,
@@ -771,6 +778,24 @@ EOF
 
 confirm "Proceed to export + GCP deploy?" \
     || { echo "aborted; local cluster left running. Teardown with: $Y_CLUSTER teardown -c $CFG_DIR"; exit 0; }
+
+# Resolve TLS_DOMAINS=auto against the LIVE cluster while the
+# apiserver is still up. By the time we reach the TLS LB stage
+# (after prepare-export and the GCP deploy), the local cluster
+# is gone and `gateway hostnames` would have nothing to read.
+# Other TLS_DOMAINS values (literal CSV / empty / prompt) are
+# handled at the LB stage itself; only "auto" needs the live
+# cluster query here.
+if [[ "${TLS_DOMAINS:-}" == "auto" ]]; then
+    stage "deriving TLS_DOMAINS from gateway state"
+    TLS_DOMAINS=$("$Y_CLUSTER" gateway hostnames --context="$KUBECTX" --csv)
+    [[ -n "$TLS_DOMAINS" ]] || {
+        echo "ERROR: TLS_DOMAINS=auto but the cluster's gateway state has no non-wildcard hostnames." >&2
+        echo "  Apply HTTPRoutes with .spec.hostnames first, or set TLS_DOMAINS=foo,bar to override." >&2
+        exit 1
+    }
+    echo "  TLS_DOMAINS=$TLS_DOMAINS"
+fi
 
 # === Stage 3: prepare-export + export gcp-tar ===
 # prepare-export needs the cluster RUNNING: its live phase
