@@ -79,6 +79,74 @@ func TestBuildPreloadScript_QuoteSafety(t *testing.T) {
 	}
 }
 
+// TestBuildPreloadScript_V2_SharedBlobs: a v2 entry has Files for
+// manifests only, BlobDigests for the blob paths. The script
+// must include curl rows for both -- the materialised tmpdir is
+// still a complete OCI layout despite the bucket-level blob
+// indirection.
+func TestBuildPreloadScript_V2_SharedBlobs(t *testing.T) {
+	entry := IndexEntry{
+		Ref:    "nginx:1.27",
+		Digest: "sha256:abc",
+		Prefix: "oci/nginx--1.27/sha256-abc/",
+		Files: []string{
+			"index.json",
+			"oci-layout",
+		},
+		BlobDigests: []string{
+			"blobs/sha256/aaa",
+			"blobs/sha256/bbb",
+		},
+	}
+	urls := map[string]string{
+		"index.json":       "https://example.test/idx",
+		"oci-layout":       "https://example.test/oci",
+		"blobs/sha256/aaa": "https://example.test/aaa",
+		"blobs/sha256/bbb": "https://example.test/bbb",
+	}
+	got := BuildPreloadScript(entry, urls)
+
+	for _, want := range []string{
+		"-o \"$LAYOUT/blobs/sha256/aaa\" 'https://example.test/aaa'",
+		"-o \"$LAYOUT/blobs/sha256/bbb\" 'https://example.test/bbb'",
+		"-o \"$LAYOUT/index.json\" 'https://example.test/idx'",
+		"-o \"$LAYOUT/oci-layout\" 'https://example.test/oci'",
+		"tar -cf - -C \"$LAYOUT\" . | sudo k3s ctr -n k8s.io image import -",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestBuildPreloadScript_V1_BackCompat: a v1 entry (BlobDigests
+// empty, blob paths in Files) still produces a working script.
+// Pre-load must remain backward-compatible so an operator who
+// pushed under v1 and then upgraded the binary doesn't have to
+// re-push every cached image.
+func TestBuildPreloadScript_V1_BackCompat(t *testing.T) {
+	entry := IndexEntry{
+		Ref:    "hello-world:latest",
+		Digest: "sha256:abc",
+		Prefix: "oci/hello-world--latest/sha256-abc/",
+		Files: []string{
+			"blobs/sha256/aaa",
+			"index.json",
+			"oci-layout",
+		},
+		// BlobDigests intentionally empty
+	}
+	urls := map[string]string{
+		"blobs/sha256/aaa": "https://example.test/aaa-v1",
+		"index.json":       "https://example.test/idx-v1",
+		"oci-layout":       "https://example.test/oci-v1",
+	}
+	got := BuildPreloadScript(entry, urls)
+	if !strings.Contains(got, "-o \"$LAYOUT/blobs/sha256/aaa\" 'https://example.test/aaa-v1'") {
+		t.Errorf("v1 entry blob curl missing:\n%s", got)
+	}
+}
+
 // TestDirOf: the parent-dir helper that drives the per-curl
 // `mkdir -p` in the script.
 func TestDirOf(t *testing.T) {

@@ -97,6 +97,15 @@ func newS3Client(c S3Config) (*minio.Client, error) {
 // kept on the entry (not synthesized at pre-load time by
 // LISTing the bucket) so a future pre-loader works off a single
 // JSON GET rather than the slower LIST API.
+//
+// Schema versions: v1 stored every layout file (manifests +
+// blobs) under Prefix and listed them all in Files. v2 splits
+// blobs out to a content-addressed bucket-level prefix so two
+// images sharing a layer share the storage and the upload
+// bandwidth (the dedup phase). Entries written by v2 push have
+// BlobDigests non-empty and Files restricted to non-blob layout
+// files; v1 entries are still readable (BlobDigests empty;
+// Files contains the full set under Prefix).
 type IndexEntry struct {
 	// Ref is the original registry reference the operator pushed
 	// (e.g. "nginx:1.27" or "registry.k8s.io/pause:3.10"). Multiple
@@ -105,13 +114,21 @@ type IndexEntry struct {
 	Ref string `json:"ref"`
 	// Digest is the resolved manifest digest, sha256:... form.
 	Digest string `json:"digest"`
-	// Prefix is the object-key prefix under which the OCI v1 image
-	// layout lives, e.g. "oci/nginx-1.27/sha256-abc.../". Always
-	// has a trailing "/".
+	// Prefix is the object-key prefix under which the per-image
+	// OCI layout *manifests* live. Always has a trailing "/".
+	// v1 entries had blobs under this prefix too; v2 entries do
+	// not (blobs live at the bucket-level "blobs/" prefix).
 	Prefix string `json:"prefix"`
-	// Files lists every relative path inside the OCI layout, sorted.
-	// Pre-load uses this to issue one presigned GET per file.
+	// Files lists relative paths for non-blob layout files
+	// ("oci-layout", "index.json"). v1 entries also had blob
+	// paths in this list; readers must tolerate both shapes.
 	Files []string `json:"files"`
+	// BlobDigests is the v2 dedup field: the OCI-relative blob
+	// paths (e.g. "blobs/sha256/abc..."). At provision time the
+	// pre-load step GETs each blob from <bucket>/<rel> -- the
+	// same key shape that PushOCILayout writes to. Empty on v1
+	// entries (those have blob paths in Files instead).
+	BlobDigests []string `json:"blobDigests,omitempty"`
 }
 
 // Index is the on-S3 cache index: an array of entries plus a
@@ -125,7 +142,22 @@ type Index struct {
 // IndexVersion is the on-disk schema version. Bump when the
 // shape changes incompatibly; loaders that read a higher version
 // than they know fail loud.
-const IndexVersion = 1
+//
+// Version history:
+//   1: per-image OCI layout in S3; every blob duplicated per
+//      pushed image (no dedup).
+//   2: blobs hoisted to a content-addressed bucket-level prefix
+//      ("blobs/sha256/<hex>"); two images sharing a layer share
+//      the storage. IndexEntry.BlobDigests names the blobs;
+//      IndexEntry.Files keeps only manifests (oci-layout +
+//      index.json).
+const IndexVersion = 2
+
+// SharedBlobsPrefix is where v2 push uploads (and v2 pre-load
+// reads) layer blobs. Bucket-level so any image's layer with a
+// given sha256 lives at the same key, regardless of which image
+// referenced it first.
+const SharedBlobsPrefix = "blobs/"
 
 // Find returns the entry whose Ref matches, or zero-IndexEntry +
 // false. Multiple entries with the same Ref keep the first match
@@ -191,14 +223,23 @@ func ociLayoutPrefix(ref, digest string) string {
 }
 
 // PushOCILayout uploads the local OCI v1 image layout under
-// `<localCacheRoot>/images/<digest>/` to S3 under the canonical
-// per-(ref, digest) prefix, then returns the IndexEntry callers
-// merge into the on-S3 index.
+// `<localCacheRoot>/images/<digest>/` to S3, deduping blobs at
+// the content-addressed bucket-level prefix
+// (`<bucket>/blobs/sha256/<hex>`). Returns the v2 IndexEntry
+// callers merge into the on-S3 index.
 //
-// Idempotency: a HEAD on the manifest object short-circuits the
-// upload when the object already exists (the manifest is the
-// last file written, so its presence implies a complete prior
-// upload).
+// Two upload paths:
+//
+//  1. Blobs: HEAD the bucket-level blob key first. Existing blobs
+//     are skipped (operator's bandwidth saved); missing ones get
+//     uploaded to the shared key. HEADs run in parallel against a
+//     small worker pool.
+//  2. Manifests (oci-layout, index.json): per-image, written under
+//     `oci/<safe-ref>/<digest>/` with index.json last so its
+//     presence is the "fully written" sentinel.
+//
+// Idempotency: a HEAD on the per-image index.json short-circuits
+// the whole push when the layout was already pushed by a prior run.
 func PushOCILayout(ctx context.Context, c S3Config, localDir, ref, digest string, logger *zap.Logger) (IndexEntry, error) {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -221,41 +262,172 @@ func PushOCILayout(ctx context.Context, c S3Config, localDir, ref, digest string
 		return IndexEntry{}, fmt.Errorf("no OCI layout files under %s; run `y-cluster images cache %s` first", localDir, ref)
 	}
 
-	// Idempotency probe: if the manifest object (index.json) is
-	// already present at the canonical key, assume the layout was
-	// pushed by a prior run and short-circuit. We probe index.json
-	// because PushOCILayout writes it last.
-	manifestKey := prefix + "index.json"
-	if _, err := mc.StatObject(ctx, resolved.Bucket, manifestKey, minio.StatObjectOptions{}); err == nil {
-		logger.Info("OCI layout already on S3; skipping upload",
-			zap.String("ref", ref),
-			zap.String("digest", digest),
-			zap.String("prefix", prefix),
-		)
-		return IndexEntry{Ref: ref, Digest: digest, Prefix: prefix, Files: files}, nil
-	}
+	manifests, blobs := partitionLayoutFiles(files)
 
-	// Order the upload so the layout's `index.json` is LAST, then
-	// the idempotency probe above can rely on it as the
-	// "fully-written" sentinel. blobs first, oci-layout next, then
-	// index.json.
-	ordered := orderForUpload(files)
-	for _, rel := range ordered {
-		key := prefix + rel
-		logger.Info("uploading OCI layout file",
+	// Step 1: dedup blobs. HEAD each shared-blob key in parallel;
+	// upload only the misses. This is the bandwidth-saving win for
+	// re-pushes whose blobs already live at the shared prefix.
+	//
+	// We always run dedup -- never short-circuit -- because that
+	// also handles v1->v2 migration: if a v1 layout was pushed
+	// previously (blobs under the per-image prefix), the shared
+	// keys are all missing, and we upload all blobs to the shared
+	// location. The v1 per-image blobs become orphans (acceptable
+	// trade for incremental migration; a later `images gc` could
+	// sweep them).
+	missingBlobs, err := blobsMissingOnS3(ctx, mc, resolved.Bucket, blobs, logger)
+	if err != nil {
+		return IndexEntry{}, fmt.Errorf("dedup probe: %w", err)
+	}
+	if len(blobs) > 0 {
+		logger.Info("blob dedup result",
+			zap.String("ref", ref),
+			zap.Int("blobs_total", len(blobs)),
+			zap.Int("blobs_to_upload", len(missingBlobs)),
+			zap.Int("blobs_skipped", len(blobs)-len(missingBlobs)),
+		)
+	}
+	for _, rel := range missingBlobs {
+		key := SharedBlobsPrefix + strings.TrimPrefix(rel, "blobs/")
+		logger.Info("uploading shared blob",
 			zap.String("ref", ref),
 			zap.String("key", key),
 		)
 		_, err := mc.FPutObject(ctx, resolved.Bucket, key, filepath.Join(localDir, rel), minio.PutObjectOptions{
-			// blobs are content-addressed -- octet-stream is fine
-			// for everything in an OCI layout.
 			ContentType: "application/octet-stream",
 		})
 		if err != nil {
 			return IndexEntry{}, fmt.Errorf("upload %s: %w", key, err)
 		}
 	}
-	return IndexEntry{Ref: ref, Digest: digest, Prefix: prefix, Files: files}, nil
+
+	// Step 2: per-image manifests. Idempotent on the per-image
+	// index.json: a present index.json means the manifests were
+	// uploaded by a prior push (blobs may have changed location
+	// between v1 and v2 but the manifest contents are identical).
+	manifestKey := prefix + "index.json"
+	if _, err := mc.StatObject(ctx, resolved.Bucket, manifestKey, minio.StatObjectOptions{}); err == nil {
+		logger.Info("OCI manifests already at per-image prefix; skipping",
+			zap.String("ref", ref),
+			zap.String("prefix", prefix),
+		)
+	} else {
+		// Order so index.json is LAST so its presence is the
+		// idempotency sentinel for the next run.
+		orderedManifests := orderForUpload(manifests)
+		for _, rel := range orderedManifests {
+			key := prefix + rel
+			logger.Info("uploading OCI manifest",
+				zap.String("ref", ref),
+				zap.String("key", key),
+			)
+			_, err := mc.FPutObject(ctx, resolved.Bucket, key, filepath.Join(localDir, rel), minio.PutObjectOptions{
+				ContentType: "application/octet-stream",
+			})
+			if err != nil {
+				return IndexEntry{}, fmt.Errorf("upload %s: %w", key, err)
+			}
+		}
+	}
+	return IndexEntry{
+		Ref: ref, Digest: digest, Prefix: prefix,
+		Files: manifests, BlobDigests: blobs,
+	}, nil
+}
+
+// partitionLayoutFiles splits the walkOCILayout output into
+// non-blob manifests vs blobs. The OCI image-layout spec has
+// `oci-layout` and `index.json` at the root; everything under
+// `blobs/sha256/` is a content-addressed blob. Anything else
+// (out of spec) currently treated as a manifest -- callers can
+// look at the result to decide whether to log a warning.
+func partitionLayoutFiles(files []string) (manifests, blobs []string) {
+	for _, f := range files {
+		if strings.HasPrefix(f, "blobs/") {
+			blobs = append(blobs, f)
+		} else {
+			manifests = append(manifests, f)
+		}
+	}
+	return manifests, blobs
+}
+
+// blobDedupConcurrency caps the number of in-flight HEADs during
+// the dedup probe. 8 is enough to saturate a typical home/office
+// link without thrashing the bucket; small enough that a slow
+// bucket doesn't queue up thousands of pending requests.
+const blobDedupConcurrency = 8
+
+// blobsMissingOnS3 returns the subset of relPaths that are NOT
+// already present at <bucket>/<SharedBlobsPrefix><tail>. relPaths
+// are expected in OCI form ("blobs/sha256/<hex>"); the bucket key
+// rewrites the leading "blobs/" to SharedBlobsPrefix.
+//
+// Concurrency: parallel HEADs via a fixed worker pool. The
+// returned slice preserves the input order so logs / re-runs are
+// reproducible.
+func blobsMissingOnS3(ctx context.Context, mc *minio.Client, bucket string, relPaths []string, logger *zap.Logger) ([]string, error) {
+	if len(relPaths) == 0 {
+		return nil, nil
+	}
+	type result struct {
+		idx   int
+		rel   string
+		exist bool
+		err   error
+	}
+	results := make([]result, len(relPaths))
+	for i := range results {
+		results[i] = result{idx: i, rel: relPaths[i]}
+	}
+	jobs := make(chan int)
+	done := make(chan struct{}, blobDedupConcurrency)
+	for w := 0; w < blobDedupConcurrency; w++ {
+		go func() {
+			for i := range jobs {
+				rel := results[i].rel
+				key := SharedBlobsPrefix + strings.TrimPrefix(rel, "blobs/")
+				_, err := mc.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
+				if err == nil {
+					results[i].exist = true
+				} else if isNotFound(err) {
+					results[i].exist = false
+				} else {
+					results[i].err = err
+				}
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := range relPaths {
+		jobs <- i
+	}
+	close(jobs)
+	for w := 0; w < blobDedupConcurrency; w++ {
+		<-done
+	}
+	missing := make([]string, 0, len(relPaths))
+	for _, r := range results {
+		if r.err != nil {
+			return nil, fmt.Errorf("HEAD blob %s: %w", r.rel, r.err)
+		}
+		if !r.exist {
+			missing = append(missing, r.rel)
+		}
+	}
+	return missing, nil
+}
+
+// isNotFound recognises the minio-go shape of an S3 NoSuchKey /
+// 404 response. We can't use errors.As against a value type that
+// minio-go returns by value (ErrorResponse), so unwrap the
+// concrete type explicitly.
+func isNotFound(err error) bool {
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		return resp.Code == "NoSuchKey" || resp.StatusCode == 404
+	}
+	return false
 }
 
 // walkOCILayout returns every regular file under root, as relative
@@ -360,9 +532,11 @@ func WriteIndex(ctx context.Context, c S3Config, idx Index) error {
 	if err != nil {
 		return fmt.Errorf("init S3 client: %w", err)
 	}
-	if idx.Version == 0 {
-		idx.Version = IndexVersion
-	}
+	// Always stamp the writing binary's version. We never write a
+	// version older than this binary understands, and a future
+	// reader can rely on `index.version` to match the highest
+	// schema field used in any entry.
+	idx.Version = IndexVersion
 	body, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return err

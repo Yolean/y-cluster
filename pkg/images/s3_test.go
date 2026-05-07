@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -174,6 +175,52 @@ func TestOrderForUpload(t *testing.T) {
 	// just confirm both terminals land in the right slots.
 	if got[len(got)-2] != "oci-layout" {
 		t.Errorf("oci-layout should be next-to-last; got %v", got)
+	}
+}
+
+// TestPartitionLayoutFiles pins the v2 split: only "blobs/..."
+// paths land in the dedup-able blobs slice; everything else
+// (oci-layout, index.json) stays in manifests.
+func TestPartitionLayoutFiles(t *testing.T) {
+	manifests, blobs := partitionLayoutFiles([]string{
+		"blobs/sha256/aaa",
+		"blobs/sha256/bbb",
+		"index.json",
+		"oci-layout",
+	})
+	if !reflect.DeepEqual(manifests, []string{"index.json", "oci-layout"}) {
+		t.Errorf("manifests: %v", manifests)
+	}
+	if !reflect.DeepEqual(blobs, []string{"blobs/sha256/aaa", "blobs/sha256/bbb"}) {
+		t.Errorf("blobs: %v", blobs)
+	}
+}
+
+// TestSharedBlobsPrefix pins the bucket-level shared prefix for
+// content-addressed blob storage. Two images sharing
+// sha256:abc both end up reading/writing the same key.
+func TestSharedBlobsPrefix(t *testing.T) {
+	if SharedBlobsPrefix != "blobs/" {
+		t.Errorf("SharedBlobsPrefix should be %q, got %q", "blobs/", SharedBlobsPrefix)
+	}
+	// The pre-load + push key construction does
+	// SharedBlobsPrefix + strings.TrimPrefix(rel, "blobs/")
+	// so a layout-relative "blobs/sha256/abc" rewrites to a
+	// bucket key "blobs/sha256/abc" (same path, but conceptually
+	// at the bucket root rather than under a per-image prefix).
+	const rel = "blobs/sha256/abc"
+	got := SharedBlobsPrefix + strings.TrimPrefix(rel, "blobs/")
+	if got != "blobs/sha256/abc" {
+		t.Errorf("shared key construction: got %q want %q", got, "blobs/sha256/abc")
+	}
+}
+
+// TestIndexVersion_BumpedToTwo guards against an accidental
+// re-bump back to 1 if someone is rebasing across the dedup
+// landing.
+func TestIndexVersion_BumpedToTwo(t *testing.T) {
+	if IndexVersion != 2 {
+		t.Errorf("IndexVersion = %d (want 2 after dedup)", IndexVersion)
 	}
 }
 

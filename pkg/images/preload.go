@@ -70,8 +70,10 @@ func PreloadFromS3(ctx context.Context, c S3Config, run SSHRunner, logger *zap.L
 	return nil
 }
 
-// preloadOne handles one IndexEntry: presigns every blob URL,
-// generates a script, ships it.
+// preloadOne handles one IndexEntry: presigns every layout file
+// (manifests under entry.Prefix; blobs at the shared bucket-level
+// prefix for v2 entries, or under entry.Prefix for v1 entries),
+// generates the per-image script, and ships it.
 func preloadOne(ctx context.Context, mc *minio.Client, bucket string, entry IndexEntry, run SSHRunner, logger *zap.Logger) error {
 	urls, err := presignEntry(ctx, mc, bucket, entry)
 	if err != nil {
@@ -81,7 +83,8 @@ func preloadOne(ctx context.Context, mc *minio.Client, bucket string, entry Inde
 	logger.Info("ssh-loading image",
 		zap.String("ref", entry.Ref),
 		zap.String("digest", entry.Digest),
-		zap.Int("files", len(entry.Files)))
+		zap.Int("files", len(entry.Files)),
+		zap.Int("blobs", len(entry.BlobDigests)))
 	out, err := run(ctx, "bash -s", []byte(script))
 	if err != nil {
 		return fmt.Errorf("ssh: %w; stdout=%s", err, string(out))
@@ -95,12 +98,29 @@ func preloadOne(ctx context.Context, mc *minio.Client, bucket string, entry Inde
 }
 
 // presignEntry generates a presigned GET URL for every file in
-// the entry. Returns map keyed by relative path so the script
-// generator can emit `curl ... -o <rel>` rows.
+// the entry, keyed by the OCI-relative path the script materialises
+// the file at on the node. Two cases:
+//
+//   - manifests (entry.Files): key = entry.Prefix + rel
+//   - blobs (entry.BlobDigests, v2): key = SharedBlobsPrefix + tail
+//     where tail is the digest path with the leading "blobs/"
+//     stripped (so an OCI-relative "blobs/sha256/abc" maps to a
+//     bucket key "blobs/sha256/abc" -- bucket-level shared).
+//
+// v1 entries have BlobDigests empty and blob paths in Files; the
+// first branch handles them transparently.
 func presignEntry(ctx context.Context, mc *minio.Client, bucket string, entry IndexEntry) (map[string]string, error) {
-	out := make(map[string]string, len(entry.Files))
+	out := make(map[string]string, len(entry.Files)+len(entry.BlobDigests))
 	for _, rel := range entry.Files {
 		key := entry.Prefix + rel
+		u, err := mc.PresignedGetObject(ctx, bucket, key, PresignTTL, url.Values{})
+		if err != nil {
+			return nil, fmt.Errorf("presign %s: %w", key, err)
+		}
+		out[rel] = u.String()
+	}
+	for _, rel := range entry.BlobDigests {
+		key := SharedBlobsPrefix + strings.TrimPrefix(rel, "blobs/")
 		u, err := mc.PresignedGetObject(ctx, bucket, key, PresignTTL, url.Values{})
 		if err != nil {
 			return nil, fmt.Errorf("presign %s: %w", key, err)
@@ -114,7 +134,11 @@ func presignEntry(ctx context.Context, mc *minio.Client, bucket string, entry In
 // for one IndexEntry. The script:
 //
 //   1. Creates a per-image tmpdir under /tmp/y-cluster-preload/.
-//   2. curls each layout file into its relative position.
+//   2. curls each layout file (manifests + blobs) into its
+//      relative position. The materialised tmpdir is a valid
+//      OCI v1 image layout regardless of whether blobs came from
+//      the per-image prefix (v1 entry) or the shared bucket-level
+//      prefix (v2 entry) -- the OCI-relative paths are identical.
 //   3. tars the layout and pipes through `sudo k3s ctr -n k8s.io
 //      image import -`.
 //   4. Cleans up via `trap`.
@@ -124,9 +148,9 @@ func presignEntry(ctx context.Context, mc *minio.Client, bucket string, entry In
 // operator.
 //
 // Exposed (capitalised) so unit tests can pin the shape without
-// running SSH. Order of curl invocations follows the entry's
-// Files list (sorted lexicographically by walkOCILayout), which
-// keeps the script reproducible across runs of the same entry.
+// running SSH. Order of curl invocations is sorted lexicographic
+// across the union of Files + BlobDigests so consecutive runs
+// emit byte-identical scripts.
 func BuildPreloadScript(entry IndexEntry, urls map[string]string) string {
 	var b bytes.Buffer
 	b.WriteString("#!/bin/bash\n")
@@ -134,18 +158,20 @@ func BuildPreloadScript(entry IndexEntry, urls map[string]string) string {
 	b.WriteString("LAYOUT=$(mktemp -d /tmp/y-cluster-preload.XXXXXX)\n")
 	b.WriteString("trap 'rm -rf \"$LAYOUT\"' EXIT\n")
 
-	// Walk Files in sorted order. Ranging map[string]string would
-	// randomise; iterate the entry slice so consecutive runs emit
-	// byte-identical scripts.
-	files := make([]string, 0, len(entry.Files))
-	files = append(files, entry.Files...)
-	sort.Strings(files)
+	// Union of manifest + blob relative paths. Map iteration is
+	// random in Go; sort the union explicitly so the script is
+	// reproducible across runs of the same entry.
+	all := make([]string, 0, len(entry.Files)+len(entry.BlobDigests))
+	all = append(all, entry.Files...)
+	all = append(all, entry.BlobDigests...)
+	sort.Strings(all)
 
-	for _, rel := range files {
+	for _, rel := range all {
 		u, ok := urls[rel]
 		if !ok {
-			// presignEntry generated URLs from the same files
-			// slice; a mismatch would be a programming error.
+			// presignEntry generated URLs from the same files +
+			// blobs lists; a mismatch would be a programming
+			// error.
 			continue
 		}
 		// One mkdir per directory prefix is cheaper than -p on
