@@ -58,9 +58,18 @@ func assertPidGone(t *testing.T, pid int) {
 // defaulted config.QEMUConfig. Tests then override individual fields
 // to keep ports / cache dirs / contexts isolated from a developer's
 // real cluster on the same host.
+//
+// DiskSize is bumped from the 20G default to 40G: appliance e2e
+// flows install workloads, build a seed tarball, prepare-export,
+// and re-boot from the prepared disk -- the cumulative footprint
+// pushes the 20G disk into pressure on the kubelet's image-gc
+// thresholds, which surfaces as flaky pod evictions mid-test.
+// 40G is well clear of that ceiling and the qcow2 sparse layout
+// means the host-disk footprint only grows with actual usage.
 func e2eQEMURuntime() qemu.Config {
 	c := &config.QEMUConfig{CommonConfig: config.CommonConfig{Provider: config.ProviderQEMU}}
 	c.ApplyDefaults()
+	c.DiskSize = "40G"
 	return qemu.FromConfig(c)
 }
 
