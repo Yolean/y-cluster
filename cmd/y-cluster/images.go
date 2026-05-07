@@ -29,6 +29,7 @@ func imagesCmd() *cobra.Command {
 	cmd.AddCommand(imagesListCmd())
 	cmd.AddCommand(imagesCacheCmd())
 	cmd.AddCommand(imagesLoadCmd())
+	cmd.AddCommand(imagesPushCmd())
 	return cmd
 }
 
