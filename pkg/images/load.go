@@ -64,7 +64,7 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 	before := listRefSet(ctx, lr)
 
 	args := []string{"-n", "k8s.io", "image", "import", "-"}
-	logger.Info("loading image archive",
+	logger.Debug("loading image archive",
 		zap.String("backend", string(lr.Backend)),
 		zap.String("cluster", lr.ClusterName),
 	)
@@ -74,7 +74,7 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 			stdout.String(), stderr.String(), err)
 	}
 	if stdout.Len() > 0 {
-		logger.Info("ctr image import",
+		logger.Debug("ctr image import",
 			zap.String("output", stdout.String()),
 		)
 	}
@@ -90,7 +90,7 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 		logger.Warn("post-import snapshot failed; skipping digest-alias step")
 		return nil
 	}
-	aliased := 0
+	aliasFor := map[string]string{}
 	for _, p := range after {
 		if before[p.ref] {
 			continue // existed before this import
@@ -116,13 +116,33 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 				zap.Error(err))
 			continue
 		}
-		aliased++
-		logger.Info("digest alias created",
+		aliasFor[p.ref] = alias
+		logger.Debug("digest alias created",
 			zap.String("ref", p.ref),
 			zap.String("alias", alias))
 	}
-	if aliased == 0 {
-		logger.Info("no new digest aliases needed (re-import or already aliased)")
+
+	// Happy-path summary: one INFO per new tag-form ref. Digest-only
+	// rows in `after` are derived from the tag rows and would just
+	// repeat their parent's digest.
+	any := false
+	for _, p := range after {
+		if before[p.ref] || strings.Contains(p.ref, "@") {
+			continue
+		}
+		any = true
+		short := p.digest
+		if strings.HasPrefix(short, "sha256:") && len(short) > 19 {
+			short = short[:19]
+		}
+		suffix := ""
+		if _, ok := aliasFor[p.ref]; ok {
+			suffix = " (+1 digest alias)"
+		}
+		logger.Info(fmt.Sprintf("imported %s @%s%s", p.ref, short, suffix))
+	}
+	if !any {
+		logger.Info("no new image refs (already loaded)")
 	}
 	return nil
 }
