@@ -90,16 +90,15 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 		logger.Warn("post-import snapshot failed; skipping digest-alias step")
 		return nil
 	}
-	aliasFor := map[string]string{}
+	created := map[string]string{}
 	for _, p := range after {
 		if before[p.ref] {
 			continue // existed before this import
 		}
-		if strings.Contains(p.ref, "@") {
-			continue // already digest-form; nothing to alias
+		alias := aliasFor(p.ref, p.digest)
+		if alias == "" {
+			continue
 		}
-		nameOnly := stripTag(p.ref)
-		alias := nameOnly + "@" + p.digest
 		if before[alias] {
 			continue // alias already exists somehow; skip
 		}
@@ -109,42 +108,90 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 			// Don't fail the whole Load -- the import already
 			// landed. Log so the operator sees what didn't
 			// alias and can do it manually if needed.
-			logger.Warn("ctr image tag (digest alias) failed",
+			logger.Warn("ctr image tag (alias) failed",
 				zap.String("ref", p.ref),
 				zap.String("alias", alias),
 				zap.String("stderr", tagErr.String()),
 				zap.Error(err))
 			continue
 		}
-		aliasFor[p.ref] = alias
-		logger.Debug("digest alias created",
+		created[p.ref] = alias
+		logger.Debug("alias created",
 			zap.String("ref", p.ref),
 			zap.String("alias", alias))
 	}
 
-	// Happy-path summary: one INFO per new tag-form ref. Digest-only
-	// rows in `after` are derived from the tag rows and would just
-	// repeat their parent's digest.
+	// Happy-path summary: one INFO per new ref that names a real
+	// repo. ctr writes a bare config-digest row ("sha256:<hex>")
+	// alongside the canonical ref when importing; we filter it
+	// here so the operator only sees lines for things they pinned.
 	any := false
 	for _, p := range after {
-		if before[p.ref] || strings.Contains(p.ref, "@") {
+		if before[p.ref] {
+			continue
+		}
+		if strings.HasPrefix(p.ref, "sha256:") {
 			continue
 		}
 		any = true
-		short := p.digest
-		if strings.HasPrefix(short, "sha256:") && len(short) > 19 {
-			short = short[:19]
+		var line string
+		if strings.Contains(p.ref, "@") {
+			// Digest-form ref already carries the digest; don't
+			// repeat it in the log line.
+			line = "imported " + p.ref
+		} else {
+			short := p.digest
+			if strings.HasPrefix(short, "sha256:") && len(short) > 19 {
+				short = short[:19]
+			}
+			line = fmt.Sprintf("imported %s @%s", p.ref, short)
 		}
-		suffix := ""
-		if _, ok := aliasFor[p.ref]; ok {
-			suffix = " (+1 digest alias)"
+		if _, ok := created[p.ref]; ok {
+			if strings.Contains(p.ref, "@") {
+				line += " (+1 :latest alias)"
+			} else {
+				line += " (+1 digest alias)"
+			}
 		}
-		logger.Info(fmt.Sprintf("imported %s @%s%s", p.ref, short, suffix))
+		logger.Info(line)
 	}
 	if !any {
 		logger.Info("no new image refs (already loaded)")
 	}
 	return nil
+}
+
+// aliasFor decides what alias (if any) to create for a new
+// post-import ref. Two cases produce a useful alias; one (the
+// bare config-digest row containerd writes alongside the
+// canonical ref) produces "" so the caller skips.
+//
+//   - Tag-form ref ("<repo>:<tag>") -> "<repo>@<digest>".
+//     Required by deployments pinning images in name:tag@sha256:
+//     digest form; without it kubelet's digest lookup misses the
+//     tag-only row in containerd's image store and falls back to
+//     a registry pull.
+//
+//   - Digest-form ref ("<repo>@<digest>") -> "<repo>:latest@
+//     <digest>". Required by kubelet's checkpoint-image check on
+//     containerd v2: it resolves images by config-digest and
+//     normalizes the bare config-digest row to "docker.io/library/
+//     sha256@..." (not found). A tag-form alias gives the lookup
+//     a parseable repo to land on.
+//
+//   - Bare "sha256:<hex>" (the config-digest row ctr emits as a
+//     side effect) -> "". Treating it as a tagged ref would
+//     mangle it through stripTag into the literal "sha256" and
+//     synthesize "sha256@sha256:..." -- a garbage entry that
+//     poisons the image store.
+func aliasFor(ref, digest string) string {
+	if strings.HasPrefix(ref, "sha256:") {
+		return ""
+	}
+	if at := strings.Index(ref, "@"); at >= 0 {
+		return ref[:at] + ":latest" + ref[at:]
+	}
+	return stripTag(ref) + "@" + digest
 }
 
 // TarOCIDir streams a USTAR archive of an OCI v1 layout rooted

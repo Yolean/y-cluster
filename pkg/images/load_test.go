@@ -259,3 +259,43 @@ func TestStripTag(t *testing.T) {
 		}
 	}
 }
+
+// TestAliasFor pins the post-import alias policy. Each case
+// captures one of the three shapes ctr writes into the image
+// store after `image import`: tag-form, digest-form, and the
+// bare config-digest row that mustn't be aliased.
+func TestAliasFor(t *testing.T) {
+	const digest = "sha256:af91c49ce795f3b2c1a4e6d8b9c0e1f2a3b4c5d6e7f80112233445566778899aa"
+	cases := []struct {
+		name, ref, want string
+	}{
+		{
+			name: "tag-form -> digest alias",
+			ref:  "ghcr.io/yolean/echo:v1",
+			want: "ghcr.io/yolean/echo@" + digest,
+		},
+		{
+			name: "digest-form -> :latest alias (kubelet checkpoint-image lookup)",
+			ref:  "ghcr.io/yolean/minio-deduplication@" + digest,
+			want: "ghcr.io/yolean/minio-deduplication:latest@" + digest,
+		},
+		{
+			name: "bare config-digest row -> no alias (would mangle to sha256@sha256:...)",
+			ref:  "sha256:dc863b8391abb7c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f70819253647586978a9",
+			want: "",
+		},
+		{
+			name: "hostport tag stripped at correct colon",
+			ref:  "registry.example:5000/foo/bar:tag",
+			want: "registry.example:5000/foo/bar@" + digest,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := aliasFor(c.ref, digest)
+			if got != c.want {
+				t.Errorf("aliasFor(%q) = %q, want %q", c.ref, got, c.want)
+			}
+		})
+	}
+}
