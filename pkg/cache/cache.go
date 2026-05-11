@@ -57,6 +57,22 @@ func Images(flagOverride string) (string, error) {
 	return filepath.Join(root, "images"), nil
 }
 
+// ImageLayout returns the on-disk layout directory for a single
+// image, given its sha256 digest (e.g. "sha256:abc...").
+// Callers shouldn't think about this path -- the cache is
+// implementation-internal -- but the load-by-ref flow needs it
+// to feed bytes to `ctr image import` from a cache hit.
+// Exporting the derivation here keeps the layout shape in one
+// place so a future cache backend swap touches one helper, not
+// every caller.
+func ImageLayout(flagOverride, digest string) (string, error) {
+	imagesDir, err := Images(flagOverride)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(imagesDir, digest), nil
+}
+
 // K3s returns the k3s download root: airgap tarballs, k3s binary,
 // per-version. Replaces the qemu provisioner's old
 // ~/.cache/y-cluster-qemu/airgap/<version> location.
