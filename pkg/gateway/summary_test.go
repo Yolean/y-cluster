@@ -39,13 +39,13 @@ func TestBuildSummary_HTTPRouteServiceBackend(t *testing.T) {
 			},
 		}},
 		HTTPRoutes: []HTTPRoute{{
-			Namespace:  "keycloak-v3",
+			Namespace:  "myapp",
 			Name:       "keycloak-admin",
 			ParentRefs: rawJSON(t, `[{"name":"y-cluster","namespace":"y-cluster","sectionName":"https"}]`),
 			Hostnames:  []string{"keycloak-admin"},
 			Rules: rawJSON(t, `[{
 				"matches": [{"path": {"type": "PathPrefix", "value": "/"}}],
-				"backendRefs": [{"name": "keycloak", "namespace": "keycloak-v3", "port": 8080}]
+				"backendRefs": [{"name": "keycloak", "namespace": "myapp", "port": 8080}]
 			}]`),
 		}},
 	}
@@ -71,7 +71,7 @@ func TestBuildSummary_HTTPRouteServiceBackend(t *testing.T) {
 	if len(rs) != 1 {
 		t.Fatalf("routes: %+v", rs)
 	}
-	if rs[0].Source != "HTTPRoute/keycloak-v3/keycloak-admin#0" {
+	if rs[0].Source != "HTTPRoute/myapp/keycloak-admin#0" {
 		t.Errorf("source=%q", rs[0].Source)
 	}
 	if len(rs[0].Matches) != 1 || rs[0].Matches[0].Path != "PathPrefix=/" {
@@ -81,7 +81,7 @@ func TestBuildSummary_HTTPRouteServiceBackend(t *testing.T) {
 		t.Fatalf("backends: %+v", rs[0].Backends)
 	}
 	svc := rs[0].Backends[0].Service
-	if svc == nil || svc.Name != "keycloak" || svc.Namespace != "keycloak-v3" || svc.Port != 8080 {
+	if svc == nil || svc.Name != "keycloak" || svc.Namespace != "myapp" || svc.Port != 8080 {
 		t.Errorf("service: %+v", svc)
 	}
 }
@@ -213,7 +213,7 @@ func TestBuildSummary_MultiHostnameRouteAppearsInEachBucket(t *testing.T) {
 			Listeners: []Listener{{Name: "https", Port: 443, Protocol: "HTTPS"}},
 		}},
 		HTTPRoutes: []HTTPRoute{{
-			Namespace:  "keycloak-v3",
+			Namespace:  "myapp",
 			Name:       "keycloak-admin",
 			ParentRefs: rawJSON(t, `[{"name":"y-cluster","namespace":"y-cluster"}]`),
 			Hostnames:  []string{"keycloak-admin", "keycloak-admin.example.com"},

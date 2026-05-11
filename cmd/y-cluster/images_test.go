@@ -103,3 +103,70 @@ func TestImagesLoadCmd_FileNotFound(t *testing.T) {
 		t.Fatal("expected error for missing archive file")
 	}
 }
+
+// TestIsPathArg pins the prefix-driven dispatch rule -- the
+// single source of truth for "is this a path or a remote ref?"
+// the load cmd reads. Reference shape is documented in the
+// load subcommand's --help, which the cases below mirror.
+func TestIsPathArg(t *testing.T) {
+	paths := []string{
+		"./relative/path",
+		"./relative/path.tar",
+		"./", ".", "..",
+		"/absolute/path",
+		"/", "/tmp",
+		"~/home/path",
+	}
+	refs := []string{
+		"nginx",
+		"nginx:1.27",
+		"nginx@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"docker.io/library/nginx:1.27",
+		"registry.k8s.io/pause:3.10",
+		"localhost:5000/yolean/echo:v1",
+		"builds-registry.default.svc.cluster.local/myrepo/myapp:local-dev",
+	}
+	for _, p := range paths {
+		if !isPathArg(p) {
+			t.Errorf("expected %q to dispatch as path", p)
+		}
+	}
+	for _, r := range refs {
+		if isPathArg(r) {
+			t.Errorf("expected %q to dispatch as remote ref", r)
+		}
+	}
+}
+
+// TestImagesLoadCmd_CacheFalseRejectedForStdin: --cache=false
+// is meaningful only for remote refs (where the alternative is
+// "pull into a tempdir"). For stdin, the caller's already
+// holding the bytes; --cache=false has no semantic and should
+// fail loudly.
+func TestImagesLoadCmd_CacheFalseRejectedForStdin(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetIn(strings.NewReader("noise"))
+	cmd.SetArgs([]string{"images", "load", "--context=does-not-exist", "--cache=false", "-"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --cache=false with stdin")
+	}
+	if !strings.Contains(err.Error(), "--cache=false") {
+		t.Errorf("error should call out --cache=false: %v", err)
+	}
+}
+
+// TestImagesLoadCmd_CacheFalseRejectedForPath: same shape for
+// the path-input case -- caller owns the bytes; toggling the
+// cache is meaningless.
+func TestImagesLoadCmd_CacheFalseRejectedForPath(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetArgs([]string{"images", "load", "--context=does-not-exist", "--cache=false", "./some/path"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --cache=false with path")
+	}
+	if !strings.Contains(err.Error(), "--cache=false") {
+		t.Errorf("error should call out --cache=false: %v", err)
+	}
+}

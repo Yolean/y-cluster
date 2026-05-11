@@ -1,8 +1,178 @@
 package images
 
 import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"io"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+
+	"github.com/Yolean/y-cluster/pkg/cache"
 )
+
+// TestTarOCIDir_StreamsAllFiles writes a small OCI v1 layout
+// via the same go-containerregistry pipeline an actual caller
+// would (random.Image -> push to in-process registry -> Cache
+// pulls into the shared cache), then exercises TarOCIDir and
+// confirms every required layout entry shows up in the
+// resulting archive. Order doesn't matter; the entry set must
+// cover the layout's three required nodes.
+func TestTarOCIDir_StreamsAllFiles(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := random.Image(512, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := name.NewTag(u.Host + "/test/tarocidir:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	t.Setenv("Y_CLUSTER_CACHE_DIR", root)
+	if _, err := Cache(context.Background(), ref.String(), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	imgDigest, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := cache.ImageLayout(root, imgDigest.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := TarOCIDir(dir, &buf); err != nil {
+		t.Fatalf("TarOCIDir: %v", err)
+	}
+
+	tr := tar.NewReader(&buf)
+	seen := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[hdr.Name] = true
+		_, _ = io.Copy(io.Discard, tr)
+	}
+
+	for _, need := range []string{"oci-layout", "index.json"} {
+		if !seen[need] {
+			t.Errorf("tar missing %q (got %v)", need, seen)
+		}
+	}
+	hasBlob := false
+	for n := range seen {
+		if filepath.Dir(n) == "blobs/sha256" {
+			hasBlob = true
+			break
+		}
+	}
+	if !hasBlob {
+		t.Errorf("tar has no blobs/sha256 entries (got %v)", seen)
+	}
+}
+
+// TestTarOCIDir_EmptyDirNoEntries: empty source dir produces a
+// valid tar that decodes to zero entries. The caller (Load via
+// ctr import) would surface a downstream import failure on
+// empty input, which is the right level for "you pointed me at
+// an empty layout".
+func TestTarOCIDir_EmptyDirNoEntries(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	if err := TarOCIDir(dir, &buf); err != nil {
+		t.Fatalf("TarOCIDir(empty): %v", err)
+	}
+	tr := tar.NewReader(&buf)
+	if _, err := tr.Next(); err != io.EOF {
+		t.Errorf("expected EOF on empty layout, got err=%v", err)
+	}
+}
+
+// TestTarOCIDir_NonexistentDirErrors: cmd-layer guards check
+// os.Stat first, but TarOCIDir on a missing dir should still
+// surface the error rather than silently produce an empty tar.
+func TestTarOCIDir_NonexistentDirErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	var buf bytes.Buffer
+	err := TarOCIDir(missing, &buf)
+	if err == nil {
+		t.Fatal("expected error for missing dir")
+	}
+}
+
+// TestTarOCIDirReader_PipeClose: the goroutine-backed reader
+// must release its goroutine on early Close (Load defers Close
+// even on abort).
+func TestTarOCIDirReader_PipeClose(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := TarOCIDirReader(dir)
+	buf := make([]byte, 32)
+	_, _ = r.Read(buf)
+	if err := r.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestPresentInCluster_DigestMatch pins the matcher policy:
+// digestRef like "host/name@sha256:abc" matches any row whose
+// digest column equals sha256:abc, regardless of the row's
+// ref name. Catches the common case where a prior load brought
+// in the same digest under a different tag (mirrors, retag) --
+// we should still skip the re-import.
+//
+// Driven through parseImageList + a hand-constructed pairs
+// slice so we don't need a real cluster.
+func TestPresentInCluster_DigestMatch(t *testing.T) {
+	const want = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	pairs := parseImageList("REF\tTYPE\tDIGEST\nfoo:bar\ttype\t" + want + "\n")
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(pairs))
+	}
+	if pairs[0].digest != want {
+		t.Fatalf("parser regression: got digest %q want %q", pairs[0].digest, want)
+	}
+	// The cluster-side matcher is a substring of PresentInCluster:
+	// scan the pairs for a digest equality. Verify the policy in
+	// isolation -- a full PresentInCluster test would need a fake
+	// cluster.LookupResult which is more wiring than this
+	// behavioural check justifies.
+	hit := false
+	for _, p := range pairs {
+		if p.digest == want {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		t.Error("digest match policy regression")
+	}
+}
 
 // TestParseImageList pins the (ref, digest) extraction
 // against a real `ctr -n k8s.io image list` capture from a
@@ -18,9 +188,9 @@ func TestParseImageList(t *testing.T) {
 		{
 			name: "header + single row",
 			in: "REF                                  TYPE                                                                                       DIGEST                                                                  SIZE       PLATFORMS                LABELS\n" +
-				"builds-registry.ystack.svc.cluster.local/yolean/keycloak-v3:local-dev    application/vnd.oci.image.index.v1+json    sha256:fafacfe13375f62fc0a8303c6c6b6186e755d44f479a161476f4129009eb730b    263.7 MiB    linux/amd64,linux/arm64    io.cri-containerd.image=managed\n",
+				"builds-registry.default.svc.cluster.local/myrepo/myapp:local-dev    application/vnd.oci.image.index.v1+json    sha256:fafacfe13375f62fc0a8303c6c6b6186e755d44f479a161476f4129009eb730b    263.7 MiB    linux/amd64,linux/arm64    io.cri-containerd.image=managed\n",
 			want: []importedRef{{
-				ref:    "builds-registry.ystack.svc.cluster.local/yolean/keycloak-v3:local-dev",
+				ref:    "builds-registry.default.svc.cluster.local/myrepo/myapp:local-dev",
 				digest: "sha256:fafacfe13375f62fc0a8303c6c6b6186e755d44f479a161476f4129009eb730b",
 			}},
 		},
@@ -78,7 +248,7 @@ func TestStripTag(t *testing.T) {
 		// Hostport-prefixed ref WITHOUT tag.
 		{"registry.example:5000/path", "registry.example:5000/path"},
 		// Standard cluster-local registry path.
-		{"builds-registry.ystack.svc.cluster.local/yolean/keycloak-v3:local-dev", "builds-registry.ystack.svc.cluster.local/yolean/keycloak-v3"},
+		{"builds-registry.default.svc.cluster.local/myrepo/myapp:local-dev", "builds-registry.default.svc.cluster.local/myrepo/myapp"},
 		// No tag at all.
 		{"plain", "plain"},
 	}

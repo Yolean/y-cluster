@@ -1,10 +1,14 @@
 package images
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"go.uber.org/zap"
@@ -121,6 +125,108 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 		logger.Info("no new digest aliases needed (re-import or already aliased)")
 	}
 	return nil
+}
+
+// TarOCIDir streams a USTAR archive of an OCI v1 layout rooted
+// at dir into w. The entries are dir-relative (oci-layout,
+// index.json, blobs/sha256/*) -- the same shape `tar -cf - -C
+// <dir> .` produces, which is what `ctr image import` accepts
+// as the "OCI image layout (as tar)" import format.
+//
+// Used by the load path when the caller supplies a directory:
+// stream a tar of the layout straight into the cluster node's
+// containerd without making an intermediate file on disk.
+// Streaming (not building in memory) keeps memory bounded.
+func TarOCIDir(dir string, w io.Writer) error {
+	tw := tar.NewWriter(w)
+	err := filepath.Walk(dir, func(path string, info fs.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if info.IsDir() && !strings.HasSuffix(hdr.Name, "/") {
+			hdr.Name += "/"
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tw, f)
+		_ = f.Close()
+		return copyErr
+	})
+	if err != nil {
+		_ = tw.Close()
+		return err
+	}
+	return tw.Close()
+}
+
+// TarOCIDirReader is the streaming variant of TarOCIDir: returns
+// an io.ReadCloser the caller pipes into Load. Internally runs
+// TarOCIDir in a goroutine through an io.Pipe; the caller MUST
+// Close() to release the goroutine even on aborted reads.
+func TarOCIDirReader(dir string) io.ReadCloser {
+	pr, pw := io.Pipe()
+	go func() {
+		err := TarOCIDir(dir, pw)
+		_ = pw.CloseWithError(err)
+	}()
+	return pr
+}
+
+// PresentInCluster reports whether digestRef (e.g.
+// "docker.io/library/nginx@sha256:abc...") is already indexed in
+// the cluster's k8s.io containerd namespace. Returns false on any
+// lookup failure -- the caller treats that as "import anyway",
+// which is safe because `ctr image import` is itself idempotent
+// at the content-store level.
+//
+// Match policy: succeeds when SOME row in `ctr image list` has
+// the same digest as digestRef, regardless of the row's ref
+// name. That covers the cases that matter:
+//
+//   - a prior load brought in the same digest under a different
+//     tag (mirrors, retag);
+//   - the digest alias the regular Load() step writes back into
+//     containerd (host/name@sha256:...) lines up exactly with
+//     digestRef.
+//
+// Skipping a re-import on a digest hit is what saves the
+// SSH/docker-exec byte transfer the layered-registry-store 2.0
+// would eliminate at the protocol level.
+func PresentInCluster(ctx context.Context, lr *cluster.LookupResult, digestRef string) bool {
+	wantDigest := digestRef
+	if at := strings.LastIndex(digestRef, "@"); at >= 0 {
+		wantDigest = digestRef[at+1:]
+	}
+	pairs := listRefsWithDigests(ctx, lr)
+	if pairs == nil {
+		return false
+	}
+	for _, p := range pairs {
+		if p.digest == wantDigest {
+			return true
+		}
+	}
+	return false
 }
 
 // importedRef is one (ref, digest) row from `ctr image list`.

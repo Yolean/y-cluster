@@ -99,7 +99,7 @@ func TestHostnames_FromHTTPRouteRoundTrip(t *testing.T) {
 			Listeners: []Listener{{Name: "https", Port: 443, Protocol: "HTTPS"}},
 		}},
 		HTTPRoutes: []HTTPRoute{{
-			Namespace:  "keycloak-v3",
+			Namespace:  "myapp",
 			Name:       "keycloak-admin",
 			ParentRefs: rawJSON(t, `[{"name":"y-cluster","namespace":"y-cluster"}]`),
 			Hostnames:  []string{"keycloak-admin", "keycloak-admin.example.com"},

@@ -126,7 +126,41 @@ func Cache(ctx context.Context, ref, cacheRoot string, logger *zap.Logger) (stri
 			return "", fmt.Errorf("write image %s: %w", digestRef, err)
 		}
 	}
+	// Symmetric with the "pulling image" / "image already
+	// cached" lines: one info entry per network pull, one per
+	// cache hit, one per import. Grep-friendly for operators
+	// watching a long sideload script.
+	logger.Info("image cached",
+		zap.String("ref", digestRef),
+		zap.String("path", dir),
+	)
 	return digestRef, nil
+}
+
+// ResolveDigest resolves ref to its digest-pinned form without
+// downloading any blobs. Used by the load-by-ref path to ask
+// "is this already in the cluster?" before deciding whether to
+// pull. Digest-pinned input passes through with no network call;
+// tag input HEADs the registry.
+func ResolveDigest(ctx context.Context, ref string) (string, error) {
+	parsed, err := name.ParseReference(ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve-digest: parse %q: %w", ref, err)
+	}
+	var digest v1.Hash
+	if dr, ok := parsed.(name.Digest); ok {
+		digest, err = v1.NewHash(dr.DigestStr())
+		if err != nil {
+			return "", fmt.Errorf("resolve-digest: parse digest %s: %w", dr.DigestStr(), err)
+		}
+	} else {
+		desc, err := remote.Head(parsed, remote.WithContext(ctx))
+		if err != nil {
+			return "", fmt.Errorf("resolve-digest: HEAD %s: %w", ref, err)
+		}
+		digest = desc.Digest
+	}
+	return digestReference(parsed, digest)
 }
 
 // digestReference rebuilds the input reference with its digest
