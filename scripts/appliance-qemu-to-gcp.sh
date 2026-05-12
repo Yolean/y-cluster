@@ -72,7 +72,10 @@ Environment:
   GCP_ZONE          GCP zone (default: europe-north2-a)
   GCP_BUCKET        GCS bucket for image tarballs
                     (default: <project>-appliance-images)
-  GCP_MACHINE_TYPE  Compute Engine machine type (default: e2-medium)
+  GCP_MACHINE_TYPE  Compute Engine machine type (default: e2-standard-2 --
+                    2 vCPU / 8 GiB; e2-medium's 4 GiB OOMs the full
+                    appliance stack mid-run. The type bundles CPU + memory,
+                    so there's no separate memory knob.)
   GCP_IMAGE_FAMILY  Image family tag (default: y-cluster-appliance)
   GCP_DATADIR_DISK  Persistent disk for /data/yolean
                     (default: appliance-gcp-datadir; preserved on teardown)
@@ -147,7 +150,12 @@ fi
 GCP_REGION="${GCP_REGION:-europe-north2}"
 GCP_ZONE="${GCP_ZONE:-europe-north2-a}"
 GCP_BUCKET="${GCP_BUCKET:-${GCP_PROJECT}-appliance-images}"
-GCP_MACHINE_TYPE="${GCP_MACHINE_TYPE:-e2-medium}"
+# e2-standard-2: 2 vCPU / 8 GiB. The 4 GiB e2-medium OOMs once the
+# appliance is running a non-trivial workload stack; 8 GiB is the
+# floor we have validated. GCE machine types bundle CPU + memory so
+# a separate memory knob is not meaningful -- override the whole
+# type via GCP_MACHINE_TYPE for highmem / larger shapes.
+GCP_MACHINE_TYPE="${GCP_MACHINE_TYPE:-e2-standard-2}"
 GCP_IMAGE_FAMILY="${GCP_IMAGE_FAMILY:-y-cluster-appliance}"
 GCP_DATADIR_DISK="${GCP_DATADIR_DISK:-appliance-gcp-datadir}"
 GCP_DATADIR_SIZE="${GCP_DATADIR_SIZE:-10GB}"
