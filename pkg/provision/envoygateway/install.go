@@ -147,10 +147,10 @@ func Install(ctx context.Context, opts Options) error {
 			zap.String("cpu", opts.ControllerCPURequest),
 			zap.String("memory", opts.ControllerMemRequest),
 		)
-		if err := kubectlApplyStdin(ctx, opts.ContextName,
-			ControllerResourcesYAML(opts.ControllerCPURequest, opts.ControllerMemRequest),
+		if err := kubectlPatch(ctx, opts.ContextName, "deployment", DeploymentName, Namespace,
+			ControllerResourcesPatch(opts.ControllerCPURequest, opts.ControllerMemRequest),
 		); err != nil {
-			return fmt.Errorf("apply controller resources: %w", err)
+			return fmt.Errorf("patch controller resources: %w", err)
 		}
 	}
 
@@ -226,6 +226,33 @@ func kubectlApplyStdin(ctx context.Context, contextName string, manifest []byte)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("kubectl apply --server-side: %w", err)
+	}
+	return nil
+}
+
+// kubectlPatch applies a strategic-merge patch to a named
+// resource via `kubectl patch <kind> <name> -n <ns> --type=strategic
+// --patch <yaml>`. Used for the controller resources tweak
+// where a full SSA-apply of a partial Deployment fails kubectl's
+// client-side schema validation (selector / image required).
+//
+// The patch is passed as a flag value (not stdin) because
+// `kubectl patch` doesn't read the body from stdin by default;
+// `--patch-file=/dev/stdin` works but the inline form keeps the
+// shellout symmetric with kubectlApplyStdin.
+func kubectlPatch(ctx context.Context, contextName, kind, name, namespace string, patch []byte) error {
+	cmd := exec.CommandContext(ctx, "kubectl",
+		"--context="+contextName,
+		"patch", kind, name,
+		"-n", namespace,
+		"--type=strategic",
+		"--patch", string(patch),
+		"--field-manager=y-cluster",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kubectl patch: %w", err)
 	}
 	return nil
 }

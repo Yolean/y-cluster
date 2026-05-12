@@ -101,22 +101,27 @@ spec:
 `, EnvoyProxyName, Namespace, cpuRequest, memRequest))
 }
 
-// ControllerResourcesYAML is a partial Deployment manifest
-// declaring ownership over the envoy-gateway controller
-// container's resources.requests under server-side apply. The
-// apply uses field-manager y-cluster; existing fields (image,
-// env, replicas, container args) stay with their original
-// owners. Limits are not declared -- intentional, so the
-// upstream limit (currently 1Gi memory, no CPU cap) stays in
-// effect.
-func ControllerResourcesYAML(cpuRequest, memRequest string) []byte {
-	return []byte(fmt.Sprintf(`---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: %s
-  namespace: %s
-spec:
+// ControllerResourcesPatch is a strategic-merge patch body for
+// the envoy-gateway controller container's resources.requests.
+// Applied via `kubectl patch deployment envoy-gateway -n
+// envoy-gateway-system --type=strategic --patch '<this>'`.
+//
+// We use kubectl patch rather than `kubectl apply --server-side`
+// with a partial Deployment because the Deployment kind has
+// required fields (spec.selector, template.metadata.labels,
+// containers[*].image) that kubectl validates client-side before
+// sending -- a partial SSA manifest fails with "Required value"
+// errors even when SSA semantics would otherwise have merged
+// cleanly. Strategic merge patch only validates the merge
+// RESULT, which keeps the existing required fields intact.
+//
+// Strategic merge handles the containers list by merge key
+// (name): the existing container's image, env, ports, args stay
+// intact; only resources.requests fields land. Limits aren't
+// declared, so the upstream limit (currently 1Gi memory, no
+// CPU cap) stays in effect.
+func ControllerResourcesPatch(cpuRequest, memRequest string) []byte {
+	return []byte(fmt.Sprintf(`spec:
   template:
     spec:
       containers:
@@ -125,6 +130,6 @@ spec:
           requests:
             cpu: %s
             memory: %s
-`, DeploymentName, Namespace, cpuRequest, memRequest))
+`, cpuRequest, memRequest))
 }
 

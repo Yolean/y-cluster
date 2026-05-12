@@ -103,22 +103,30 @@ func TestEnvoyProxyYAML_ShapesResources(t *testing.T) {
 	}
 }
 
-// TestControllerResourcesYAML_RequestsOnly pins the partial
-// Deployment shape: requests-only, container matched by name so
-// SSA targets the right container, no limits/image/env claimed
-// (so upstream owners keep them).
-func TestControllerResourcesYAML_RequestsOnly(t *testing.T) {
-	got := string(ControllerResourcesYAML("10m", "64Mi"))
+// TestControllerResourcesPatch_RequestsOnly pins the
+// strategic-merge patch shape: starts at `spec:` (no
+// apiVersion/kind/metadata wrapper, since kubectl patch
+// identifies the target via CLI args), container matched by
+// name so the merge targets the right container, no
+// limits/image/env claimed (so upstream owners keep them through
+// the merge).
+func TestControllerResourcesPatch_RequestsOnly(t *testing.T) {
+	got := string(ControllerResourcesPatch("10m", "64Mi"))
 	for _, want := range []string{
-		"kind: Deployment",
-		"name: " + DeploymentName,
-		"namespace: " + Namespace,
 		"- name: envoy-gateway",
 		"cpu: 10m",
 		"memory: 64Mi",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	// Patch body must NOT carry an apiVersion/kind/metadata
+	// header -- kubectl patch identifies the target via CLI args
+	// and would fail to parse a manifest-shaped body.
+	for _, banned := range []string{"apiVersion:", "kind:", "metadata:"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("patch body must not include %q:\n%s", banned, got)
 		}
 	}
 	if strings.Contains(got, "limits:") {

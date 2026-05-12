@@ -162,22 +162,30 @@ func Load(ctx context.Context, lr *cluster.LookupResult, archive io.Reader, logg
 }
 
 // aliasFor decides what alias (if any) to create for a new
-// post-import ref. Two cases produce a useful alias; one (the
+// post-import ref. Three cases produce a useful alias; one (the
 // bare config-digest row containerd writes alongside the
 // canonical ref) produces "" so the caller skips.
 //
-//   - Tag-form ref ("<repo>:<tag>") -> "<repo>@<digest>".
+//   - Tag-only ref ("<repo>:<tag>") -> "<repo>@<digest>".
 //     Required by deployments pinning images in name:tag@sha256:
 //     digest form; without it kubelet's digest lookup misses the
 //     tag-only row in containerd's image store and falls back to
 //     a registry pull.
 //
-//   - Digest-form ref ("<repo>@<digest>") -> "<repo>:latest@
+//   - Digest-only ref ("<repo>@<digest>") -> "<repo>:latest@
 //     <digest>". Required by kubelet's checkpoint-image check on
 //     containerd v2: it resolves images by config-digest and
 //     normalizes the bare config-digest row to "docker.io/library/
 //     sha256@..." (not found). A tag-form alias gives the lookup
 //     a parseable repo to land on.
+//
+//   - Tag+digest ref ("<repo>:<tag>@<digest>") -> "<repo>@
+//     <digest>". The import already stored under the full ref
+//     name (kubelet resolves either form), but legacy consumers
+//     expecting the digest-only form (checkit's appliance-init.sh
+//     post-load retag) need that row too. Without it, a partial
+//     `ctr image tag --force <repo>@<digest> <new>` from the
+//     consumer side fails "image not found".
 //
 //   - Bare "sha256:<hex>" (the config-digest row ctr emits as a
 //     side effect) -> "". Treating it as a tagged ref would
@@ -188,10 +196,42 @@ func aliasFor(ref, digest string) string {
 	if strings.HasPrefix(ref, "sha256:") {
 		return ""
 	}
-	if at := strings.Index(ref, "@"); at >= 0 {
-		return ref[:at] + ":latest" + ref[at:]
+	at := strings.Index(ref, "@")
+	if at < 0 {
+		// Tag-only input. Synthesize <repo>@<digest> so
+		// deployments pinning by digest resolve from the
+		// tag-only row.
+		return stripTag(ref) + "@" + digest
 	}
-	return stripTag(ref) + "@" + digest
+	repoPart := ref[:at]
+	if hasTag(repoPart) {
+		// Tag+digest input ("<repo>:<tag>@<digest>"). The
+		// import already stored under the full ref name --
+		// kubelet resolves either form. Also create a
+		// digest-only alias so legacy consumers expecting
+		// "<repo>@<digest>" (checkit's appliance-init.sh
+		// post-load retag for minio-deduplication, kubelet's
+		// checkpoint-image lookup on containerd v2) can
+		// still find it.
+		return stripTag(repoPart) + ref[at:]
+	}
+	// Digest-only input ("<repo>@<digest>"). Synthesize
+	// "<repo>:latest@<digest>" alias so crictl + kubelet's
+	// checkpoint-image lookup resolve it.
+	return repoPart + ":latest" + ref[at:]
+}
+
+// hasTag reports whether ref (already trimmed of any "@digest"
+// suffix) carries a "<...>:<tag>" tail. The tag colon must be
+// after the last "/" so a "host:port/path" prefix doesn't
+// false-positive.
+func hasTag(ref string) bool {
+	slash := strings.LastIndex(ref, "/")
+	tail := ref
+	if slash >= 0 {
+		tail = ref[slash+1:]
+	}
+	return strings.Contains(tail, ":")
 }
 
 // TarOCIDir streams a USTAR archive of an OCI v1 layout rooted
