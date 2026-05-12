@@ -108,6 +108,17 @@ fi
 : "${H_S3_REGION:?H_S3_REGION not set in $ENV_FILE (fsn1, hel1, or nbg1)}"
 : "${H_S3_BUCKET:?H_S3_BUCKET not set; pass via env or env file}"
 
+# Enum-check H_S3_REGION before we hit the endpoint URL. A typo
+# silently lands on an invalid hostname; this catches it at
+# config-load time with a message naming the valid set.
+case "$H_S3_REGION" in
+    fsn1|hel1|nbg1) ;;
+    *)
+        echo "H_S3_REGION=$H_S3_REGION not recognised; valid: fsn1, hel1, nbg1" >&2
+        exit 1
+        ;;
+esac
+
 BUCKET="$H_S3_BUCKET"
 REGION="$H_S3_REGION"
 ENDPOINT="https://${REGION}.your-objectstorage.com"
