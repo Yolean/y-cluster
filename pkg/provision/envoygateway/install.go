@@ -61,6 +61,20 @@ type Options struct {
 	//
 	// Ignored when GatewayClassName is empty (no GatewayClass apply).
 	DNSHintIP string
+
+	// ControllerCPURequest / ControllerMemRequest set the
+	// controller container's resources.requests via SSA. Empty
+	// strings mean "leave upstream's defaults"; the provisioner
+	// fills these from CommonConfig.Gateway.Resources.Controller.
+	ControllerCPURequest string
+	ControllerMemRequest string
+
+	// ProxyCPURequest / ProxyMemRequest land on the EnvoyProxy
+	// CR the default GatewayClass references via parametersRef.
+	// When both are empty, no EnvoyProxy CR is applied and the
+	// GatewayClass has no parametersRef -- EG uses its defaults.
+	ProxyCPURequest string
+	ProxyMemRequest string
 }
 
 // Install resolves the per-version install.yaml from cache
@@ -124,6 +138,22 @@ func Install(ctx context.Context, opts Options) error {
 		return fmt.Errorf("apply install.yaml: %w", err)
 	}
 
+	// Patch the controller container's resource requests before
+	// the rollout wait so the wait sees the ReplicaSet we shaped.
+	// Empty strings here mean "leave upstream alone" -- a test
+	// path or a config that explicitly wants stock requests.
+	if opts.ControllerCPURequest != "" || opts.ControllerMemRequest != "" {
+		logger.Info("patching envoy-gateway controller resources",
+			zap.String("cpu", opts.ControllerCPURequest),
+			zap.String("memory", opts.ControllerMemRequest),
+		)
+		if err := kubectlApplyStdin(ctx, opts.ContextName,
+			ControllerResourcesYAML(opts.ControllerCPURequest, opts.ControllerMemRequest),
+		); err != nil {
+			return fmt.Errorf("apply controller resources: %w", err)
+		}
+	}
+
 	if opts.ReadyTimeout >= 0 {
 		timeout := opts.ReadyTimeout
 		if timeout == 0 {
@@ -139,12 +169,32 @@ func Install(ctx context.Context, opts Options) error {
 		}
 	}
 
+	// Apply EnvoyProxy first so the GatewayClass.parametersRef
+	// resolves on first reconcile. When proxy resources aren't
+	// configured we skip the CR and leave the GatewayClass
+	// parametersRef-less -- EG uses its built-in defaults.
+	envoyProxyName := ""
+	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" {
+		envoyProxyName = EnvoyProxyName
+		logger.Info("applying EnvoyProxy CR",
+			zap.String("name", envoyProxyName),
+			zap.String("cpu", opts.ProxyCPURequest),
+			zap.String("memory", opts.ProxyMemRequest),
+		)
+		if err := kubectlApplyStdin(ctx, opts.ContextName,
+			EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest),
+		); err != nil {
+			return fmt.Errorf("apply EnvoyProxy: %w", err)
+		}
+	}
+
 	if opts.GatewayClassName != "" {
 		logger.Info("applying default GatewayClass",
 			zap.String("name", opts.GatewayClassName),
 			zap.String("dnsHintIP", opts.DNSHintIP),
+			zap.String("envoyProxyRef", envoyProxyName),
 		)
-		if err := kubectlApplyStdin(ctx, opts.ContextName, GatewayClassYAML(opts.GatewayClassName, opts.DNSHintIP)); err != nil {
+		if err := kubectlApplyStdin(ctx, opts.ContextName, GatewayClassYAML(opts.GatewayClassName, opts.DNSHintIP, envoyProxyName)); err != nil {
 			return fmt.Errorf("apply GatewayClass: %w", err)
 		}
 	}

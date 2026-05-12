@@ -345,10 +345,14 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		logger.Info("envoy gateway install skipped (gateway.skip)")
 	} else {
 		if err := envoygateway.Install(ctx, envoygateway.Options{
-			ContextName:      cfg.Context,
-			GatewayClassName: cfg.Gateway.ClassName,
-			DNSHintIP:        cfg.hostRoutableIP(),
-			Logger:           logger,
+			ContextName:          cfg.Context,
+			GatewayClassName:     cfg.Gateway.ClassName,
+			DNSHintIP:            cfg.hostRoutableIP(),
+			Logger:               logger,
+			ControllerCPURequest: cfg.Gateway.Resources.Controller.CPU,
+			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
+			ProxyCPURequest:      cfg.Gateway.Resources.Proxy.CPU,
+			ProxyMemRequest:      cfg.Gateway.Resources.Proxy.Memory,
 		}); err != nil {
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}

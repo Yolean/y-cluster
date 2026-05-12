@@ -8,9 +8,27 @@
           "description": "GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true.",
           "type": "string"
         },
+        "resources": {
+          "$ref": "#/$defs/GatewayResources",
+          "description": "Resource requests for the bundled EG install. Defaults: controller 10m/64Mi"
+        },
         "skip": {
           "description": "If true",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GatewayResources": {
+      "additionalProperties": false,
+      "properties": {
+        "controller": {
+          "$ref": "#/$defs/ResourceRequests",
+          "description": "EG controller container requests. Default cpu 10m"
+        },
+        "proxy": {
+          "$ref": "#/$defs/ResourceRequests",
+          "description": "Per-Gateway envoy proxy container requests. Default cpu 10m"
         }
       },
       "type": "object"
@@ -208,6 +226,20 @@
         },
         "key_file": {
           "description": "Path to client key file on the node.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ResourceRequests": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "description": "CPU request in Kubernetes notation (e.g. 10m",
+          "type": "string"
+        },
+        "memory": {
+          "description": "Memory request in Kubernetes notation (e.g. 64Mi",
           "type": "string"
         }
       },
