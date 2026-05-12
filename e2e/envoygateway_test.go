@@ -35,11 +35,21 @@ func sharedEnvoyGatewayCache(t *testing.T) string {
 }
 
 // TestEnvoyGateway_InstallAgainstKwok exercises the full Install
-// path -- CRDs first, then the install manifest, then the default
-// GatewayClass -- against the shared kwok cluster. The Deployment
-// rollout wait is skipped (ReadyTimeout=-1) because kwok stages
-// pods through its own controller, not the real one, and we only
-// need to prove the apply path produces the right object graph.
+// path -- CRDs first, then the install manifest, then the
+// controller-resources strategic-merge patch, then the EnvoyProxy
+// CR, then the default GatewayClass with parametersRef --
+// against the shared kwok cluster. The Deployment rollout wait
+// is skipped (ReadyTimeout=-1) because kwok stages pods through
+// its own controller, not the real one, and we only need to
+// prove the apply path produces the right object graph.
+//
+// Resource requests are non-zero by design: they exercise the
+// kubectl-patch branch (controller) and the EnvoyProxy CR
+// branch (proxy) which production CommonConfig defaults flow
+// through. Pre-fix the patch step failed with kubectl's
+// client-side schema validation -- PR-CI didn't catch it
+// because this test was calling Install without the resource
+// fields set, short-circuiting both branches.
 //
 // Coverage assertions afterwards use kubectl directly so we can
 // verify what landed without making the test depend on every
@@ -47,13 +57,23 @@ func sharedEnvoyGatewayCache(t *testing.T) string {
 func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 	setupCluster(t)
 
+	const (
+		ctrlCPU  = "10m"
+		ctrlMem  = "64Mi"
+		proxyCPU = "10m"
+		proxyMem = "128Mi"
+	)
 	if err := envoygateway.Install(context.Background(), envoygateway.Options{
-		ContextName:      contextName,
-		CacheOverride:    sharedEnvoyGatewayCache(t),
-		Logger:           logger(t),
-		ReadyTimeout:     -1,          // skip wait: kwok doesn't run the real controller
-		GatewayClassName: "y-cluster", // matches the production default
-		DNSHintIP:        "127.0.0.1", // simulates qemu/docker host-loopback case
+		ContextName:          contextName,
+		CacheOverride:        sharedEnvoyGatewayCache(t),
+		Logger:               logger(t),
+		ReadyTimeout:         -1,          // skip wait: kwok doesn't run the real controller
+		GatewayClassName:     "y-cluster", // matches the production default
+		DNSHintIP:            "127.0.0.1", // simulates qemu/docker host-loopback case
+		ControllerCPURequest: ctrlCPU,
+		ControllerMemRequest: ctrlMem,
+		ProxyCPURequest:      proxyCPU,
+		ProxyMemRequest:      proxyMem,
 	}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -113,6 +133,55 @@ func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 	if hintOut != "127.0.0.1" {
 		t.Errorf("GatewayClass y-cluster annotation %s = %q, want 127.0.0.1",
 			envoygateway.DNSHintIPAnnotation, hintOut)
+	}
+
+	// Controller-resources strategic-merge patch landed. The
+	// kubectl-patch step would fail outright pre-fix (kubectl
+	// rejected the partial SSA-apply manifest), so reaching this
+	// assertion at all proves the patch verb works; reading the
+	// requests back proves the merge target is the right
+	// container and the values stuck.
+	cpuOut := kubectl(t, "get", "deployment", envoygateway.DeploymentName,
+		"-n", envoygateway.Namespace,
+		"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="envoy-gateway")].resources.requests.cpu}`)
+	if cpuOut != ctrlCPU {
+		t.Errorf("controller resources.requests.cpu = %q, want %q (patch step landed?)", cpuOut, ctrlCPU)
+	}
+	memOut := kubectl(t, "get", "deployment", envoygateway.DeploymentName,
+		"-n", envoygateway.Namespace,
+		"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="envoy-gateway")].resources.requests.memory}`)
+	if memOut != ctrlMem {
+		t.Errorf("controller resources.requests.memory = %q, want %q (patch step landed?)", memOut, ctrlMem)
+	}
+
+	// EnvoyProxy CR was applied with the proxy resource values.
+	// Pin both axes so a future schema rename inside the CR
+	// surfaces as a failure rather than a silent no-op.
+	proxyCPUOut := kubectl(t, "get", "envoyproxy", envoygateway.EnvoyProxyName,
+		"-n", envoygateway.Namespace,
+		"-o", "jsonpath={.spec.provider.kubernetes.envoyDeployment.container.resources.requests.cpu}")
+	if proxyCPUOut != proxyCPU {
+		t.Errorf("EnvoyProxy proxy.cpu = %q, want %q", proxyCPUOut, proxyCPU)
+	}
+	proxyMemOut := kubectl(t, "get", "envoyproxy", envoygateway.EnvoyProxyName,
+		"-n", envoygateway.Namespace,
+		"-o", "jsonpath={.spec.provider.kubernetes.envoyDeployment.container.resources.requests.memory}")
+	if proxyMemOut != proxyMem {
+		t.Errorf("EnvoyProxy proxy.memory = %q, want %q", proxyMemOut, proxyMem)
+	}
+
+	// GatewayClass parametersRef points at our EnvoyProxy CR so
+	// Gateways under the class inherit the tuned resources
+	// without any per-Gateway boilerplate.
+	refKind := kubectl(t, "get", "gatewayclass", "y-cluster",
+		"-o", "jsonpath={.spec.parametersRef.kind}")
+	if refKind != "EnvoyProxy" {
+		t.Errorf("GatewayClass parametersRef.kind = %q, want EnvoyProxy", refKind)
+	}
+	refName := kubectl(t, "get", "gatewayclass", "y-cluster",
+		"-o", "jsonpath={.spec.parametersRef.name}")
+	if refName != envoygateway.EnvoyProxyName {
+		t.Errorf("GatewayClass parametersRef.name = %q, want %q", refName, envoygateway.EnvoyProxyName)
 	}
 }
 
