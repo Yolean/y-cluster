@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -31,24 +32,48 @@ func imagesCmd() *cobra.Command {
 }
 
 func imagesListCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "list <yaml-file|->",
-		Short: "Print every container image referenced by a Kubernetes YAML stream",
-		Long: `Read a YAML stream and print every image reference found in any
-PodSpec (Deployment, StatefulSet, DaemonSet, Job, CronJob, ReplicaSet,
-Pod). Output is sorted, deduplicated, one ref per line — suitable for
-piping to xargs or a downstream tool.
+	var contextName string
+	var format string
+	var sortKey string
 
-Input source is a positional argument:
+	cmd := &cobra.Command{
+		Use:   "list [<yaml-file>|-]",
+		Short: "Print images referenced by a YAML stream or stored in a cluster",
+		Long: `Two input modes; mutually exclusive.
+
+YAML mode (positional argument):
   <path>   read the file at path
   -        read stdin
+  Prints every image reference found in any PodSpec
+  (Deployment, StatefulSet, DaemonSet, Job, CronJob, ReplicaSet,
+  Pod). Output is sorted, deduplicated, one ref per line —
+  suitable for piping to xargs or a downstream tool.
+  Pipe a kustomize build through it:
+    kubectl kustomize ./base | y-cluster images list -
 
-To extract images from a kustomize tree, pipe the build through:
-  kubectl kustomize ./base | y-cluster images list -
+Cluster mode (--context=<ctx>):
+  Queries the cluster's containerd k8s.io namespace and prints
+  one row per stored manifest, sorted by descending compressed
+  size by default. Digest-aliases of the same manifest are
+  collapsed (no double-count). Use this to answer "what's
+  taking the space in this appliance qcow2".
+  Default output is a SIZE/IMAGE table; --format=json emits
+  [{ref, digest, size_bytes, size_human}]. --sort=name switches
+  to alphabetical.
 
-Exit codes: 0 on success, 1 on YAML parse / I/O error, 2 on usage.`,
-		Args: cobra.ExactArgs(1),
+Exit codes: 0 on success, 1 on YAML parse / I/O / cluster
+error, 2 on usage.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && contextName != "" {
+				return fmt.Errorf("--context is mutually exclusive with positional input")
+			}
+			if len(args) == 0 && contextName == "" {
+				return fmt.Errorf("specify a positional input (<path>|-) or --context=<ctx>")
+			}
+			if contextName != "" {
+				return runListFromCluster(cmd, contextName, format, sortKey)
+			}
 			r, closer, err := openYAMLInput(args[0], cmd.InOrStdin())
 			if err != nil {
 				return err
@@ -65,7 +90,62 @@ Exit codes: 0 on success, 1 on YAML parse / I/O error, 2 on usage.`,
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&contextName, "context", "", "kubeconfig context — query the cluster's containerd (mutex with positional input)")
+	cmd.Flags().StringVar(&format, "format", "table", "cluster mode output format: table|json")
+	cmd.Flags().StringVar(&sortKey, "sort", "size", "cluster mode sort key: size (desc) | name (asc)")
 	return cmd
+}
+
+func runListFromCluster(cmd *cobra.Command, contextName, format, sortKey string) error {
+	ctx := cmd.Context()
+	lr, err := cluster.Lookup(ctx, "", contextName)
+	if err != nil {
+		return err
+	}
+	rows, err := images.ListFromCluster(ctx, lr)
+	if err != nil {
+		return err
+	}
+	switch sortKey {
+	case "", "size":
+		images.SortClusterImagesBySizeDesc(rows)
+	case "name":
+		images.SortClusterImagesByName(rows)
+	default:
+		return fmt.Errorf("--sort: unknown value %q (size|name)", sortKey)
+	}
+	out := cmd.OutOrStdout()
+	switch format {
+	case "", "table":
+		return writeClusterImagesTable(out, rows)
+	case "json":
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	default:
+		return fmt.Errorf("--format: unknown value %q (table|json)", format)
+	}
+}
+
+// writeClusterImagesTable renders one row per stored manifest
+// as "SIZE  IMAGE", with the SIZE column padded to the widest
+// value so refs line up. Matches the spec's example output.
+func writeClusterImagesTable(w io.Writer, rows []images.ClusterImage) error {
+	sizeWidth := len("SIZE")
+	for _, r := range rows {
+		if l := len(r.SizeHuman); l > sizeWidth {
+			sizeWidth = l
+		}
+	}
+	if _, err := fmt.Fprintf(w, "%-*s  %s\n", sizeWidth, "SIZE", "IMAGE"); err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if _, err := fmt.Fprintf(w, "%-*s  %s\n", sizeWidth, r.SizeHuman, r.Ref); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func imagesCacheCmd() *cobra.Command {

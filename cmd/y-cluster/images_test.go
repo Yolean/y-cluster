@@ -68,6 +68,60 @@ func TestImagesListCmd_FileNotFound(t *testing.T) {
 	}
 }
 
+// TestImagesListCmd_PositionalAndContextMutex pins the mutex
+// rule: a positional input and --context can't both be set,
+// because they pick incompatible input sources (YAML stream vs
+// containerd ground truth).
+func TestImagesListCmd_PositionalAndContextMutex(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetArgs([]string{"images", "list", "--context=local", "/some/path.yaml"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for positional + --context combination")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should mention mutex: %v", err)
+	}
+}
+
+// TestImagesListCmd_ContextUnknownPropagates: a --context that
+// the kubeconfig doesn't know about should surface the cluster
+// lookup error rather than swallowing it.
+func TestImagesListCmd_ContextUnknownPropagates(t *testing.T) {
+	cmd := rootCmd()
+	cmd.SetArgs([]string{"images", "list", "--context=does-not-exist"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected cluster-lookup error for unknown --context")
+	}
+}
+
+// TestImagesListCmd_BadFormat / _BadSort pin the validation
+// of the cluster-mode formatting knobs. Errors should fire on
+// the flag value, NOT on the unreachable cluster -- but a
+// non-existent context happens to error first; we assert that
+// the flag values themselves are at least accepted without a
+// flag-parse error (cobra would error before our RunE runs).
+func TestImagesListCmd_FlagsAccepted(t *testing.T) {
+	for _, args := range [][]string{
+		{"images", "list", "--context=does-not-exist", "--format=table"},
+		{"images", "list", "--context=does-not-exist", "--format=json"},
+		{"images", "list", "--context=does-not-exist", "--sort=size"},
+		{"images", "list", "--context=does-not-exist", "--sort=name"},
+	} {
+		cmd := rootCmd()
+		cmd.SetArgs(args)
+		// We expect a cluster-lookup error, not a flag-parse error.
+		err := cmd.Execute()
+		if err == nil {
+			t.Errorf("%v: expected cluster-lookup error", args)
+			continue
+		}
+		if strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("%v: cobra rejected a flag we own: %v", args, err)
+		}
+	}
+}
+
 func TestImagesCacheCmd_RequiresRef(t *testing.T) {
 	cmd := rootCmd()
 	cmd.SetArgs([]string{"images", "cache"})
