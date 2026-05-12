@@ -146,17 +146,58 @@ type GatewayConfig struct {
 	//
 	// Ignored when Skip is true.
 	ClassName string `yaml:"className,omitempty" json:"className,omitempty" jsonschema:"default=y-cluster,description=GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true."`
+
+	// Resources tunes resource requests on the EG controller pod
+	// and the per-Gateway envoy proxy pod. Defaults target a
+	// single-user/dev cluster; bump for production-shaped load.
+	// Upstream defaults are 100m/256Mi (controller) and
+	// 100m/512Mi (proxy), which oversubscribe a 2GB-RAM
+	// appliance node.
+	Resources GatewayResources `yaml:"resources,omitempty" json:"resources,omitempty" jsonschema:"description=Resource requests for the bundled EG install. Defaults: controller 10m/64Mi, proxy 10m/128Mi. Limits are left as upstream sets them."`
 }
 
-// applyGatewayDefaults fills ClassName when the install is
-// enabled. When Skip is set, ClassName is left as the user
-// supplied it so debug logs make the operator's intent obvious.
+// GatewayResources groups the two pods whose resource requests
+// y-cluster manages: the EG controller (Deployment in
+// envoy-gateway-system) and the per-Gateway envoy proxy
+// (spawned by EG via the EnvoyProxy CR our default GatewayClass
+// references).
+type GatewayResources struct {
+	Controller ResourceRequests `yaml:"controller,omitempty" json:"controller,omitempty" jsonschema:"description=EG controller container requests. Default cpu 10m, memory 64Mi."`
+	Proxy      ResourceRequests `yaml:"proxy,omitempty"      json:"proxy,omitempty"      jsonschema:"description=Per-Gateway envoy proxy container requests. Default cpu 10m, memory 128Mi."`
+}
+
+// ResourceRequests is a minimal Kubernetes-resource-style
+// shape covering CPU + memory requests only. Limits are not
+// modelled here on purpose: y-cluster's stance is that bursty
+// idle workloads are healthier under upstream's existing
+// limits than under tighter ones we'd have to guess at.
+type ResourceRequests struct {
+	CPU    string `yaml:"cpu,omitempty"    json:"cpu,omitempty"    jsonschema:"description=CPU request in Kubernetes notation (e.g. 10m, 0.5, 1)."`
+	Memory string `yaml:"memory,omitempty" json:"memory,omitempty" jsonschema:"description=Memory request in Kubernetes notation (e.g. 64Mi, 256Mi, 1Gi)."`
+}
+
+// applyGatewayDefaults fills ClassName + Resources when the
+// install is enabled. When Skip is set everything is left as
+// the user supplied it so debug logs make the operator's
+// intent obvious.
 func (c *CommonConfig) applyGatewayDefaults() {
 	if c.Gateway.Skip {
 		return
 	}
 	if c.Gateway.ClassName == "" {
 		c.Gateway.ClassName = "y-cluster"
+	}
+	if c.Gateway.Resources.Controller.CPU == "" {
+		c.Gateway.Resources.Controller.CPU = "10m"
+	}
+	if c.Gateway.Resources.Controller.Memory == "" {
+		c.Gateway.Resources.Controller.Memory = "64Mi"
+	}
+	if c.Gateway.Resources.Proxy.CPU == "" {
+		c.Gateway.Resources.Proxy.CPU = "10m"
+	}
+	if c.Gateway.Resources.Proxy.Memory == "" {
+		c.Gateway.Resources.Proxy.Memory = "128Mi"
 	}
 }
 

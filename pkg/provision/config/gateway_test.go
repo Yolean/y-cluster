@@ -36,6 +36,59 @@ func TestGateway_SkipLeavesClassNameAlone(t *testing.T) {
 	if c.Gateway.ClassName != "" {
 		t.Fatalf("Skip:true should leave ClassName empty, got %q", c.Gateway.ClassName)
 	}
+	// Skip also keeps Resources empty so a downstream consumer
+	// reading the rendered config can tell "operator didn't ask
+	// for an install" from "operator asked, defaults applied".
+	if c.Gateway.Resources != (GatewayResources{}) {
+		t.Fatalf("Skip:true should leave Resources zero, got %+v", c.Gateway.Resources)
+	}
+}
+
+// TestGateway_DefaultResources pins the lower-than-upstream
+// defaults that single-user dev clusters benefit from. Upstream
+// EG ships 100m/256Mi controller and 100m/512Mi proxy, which
+// oversubscribe a 2GB appliance node. Changing these values is
+// a contract change for anyone running on those budgets.
+func TestGateway_DefaultResources(t *testing.T) {
+	c := &CommonConfig{}
+	c.applyCommonDefaults()
+	if c.Gateway.Resources.Controller.CPU != "10m" {
+		t.Errorf("Controller.CPU: got %q, want 10m", c.Gateway.Resources.Controller.CPU)
+	}
+	if c.Gateway.Resources.Controller.Memory != "64Mi" {
+		t.Errorf("Controller.Memory: got %q, want 64Mi", c.Gateway.Resources.Controller.Memory)
+	}
+	if c.Gateway.Resources.Proxy.CPU != "10m" {
+		t.Errorf("Proxy.CPU: got %q, want 10m", c.Gateway.Resources.Proxy.CPU)
+	}
+	if c.Gateway.Resources.Proxy.Memory != "128Mi" {
+		t.Errorf("Proxy.Memory: got %q, want 128Mi", c.Gateway.Resources.Proxy.Memory)
+	}
+}
+
+// TestGateway_PreservesExplicitResources: an operator setting
+// any subset of fields keeps their explicit values; only
+// unset fields default.
+func TestGateway_PreservesExplicitResources(t *testing.T) {
+	c := &CommonConfig{Gateway: GatewayConfig{
+		Resources: GatewayResources{
+			Controller: ResourceRequests{CPU: "200m"},
+			Proxy:      ResourceRequests{Memory: "1Gi"},
+		},
+	}}
+	c.applyCommonDefaults()
+	if c.Gateway.Resources.Controller.CPU != "200m" {
+		t.Errorf("explicit Controller.CPU lost: %q", c.Gateway.Resources.Controller.CPU)
+	}
+	if c.Gateway.Resources.Controller.Memory != "64Mi" {
+		t.Errorf("unset Controller.Memory should default, got %q", c.Gateway.Resources.Controller.Memory)
+	}
+	if c.Gateway.Resources.Proxy.CPU != "10m" {
+		t.Errorf("unset Proxy.CPU should default, got %q", c.Gateway.Resources.Proxy.CPU)
+	}
+	if c.Gateway.Resources.Proxy.Memory != "1Gi" {
+		t.Errorf("explicit Proxy.Memory lost: %q", c.Gateway.Resources.Proxy.Memory)
+	}
 }
 
 // TestEffectiveGatewayClassName covers the helper Provision uses
