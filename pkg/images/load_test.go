@@ -261,23 +261,39 @@ func TestStripTag(t *testing.T) {
 }
 
 // TestAliasFor pins the post-import alias policy. Each case
-// captures one of the three shapes ctr writes into the image
-// store after `image import`: tag-form, digest-form, and the
-// bare config-digest row that mustn't be aliased.
+// captures one of the four shapes ctr writes into the image
+// store after `image import`: tag-only, digest-only, tag+digest,
+// and the bare config-digest row that mustn't be aliased.
 func TestAliasFor(t *testing.T) {
 	const digest = "sha256:af91c49ce795f3b2c1a4e6d8b9c0e1f2a3b4c5d6e7f80112233445566778899aa"
 	cases := []struct {
 		name, ref, want string
 	}{
 		{
-			name: "tag-form -> digest alias",
+			name: "tag-only -> digest alias",
 			ref:  "ghcr.io/yolean/echo:v1",
 			want: "ghcr.io/yolean/echo@" + digest,
 		},
 		{
-			name: "digest-form -> :latest alias (kubelet checkpoint-image lookup)",
+			name: "digest-only -> :latest alias (kubelet checkpoint-image lookup)",
 			ref:  "ghcr.io/yolean/minio-deduplication@" + digest,
 			want: "ghcr.io/yolean/minio-deduplication:latest@" + digest,
+		},
+		{
+			// y-site-images-load emits this shape for every line
+			// in the pinned image list. Pre-fix this case generated
+			// "ghcr.io/yolean/busybox:1.37.0-glibc:latest@<digest>"
+			// which ctr rejects as invalid; checkit's post-load
+			// retag for minio-deduplication then errored out on the
+			// missing <repo>@<digest> row.
+			name: "tag+digest -> digest-only alias",
+			ref:  "ghcr.io/yolean/busybox:1.37.0-glibc@" + digest,
+			want: "ghcr.io/yolean/busybox@" + digest,
+		},
+		{
+			name: ":latest+digest -> digest-only alias (checkit's minio-deduplication shape)",
+			ref:  "ghcr.io/yolean/minio-deduplication:latest@" + digest,
+			want: "ghcr.io/yolean/minio-deduplication@" + digest,
 		},
 		{
 			name: "bare config-digest row -> no alias (would mangle to sha256@sha256:...)",
@@ -287,6 +303,11 @@ func TestAliasFor(t *testing.T) {
 		{
 			name: "hostport tag stripped at correct colon",
 			ref:  "registry.example:5000/foo/bar:tag",
+			want: "registry.example:5000/foo/bar@" + digest,
+		},
+		{
+			name: "hostport tag+digest stripped at correct colon",
+			ref:  "registry.example:5000/foo/bar:tag@" + digest,
 			want: "registry.example:5000/foo/bar@" + digest,
 		},
 	}
