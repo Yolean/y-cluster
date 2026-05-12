@@ -73,9 +73,9 @@ Environment:
   GCP_BUCKET        GCS bucket for image tarballs
                     (default: <project>-appliance-images)
   GCP_MACHINE_TYPE  Compute Engine machine type (default: e2-standard-2 --
-                    2 vCPU / 8 GiB; e2-medium's 4 GiB OOMs the full
+                    2 vCPU / 8 GiB; the 4 GiB e2-medium OOMs the full
                     appliance stack mid-run. The type bundles CPU + memory,
-                    so there's no separate memory knob.)
+                    so memory is not a separate knob.)
   GCP_IMAGE_FAMILY  Image family tag (default: y-cluster-appliance)
   GCP_DATADIR_DISK  Persistent disk for /data/yolean
                     (default: appliance-gcp-datadir; preserved on teardown)
