@@ -173,6 +173,14 @@ if [[ ! -f "$GCP_KEY" ]]; then
     echo "create it with: scripts/gcp-bootstrap-credentials.sh" >&2
     exit 1
 fi
+# Same schema check as the interactive flow -- mismatch on a
+# truncated / wrong-shape JSON should fail fast here rather
+# than two gcloud calls in.
+if ! jq -e 'all(.type == "service_account"; .) and (.project_id // empty | length > 0) and (.client_email // empty | length > 0) and (.private_key // empty | length > 0)' "$GCP_KEY" >/dev/null 2>&1; then
+    echo "GCP key at $GCP_KEY is missing required fields" >&2
+    echo "  expected JSON with: type=service_account, project_id, client_email, private_key" >&2
+    exit 1
+fi
 export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY"
 
 # Acknowledge parallel composite uploads up front (silences
