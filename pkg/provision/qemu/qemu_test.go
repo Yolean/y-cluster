@@ -50,6 +50,68 @@ func TestFromConfig_AppliesDefaults(t *testing.T) {
 	}
 }
 
+// TestFromConfig_DataDiskDefaults pins the disk-reuse primitive's
+// path-resolution + size-default contract. The DataDisk field is
+// the operator's hook for "I want a labeled volume I can keep
+// across teardown / re-provision"; we let them spell an absolute
+// path or a path relative to the config dir (the latter so the
+// y-cluster-provision.yaml co-locates with its data disk for a
+// one-directory test setup).
+func TestFromConfig_DataDiskDefaults(t *testing.T) {
+	t.Run("absolute path passes through, size defaults", func(t *testing.T) {
+		c := &config.QEMUConfig{
+			CommonConfig: config.CommonConfig{Provider: config.ProviderQEMU},
+			DataDisk:     "/abs/path/data.qcow2",
+		}
+		c.ApplyDefaults()
+		rt := FromConfig(c)
+		if rt.DataDisk != "/abs/path/data.qcow2" {
+			t.Errorf("DataDisk: got %q, want absolute pass-through", rt.DataDisk)
+		}
+		if rt.DataDiskSize != "10G" {
+			t.Errorf("DataDiskSize: got %q, want 10G default", rt.DataDiskSize)
+		}
+	})
+	t.Run("relative path resolves against config dir", func(t *testing.T) {
+		c := &config.QEMUConfig{
+			CommonConfig: config.CommonConfig{Provider: config.ProviderQEMU},
+			DataDisk:     "data.qcow2",
+			Dir:          "/etc/y-cluster",
+		}
+		c.ApplyDefaults()
+		rt := FromConfig(c)
+		want := "/etc/y-cluster/data.qcow2"
+		if rt.DataDisk != want {
+			t.Errorf("DataDisk: got %q, want %q", rt.DataDisk, want)
+		}
+	})
+	t.Run("empty DataDisk leaves DataDiskSize empty (no surprise default)", func(t *testing.T) {
+		c := &config.QEMUConfig{
+			CommonConfig: config.CommonConfig{Provider: config.ProviderQEMU},
+		}
+		c.ApplyDefaults()
+		rt := FromConfig(c)
+		if rt.DataDisk != "" {
+			t.Errorf("DataDisk should stay empty: %q", rt.DataDisk)
+		}
+		if rt.DataDiskSize != "" {
+			t.Errorf("DataDiskSize should stay empty when DataDisk is unset: %q", rt.DataDiskSize)
+		}
+	})
+	t.Run("explicit DataDiskSize overrides default", func(t *testing.T) {
+		c := &config.QEMUConfig{
+			CommonConfig: config.CommonConfig{Provider: config.ProviderQEMU},
+			DataDisk:     "/abs/data.qcow2",
+			DataDiskSize: "50G",
+		}
+		c.ApplyDefaults()
+		rt := FromConfig(c)
+		if rt.DataDiskSize != "50G" {
+			t.Errorf("explicit DataDiskSize lost: %q", rt.DataDiskSize)
+		}
+	})
+}
+
 func TestFromConfig_PreservesExplicitPortForwards(t *testing.T) {
 	c := &config.QEMUConfig{
 		CommonConfig: config.CommonConfig{
@@ -92,6 +154,58 @@ func TestImportVMDK_MissingVMDK(t *testing.T) {
 	}
 }
 
+// TestImport_MissingInput guards both extensions: a non-existent
+// file should fail fast before any qemu-img invocation.
+func TestImport_MissingInput(t *testing.T) {
+	for _, ext := range []string{".vmdk", ".qcow2"} {
+		if err := Import("/nonexistent/disk"+ext, "/tmp/out.qcow2"); err == nil {
+			t.Errorf("expected error for missing input with ext %q", ext)
+		}
+	}
+}
+
+// TestImportFormatFromExt pins the supported-format set. New
+// formats land here first; the switch statement is the canonical
+// list. Any addition surfaces as a new test case.
+func TestImportFormatFromExt(t *testing.T) {
+	cases := []struct {
+		path    string
+		want    string
+		wantErr bool
+	}{
+		// Happy cases: case-insensitive on extension because
+		// operators sometimes get .VMDK off VMware exports.
+		{"foo.vmdk", "vmdk", false},
+		{"foo.VMDK", "vmdk", false},
+		{"foo.qcow2", "qcow2", false},
+		{"foo.QCOW2", "qcow2", false},
+		{"/tmp/a/b.qcow2", "qcow2", false},
+		// Reject explicit unsupported extensions so a typo
+		// ("disk.qcow" / "disk.img" / "disk.raw") doesn't fall
+		// through to a confusing qemu-img error.
+		{"foo.raw", "", true},
+		{"foo.vdi", "", true},
+		{"foo.tar.gz", "", true},
+		{"noext", "", true},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		got, err := importFormatFromExt(c.path)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("importFormatFromExt(%q) expected error, got %q", c.path, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("importFormatFromExt(%q) unexpected error: %v", c.path, err)
+		}
+		if got != c.want {
+			t.Errorf("importFormatFromExt(%q) = %q, want %q", c.path, got, c.want)
+		}
+	}
+}
+
 func TestTeardownConfig_NoPidFile(t *testing.T) {
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = t.TempDir()
@@ -122,7 +236,7 @@ func TestTeardownConfig_KeepDisk(t *testing.T) {
 // snippet that pins datasource_list to NoCloud + None so a
 // re-imported disk doesn't stall on EC2 IMDS probing.
 func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n")
+	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n", false)
 	if !strings.Contains(body, "/etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg") {
 		t.Errorf("user-data must drop pin file under /etc/cloud/cloud.cfg.d/:\n%s", body)
 	}
@@ -131,11 +245,48 @@ func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
 	}
 }
 
+// TestRenderCloudInitUserData_NoMountWhenDataDiskDisabled pins
+// that the mount block is omitted when the operator hasn't
+// asked for a labeled data disk -- a non-DataDisk provision
+// must NOT pre-add a fstab entry that would then refer to a
+// missing labeled volume (nofail keeps boot moving, but the
+// noise in `journalctl -u systemd-fsck@*` is undesirable).
+func TestRenderCloudInitUserData_NoMountWhenDataDiskDisabled(t *testing.T) {
+	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", false)
+	if strings.Contains(body, "LABEL=y-cluster-data") {
+		t.Errorf("user-data must not stamp a LABEL mount when DataDisk is disabled:\n%s", body)
+	}
+	if strings.Contains(body, "mounts:") {
+		t.Errorf("user-data must not include a mounts block when DataDisk is disabled:\n%s", body)
+	}
+}
+
+// TestRenderCloudInitUserData_MountWhenDataDiskEnabled pins
+// the fstab semantics: the appliance contract mount path
+// (/data/yolean) + the LABEL the qemu provisioner stamps on the
+// data disk + nofail so a removed disk doesn't deadlock boot.
+func TestRenderCloudInitUserData_MountWhenDataDiskEnabled(t *testing.T) {
+	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", true)
+	if !strings.Contains(body, "mounts:") {
+		t.Errorf("user-data must include a mounts block when DataDisk is enabled:\n%s", body)
+	}
+	for _, want := range []string{
+		`"LABEL=y-cluster-data"`,
+		`"/data/yolean"`,
+		`"ext4"`,
+		`"defaults,nofail"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("user-data mount entry missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // TestRenderCloudInitUserData_KeepsCoreShape pins the rest of the
 // user-data so the pin addition didn't accidentally drop the
 // hostname / user / sshkey wiring the qemu provisioner relies on.
 func TestRenderCloudInitUserData_KeepsCoreShape(t *testing.T) {
-	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n")
+	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n", false)
 	for _, want := range []string{
 		"hostname: my-cluster",
 		"name: ystack",

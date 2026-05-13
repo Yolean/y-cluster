@@ -59,6 +59,13 @@ type Config struct {
 	Registries   config.Registries
 	Gateway      config.GatewayConfig
 	Storage      config.StorageConfig
+
+	// DataDisk is the operator-owned external qcow2 attached as a
+	// labeled `y-cluster-data` volume at /data/yolean. Empty means
+	// "no external data disk; /data/yolean lives on the boot disk".
+	// Provision creates the file if missing; Teardown leaves it.
+	DataDisk     string
+	DataDiskSize string
 }
 
 // K3s carries the runtime view of K3sConfig: which version to
@@ -141,6 +148,17 @@ func FromConfig(c *config.QEMUConfig) Config {
 	for _, p := range c.PortForwards {
 		pfs = append(pfs, PortForward{Host: p.Host, Guest: p.Guest})
 	}
+	// Relative DataDisk resolves against the directory the YAML lived
+	// in (the same convention configfile.Load applies to other path
+	// fields). An absolute path passes through.
+	dataDisk := c.DataDisk
+	if dataDisk != "" && !filepath.IsAbs(dataDisk) && c.Dir != "" {
+		dataDisk = filepath.Join(c.Dir, dataDisk)
+	}
+	dataDiskSize := c.DataDiskSize
+	if dataDisk != "" && dataDiskSize == "" {
+		dataDiskSize = "10G"
+	}
 	return Config{
 		Name:         c.Name,
 		DiskSize:     c.DiskSize,
@@ -155,9 +173,11 @@ func FromConfig(c *config.QEMUConfig) Config {
 			Version: c.K3s.Version,
 			Install: c.K3s.Install,
 		},
-		Registries: c.Registries,
-		Gateway:    c.Gateway,
-		Storage:    c.Storage,
+		Registries:   c.Registries,
+		Gateway:      c.Gateway,
+		Storage:      c.Storage,
+		DataDisk:     dataDisk,
+		DataDiskSize: dataDiskSize,
 	}
 }
 
@@ -169,8 +189,10 @@ type Cluster struct {
 	logger     *zap.Logger
 	Kubeconfig *kubeconfig.Manager
 	// extraDisks is appended after boot+seed in startVM. Set by
-	// StartForDiagnosticWithDisks for tests that need a labeled
-	// data volume attached; production code paths leave it nil.
+	// Provision when Config.DataDisk is configured (production
+	// code path for the disk-reuse primitive), and by
+	// StartForDiagnosticWithDisks for the e2e tests that
+	// exercise the appliance's pre-baked LABEL fstab.
 	extraDisks []string
 }
 
@@ -246,19 +268,60 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		Kubeconfig: kubecfg,
 	}
 
-	// Download cloud image
-	cloudImg, err := c.ensureCloudImage(ctx)
-	if err != nil {
-		return nil, err
+	// Two provision shapes:
+	//
+	//   - Fresh: <CacheDir>/<Name>.qcow2 does not exist. Build a
+	//     new boot disk from the upstream cloud image, install
+	//     k3s + local-path-provisioner + envoy-gateway on it,
+	//     extract a kubeconfig.
+	//
+	//   - Staged-disk: <CacheDir>/<Name>.qcow2 EXISTS. This is
+	//     the path `y-cluster import` set up -- a customer-side
+	//     boot of a freshly-imported appliance image. k3s and
+	//     the in-cluster surface (local-path-provisioner +
+	//     envoy-gateway) were baked in by the source appliance
+	//     build; this provision only needs to drop a fresh
+	//     SSH keypair + cloud-init seed, boot the VM, and
+	//     extract the kubeconfig context. Re-installing k3s
+	//     here would clobber the appliance's pre-baked state.
+	//
+	// The staged-disk branch closes the import->boot deadlock
+	// (provision used to error "disk already exists; run start"
+	// while start errored "no kubeconfig context"). After a
+	// successful staged-disk provision, the kubeconfig is
+	// populated and subsequent stop/start cycles take the
+	// existing-cluster path.
+	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
+	stagedDisk := false
+	if _, err := os.Stat(diskPath); err == nil {
+		stagedDisk = true
+		logger.Info("using staged disk from prior import (skipping cloud-image fetch + k3s install)",
+			zap.String("disk", diskPath))
+	} else {
+		cloudImg, err := c.ensureCloudImage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.ensureDisk(ctx, cloudImg, diskPath); err != nil {
+			return nil, err
+		}
 	}
 
-	// Create disk from cloud image. ensureDisk errors when the
-	// disk already exists -- per-customer Provision is always
-	// fresh; the operator runs teardown first or `start` to
-	// resume.
-	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
-	if err := c.ensureDisk(ctx, cloudImg, diskPath); err != nil {
-		return nil, err
+	// If DataDisk is configured, ensure it exists (creates a
+	// labeled qcow2 on first run; reuses an existing one on
+	// subsequent runs -- that's the disk-reuse contract). The
+	// cloud-init seed below adds the matching fstab entry so the
+	// kernel mounts the labeled volume at /data/yolean
+	// regardless of whether the boot disk has been through
+	// prepare-export.
+	if cfg.DataDisk != "" {
+		if err := checkDataDiskTools(cfg.DataDisk); err != nil {
+			return nil, err
+		}
+		if err := ensureDataDisk(ctx, cfg.DataDisk, cfg.DataDiskSize, logger); err != nil {
+			return nil, err
+		}
+		c.extraDisks = []string{cfg.DataDisk}
 	}
 
 	// Generate a fresh SSH keypair (always; never reused across
@@ -292,6 +355,30 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 
 	logger.Info("VM ready")
+
+	if stagedDisk {
+		// Pre-baked appliance: k3s + addons + registries are
+		// already on the disk. Wait for k3s to come up (which
+		// it does on its own at boot via systemd), pull its
+		// kubeconfig, merge it into the host's, and return.
+		// installK3s, localstorage.Install, envoygateway.Install
+		// are skipped wholesale -- re-running them here would
+		// clobber the appliance's pre-baked state (newer
+		// install.yaml apply, racey GatewayClass overwrite,
+		// etc.).
+		if err := c.waitForK3sReady(ctx); err != nil {
+			return nil, fmt.Errorf("staged disk: wait for k3s: %w", err)
+		}
+		rawKubeconfig, err := c.extractKubeconfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("staged disk: extract kubeconfig: %w", err)
+		}
+		if err := kubecfg.Import(rawKubeconfig); err != nil {
+			return nil, fmt.Errorf("staged disk: merge kubeconfig: %w", err)
+		}
+		logger.Info("staged disk ready", zap.String("context", cfg.Context))
+		return c, nil
+	}
 
 	// Stage /etc/rancher/k3s/registries.yaml before installing k3s
 	// so containerd reads it on first start. Skipped when the user
@@ -401,6 +488,18 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	// is load-bearing -- the next provision generates a fresh one,
 	// which is the contract for per-customer appliance delivery (no
 	// key reuse across provision runs).
+	// Operator-owned DataDisk is preserved unconditionally
+	// across teardown -- it lives outside CacheDir and is the
+	// whole point of the disk-reuse primitive. Log it so the
+	// operator sees the same path they configured will be
+	// re-attached on the next provision.
+	if cfg.DataDisk != "" {
+		if _, err := os.Stat(cfg.DataDisk); err == nil {
+			logger.Info("data disk preserved",
+				zap.String("path", cfg.DataDisk))
+		}
+	}
+
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if keepDisk {
 		logger.Info("teardown complete, disk preserved", zap.String("disk", diskPath))
@@ -601,18 +700,58 @@ func (c *Cluster) DiskPath() string {
 	return filepath.Join(c.cfg.CacheDir, c.cfg.Name+".qcow2")
 }
 
-// ImportVMDK converts a VMDK to qcow2 for use as a VM disk.
-func ImportVMDK(vmdkPath, diskPath string) error {
-	if _, err := os.Stat(vmdkPath); err != nil {
-		return fmt.Errorf("VMDK not found: %s", vmdkPath)
+// Import writes a VM disk to diskPath by converting from a
+// supported input format. Format is sniffed by extension on
+// inputPath:
+//
+//   - .vmdk  -> qemu-img convert -f vmdk  -O qcow2 (the original
+//              VMware-import path; vmdk subformat doesn't matter
+//              because qemu-img -f vmdk auto-detects the variant).
+//   - .qcow2 -> qemu-img convert -f qcow2 -O qcow2 (rewrites the
+//              qcow2 into the cache layout; usually a quick
+//              copy + compaction, no format change).
+//
+// A local-qemu e2e loop that does `y-cluster export
+// --format=qcow2 ... | y-cluster import` doesn't need any
+// out-of-band format conversion -- qcow2 is the native format on
+// both ends. Other formats (raw, vdi, OVA, gcp-tar) aren't on
+// the import path; add them when a real consumer asks.
+func Import(inputPath, diskPath string) error {
+	if _, err := os.Stat(inputPath); err != nil {
+		return fmt.Errorf("input not found: %s", inputPath)
+	}
+	srcFormat, err := importFormatFromExt(inputPath)
+	if err != nil {
+		return err
 	}
 	cmd := exec.Command("qemu-img", "convert",
-		"-f", "vmdk", "-O", "qcow2",
-		vmdkPath, diskPath)
+		"-f", srcFormat, "-O", "qcow2",
+		inputPath, diskPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img convert: %s: %w", out, err)
 	}
 	return nil
+}
+
+// ImportVMDK is the deprecated alias for Import retained for any
+// out-of-tree caller pinned to the old name. Prefer Import.
+func ImportVMDK(vmdkPath, diskPath string) error {
+	return Import(vmdkPath, diskPath)
+}
+
+// importFormatFromExt maps a file extension to the qemu-img `-f`
+// argument. Centralised so the supported-set is in one place and a
+// new format becomes a one-line table update.
+func importFormatFromExt(path string) (string, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".vmdk":
+		return "vmdk", nil
+	case ".qcow2":
+		return "qcow2", nil
+	default:
+		return "", fmt.Errorf("unsupported import format %q for %s (supported: .vmdk, .qcow2)", ext, path)
+	}
 }
 
 // --- internal helpers ---
@@ -689,7 +828,20 @@ func (c *Cluster) ensureSSHKey() error {
 // on hosts that don't provide them. The "no SSH banner" failure
 // mode on Hetzner was cloud-init blocking sshd's network ordering;
 // this pin prevents the recurrence.
-func renderCloudInitUserData(hostname, sshPubKey string) string {
+func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel bool) string {
+	// Mount block. When the operator has configured a DataDisk
+	// for this VM, the labeled qcow2 is attached as an extra
+	// virtio drive and the kernel needs a fstab entry to mount
+	// it at the appliance contract path. `nofail` keeps boot
+	// moving when the volume is missing (an operator manually
+	// detached it for debugging, say) instead of dropping into
+	// emergency mode.
+	mounts := ""
+	if mountDataLabel {
+		mounts = `mounts:
+  - [ "LABEL=` + DataDiskLabel + `", "/data/yolean", "ext4", "defaults,nofail", "0", "2" ]
+`
+	}
 	return fmt.Sprintf(`#cloud-config
 hostname: %s
 users:
@@ -699,7 +851,7 @@ users:
     ssh_authorized_keys:
       - %s
 package_update: false
-write_files:
+%swrite_files:
   - path: /etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg
     permissions: '0644'
     content: |
@@ -708,7 +860,7 @@ write_files:
       # that don't provide them. NoCloud covers the qemu seed; None lets
       # cloud-init proceed when no NoCloud source is present.
       datasource_list: [NoCloud, None]
-`, hostname, strings.TrimSpace(sshPubKey))
+`, hostname, strings.TrimSpace(sshPubKey), mounts)
 }
 
 func (c *Cluster) createCloudInitSeed() (string, error) {
@@ -717,7 +869,7 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 		return "", fmt.Errorf("read SSH public key: %w", err)
 	}
 
-	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey))
+	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "")
 
 	// Name-prefix the cloud-init source so two concurrent provisions
 	// in the same cacheDir don't race on the file. Per-VM artifacts

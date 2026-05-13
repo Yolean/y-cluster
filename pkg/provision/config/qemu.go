@@ -10,6 +10,23 @@ type QEMUConfig struct {
 	SSHPort  string `yaml:"sshPort,omitempty"      json:"sshPort,omitempty"      jsonschema:"default=2222,description=Host port forwarded to the VM's SSH server. Added on top of CommonConfig.PortForwards."`
 	CacheDir string `yaml:"cacheDir,omitempty"     json:"cacheDir,omitempty"     jsonschema:"description=Directory for VM disk and cloud image cache. Empty: $HOME/.cache/y-cluster-qemu."`
 
+	// DataDisk, when non-empty, points at an external qcow2 that y-cluster
+	// attaches as a labeled `y-cluster-data` ext4 volume. Provision
+	// creates the file with `qemu-img create` + `virt-format` if it
+	// doesn't exist; teardown leaves the file in place (operator-owned
+	// state, NOT cache-managed). The appliance image's pre-baked
+	// `LABEL=y-cluster-data /data/yolean ext4` fstab entry mounts it
+	// automatically at boot. Use this to test disk-reuse flows
+	// (provision -> workload writes /data/yolean -> teardown ->
+	// re-provision -> same data still there) locally without going
+	// through prepare-export + cloud import.
+	DataDisk string `yaml:"dataDisk,omitempty"     json:"dataDisk,omitempty"     jsonschema:"description=External qcow2 to attach as the labeled /data/yolean volume. Created if missing; preserved on teardown. Use absolute path; relative paths resolve against the config-file's directory."`
+
+	// DataDiskSize sizes a freshly-created DataDisk. Ignored when the
+	// DataDisk file already exists. Default keeps the same shape as
+	// DiskSize so the schema reads consistently.
+	DataDiskSize string `yaml:"dataDiskSize,omitempty" json:"dataDiskSize,omitempty" jsonschema:"description=Size for a freshly-created DataDisk ([num][KMGT]). Default 10G; ignored when the DataDisk file already exists or when DataDisk itself is empty."`
+
 	// Dir is filled at load time from the absolute path of the
 	// directory the config came from. Not part of the schema.
 	Dir string `yaml:"-" json:"-" jsonschema:"-"`
