@@ -310,9 +310,19 @@ func TestQemu_ExportImport(t *testing.T) {
 // then re-import via the same `qemu.Import` entrypoint without
 // going through vmdk. Maintainers exercising disk-reuse / appliance
 // e2e loops shouldn't have to bounce through a foreign format
-// just to satisfy the import verb. The format-sniff path
-// (importFormatFromExt(".qcow2") -> qemu-img convert -f qcow2)
-// is what this test actually validates end-to-end.
+// just to satisfy the import verb.
+//
+// Two FRs land in the same round-trip:
+//
+//   - FR 3: format-sniff path (importFormatFromExt(".qcow2") ->
+//     qemu-img convert -f qcow2) — exercised by step 5.
+//   - FR 4: provision uses the staged disk from import — the
+//     second Provision call (step 6) hits the
+//     <CacheDir>/<Name>.qcow2-already-exists branch and reaches
+//     SSH + kubeconfig WITHOUT re-running k3s install. Pre-FR 4
+//     this errored out with "disk already exists; run start..."
+//     and start itself errored "no kubeconfig context yet" --
+//     the import->boot deadlock the spec calls out.
 func TestQemu_ExportImport_Qcow2(t *testing.T) {
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		t.Skip("QEMU tests require /dev/kvm")
@@ -376,14 +386,31 @@ func TestQemu_ExportImport_Qcow2(t *testing.T) {
 		t.Fatal("disk should exist after qcow2 import")
 	}
 
+	// FR 4: this Provision must succeed against the
+	// already-existing <CacheDir>/<Name>.qcow2 left by Import.
+	// Pre-FR 4 we'd have errored here with "disk already exists;
+	// run start...". With the staged-disk branch in Provision,
+	// we boot the imported disk and pull the kubeconfig out of
+	// the k3s that the source appliance pre-baked.
 	cluster2, err := qemu.Provision(ctx, cfg, logger)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Provision against imported disk (FR 4 path): %v", err)
 	}
 	if out, err := cluster2.SSH(ctx, "hostname"); err != nil {
 		t.Fatalf("SSH after qcow2 import: %v", err)
 	} else {
 		t.Logf("hostname after qcow2 import: %s", out)
+	}
+	// The kubeconfig context should be live -- the staged-disk
+	// branch's contract is "import + provision = kubectl works".
+	// kubectl get nodes is the simplest cheap proof.
+	if out, err := exec.Command("kubectl",
+		"--context="+cfg.Context, "--kubeconfig="+cfg.Kubeconfig,
+		"get", "nodes", "--no-headers",
+	).CombinedOutput(); err != nil {
+		t.Errorf("kubectl get nodes against staged-disk context: %s: %v", out, err)
+	} else if !strings.Contains(string(out), "Ready") {
+		t.Errorf("staged-disk cluster has no Ready nodes:\n%s", out)
 	}
 	if err := cluster2.Teardown(false); err != nil {
 		t.Fatal(err)

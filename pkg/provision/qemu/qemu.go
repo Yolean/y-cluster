@@ -268,19 +268,43 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		Kubeconfig: kubecfg,
 	}
 
-	// Download cloud image
-	cloudImg, err := c.ensureCloudImage(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create disk from cloud image. ensureDisk errors when the
-	// disk already exists -- per-customer Provision is always
-	// fresh; the operator runs teardown first or `start` to
-	// resume.
+	// Two provision shapes:
+	//
+	//   - Fresh: <CacheDir>/<Name>.qcow2 does not exist. Build a
+	//     new boot disk from the upstream cloud image, install
+	//     k3s + local-path-provisioner + envoy-gateway on it,
+	//     extract a kubeconfig.
+	//
+	//   - Staged-disk: <CacheDir>/<Name>.qcow2 EXISTS. This is
+	//     the path `y-cluster import` set up -- a customer-side
+	//     boot of a freshly-imported appliance image. k3s and
+	//     the in-cluster surface (local-path-provisioner +
+	//     envoy-gateway) were baked in by the source appliance
+	//     build; this provision only needs to drop a fresh
+	//     SSH keypair + cloud-init seed, boot the VM, and
+	//     extract the kubeconfig context. Re-installing k3s
+	//     here would clobber the appliance's pre-baked state.
+	//
+	// The staged-disk branch closes the import->boot deadlock
+	// (provision used to error "disk already exists; run start"
+	// while start errored "no kubeconfig context"). After a
+	// successful staged-disk provision, the kubeconfig is
+	// populated and subsequent stop/start cycles take the
+	// existing-cluster path.
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
-	if err := c.ensureDisk(ctx, cloudImg, diskPath); err != nil {
-		return nil, err
+	stagedDisk := false
+	if _, err := os.Stat(diskPath); err == nil {
+		stagedDisk = true
+		logger.Info("using staged disk from prior import (skipping cloud-image fetch + k3s install)",
+			zap.String("disk", diskPath))
+	} else {
+		cloudImg, err := c.ensureCloudImage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.ensureDisk(ctx, cloudImg, diskPath); err != nil {
+			return nil, err
+		}
 	}
 
 	// If DataDisk is configured, ensure it exists (creates a
@@ -331,6 +355,30 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 
 	logger.Info("VM ready")
+
+	if stagedDisk {
+		// Pre-baked appliance: k3s + addons + registries are
+		// already on the disk. Wait for k3s to come up (which
+		// it does on its own at boot via systemd), pull its
+		// kubeconfig, merge it into the host's, and return.
+		// installK3s, localstorage.Install, envoygateway.Install
+		// are skipped wholesale -- re-running them here would
+		// clobber the appliance's pre-baked state (newer
+		// install.yaml apply, racey GatewayClass overwrite,
+		// etc.).
+		if err := c.waitForK3sReady(ctx); err != nil {
+			return nil, fmt.Errorf("staged disk: wait for k3s: %w", err)
+		}
+		rawKubeconfig, err := c.extractKubeconfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("staged disk: extract kubeconfig: %w", err)
+		}
+		if err := kubecfg.Import(rawKubeconfig); err != nil {
+			return nil, fmt.Errorf("staged disk: merge kubeconfig: %w", err)
+		}
+		logger.Info("staged disk ready", zap.String("context", cfg.Context))
+		return c, nil
+	}
 
 	// Stage /etc/rancher/k3s/registries.yaml before installing k3s
 	// so containerd reads it on first start. Skipped when the user
