@@ -88,6 +88,14 @@
           "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
           "type": "string"
         },
+        "dataDisk": {
+          "description": "External qcow2 to attach as the labeled /data/yolean volume. Created if missing; preserved on teardown. Use absolute path; relative paths resolve against the config-file's directory.",
+          "type": "string"
+        },
+        "dataDiskSize": {
+          "description": "Size for a freshly-created DataDisk ([num][KMGT]). Default 10G; ignored when the DataDisk file already exists or when DataDisk itself is empty.",
+          "type": "string"
+        },
         "diskSize": {
           "default": "20G",
           "description": "qcow2 disk size as a [num][KMGT] string.",

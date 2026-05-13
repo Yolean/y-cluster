@@ -59,6 +59,13 @@ type Config struct {
 	Registries   config.Registries
 	Gateway      config.GatewayConfig
 	Storage      config.StorageConfig
+
+	// DataDisk is the operator-owned external qcow2 attached as a
+	// labeled `y-cluster-data` volume at /data/yolean. Empty means
+	// "no external data disk; /data/yolean lives on the boot disk".
+	// Provision creates the file if missing; Teardown leaves it.
+	DataDisk     string
+	DataDiskSize string
 }
 
 // K3s carries the runtime view of K3sConfig: which version to
@@ -141,6 +148,17 @@ func FromConfig(c *config.QEMUConfig) Config {
 	for _, p := range c.PortForwards {
 		pfs = append(pfs, PortForward{Host: p.Host, Guest: p.Guest})
 	}
+	// Relative DataDisk resolves against the directory the YAML lived
+	// in (the same convention configfile.Load applies to other path
+	// fields). An absolute path passes through.
+	dataDisk := c.DataDisk
+	if dataDisk != "" && !filepath.IsAbs(dataDisk) && c.Dir != "" {
+		dataDisk = filepath.Join(c.Dir, dataDisk)
+	}
+	dataDiskSize := c.DataDiskSize
+	if dataDisk != "" && dataDiskSize == "" {
+		dataDiskSize = "10G"
+	}
 	return Config{
 		Name:         c.Name,
 		DiskSize:     c.DiskSize,
@@ -155,9 +173,11 @@ func FromConfig(c *config.QEMUConfig) Config {
 			Version: c.K3s.Version,
 			Install: c.K3s.Install,
 		},
-		Registries: c.Registries,
-		Gateway:    c.Gateway,
-		Storage:    c.Storage,
+		Registries:   c.Registries,
+		Gateway:      c.Gateway,
+		Storage:      c.Storage,
+		DataDisk:     dataDisk,
+		DataDiskSize: dataDiskSize,
 	}
 }
 
@@ -169,8 +189,10 @@ type Cluster struct {
 	logger     *zap.Logger
 	Kubeconfig *kubeconfig.Manager
 	// extraDisks is appended after boot+seed in startVM. Set by
-	// StartForDiagnosticWithDisks for tests that need a labeled
-	// data volume attached; production code paths leave it nil.
+	// Provision when Config.DataDisk is configured (production
+	// code path for the disk-reuse primitive), and by
+	// StartForDiagnosticWithDisks for the e2e tests that
+	// exercise the appliance's pre-baked LABEL fstab.
 	extraDisks []string
 }
 
@@ -259,6 +281,23 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if err := c.ensureDisk(ctx, cloudImg, diskPath); err != nil {
 		return nil, err
+	}
+
+	// If DataDisk is configured, ensure it exists (creates a
+	// labeled qcow2 on first run; reuses an existing one on
+	// subsequent runs -- that's the disk-reuse contract). The
+	// cloud-init seed below adds the matching fstab entry so the
+	// kernel mounts the labeled volume at /data/yolean
+	// regardless of whether the boot disk has been through
+	// prepare-export.
+	if cfg.DataDisk != "" {
+		if err := checkDataDiskTools(cfg.DataDisk); err != nil {
+			return nil, err
+		}
+		if err := ensureDataDisk(ctx, cfg.DataDisk, cfg.DataDiskSize, logger); err != nil {
+			return nil, err
+		}
+		c.extraDisks = []string{cfg.DataDisk}
 	}
 
 	// Generate a fresh SSH keypair (always; never reused across
@@ -401,6 +440,18 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	// is load-bearing -- the next provision generates a fresh one,
 	// which is the contract for per-customer appliance delivery (no
 	// key reuse across provision runs).
+	// Operator-owned DataDisk is preserved unconditionally
+	// across teardown -- it lives outside CacheDir and is the
+	// whole point of the disk-reuse primitive. Log it so the
+	// operator sees the same path they configured will be
+	// re-attached on the next provision.
+	if cfg.DataDisk != "" {
+		if _, err := os.Stat(cfg.DataDisk); err == nil {
+			logger.Info("data disk preserved",
+				zap.String("path", cfg.DataDisk))
+		}
+	}
+
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if keepDisk {
 		logger.Info("teardown complete, disk preserved", zap.String("disk", diskPath))
@@ -689,7 +740,20 @@ func (c *Cluster) ensureSSHKey() error {
 // on hosts that don't provide them. The "no SSH banner" failure
 // mode on Hetzner was cloud-init blocking sshd's network ordering;
 // this pin prevents the recurrence.
-func renderCloudInitUserData(hostname, sshPubKey string) string {
+func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel bool) string {
+	// Mount block. When the operator has configured a DataDisk
+	// for this VM, the labeled qcow2 is attached as an extra
+	// virtio drive and the kernel needs a fstab entry to mount
+	// it at the appliance contract path. `nofail` keeps boot
+	// moving when the volume is missing (an operator manually
+	// detached it for debugging, say) instead of dropping into
+	// emergency mode.
+	mounts := ""
+	if mountDataLabel {
+		mounts = `mounts:
+  - [ "LABEL=` + DataDiskLabel + `", "/data/yolean", "ext4", "defaults,nofail", "0", "2" ]
+`
+	}
 	return fmt.Sprintf(`#cloud-config
 hostname: %s
 users:
@@ -699,7 +763,7 @@ users:
     ssh_authorized_keys:
       - %s
 package_update: false
-write_files:
+%swrite_files:
   - path: /etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg
     permissions: '0644'
     content: |
@@ -708,7 +772,7 @@ write_files:
       # that don't provide them. NoCloud covers the qemu seed; None lets
       # cloud-init proceed when no NoCloud source is present.
       datasource_list: [NoCloud, None]
-`, hostname, strings.TrimSpace(sshPubKey))
+`, hostname, strings.TrimSpace(sshPubKey), mounts)
 }
 
 func (c *Cluster) createCloudInitSeed() (string, error) {
@@ -717,7 +781,7 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 		return "", fmt.Errorf("read SSH public key: %w", err)
 	}
 
-	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey))
+	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "")
 
 	// Name-prefix the cloud-init source so two concurrent provisions
 	// in the same cacheDir don't race on the file. Per-VM artifacts

@@ -565,6 +565,155 @@ func TestQemu_Seed_GateAndBypass(t *testing.T) {
 	t.Fatalf("k3s never reached Ready after bypass+restart\nk3s journal tail:\n%s", out)
 }
 
+// TestQemu_DataDisk_ReuseAcrossProvisions pins the disk-reuse
+// primitive's contract: an operator who sets DataDisk on the
+// runtime Config can provision a cluster, write to /data/yolean,
+// teardown the VM, re-provision a FRESH cluster on the same
+// DataDisk path, and read the same data back. This is the local
+// (qemu-side) shape of what `appliance-qemu-to-gcp.sh
+// --reuse-disk=true` does in cloud -- maintainers shouldn't
+// have to round-trip through GCP / Hetzner to QA disk reuse.
+//
+// What we prove:
+//
+//   - First provision creates a labeled qcow2 at the configured
+//     DataDisk path (NOT under CacheDir) and attaches it to the
+//     VM. The cloud-init `mounts:` entry mounts it at /data/yolean
+//     before workloads.
+//   - Writing a sentinel under /data/yolean lands on the labeled
+//     volume, not the boot disk.
+//   - Teardown removes the boot disk + cache artefacts but
+//     leaves the DataDisk file in place.
+//   - Second provision (same name, same DataDisk path, fresh
+//     boot disk + ssh key) re-attaches the same labeled qcow2
+//     and reads the sentinel back unchanged.
+//
+// Coverage gap closed: previously the only end-to-end coverage
+// for the "external labeled volume rides through a fresh cluster
+// install" pattern lived in TestQemu_Seed_VolumeAttached, which
+// goes via prepare-export + seed-tarball -- a different code
+// path. This test covers the direct disk-reuse path the
+// maintainer needs for fast iteration.
+func TestQemu_DataDisk_ReuseAcrossProvisions(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("QEMU tests require /dev/kvm")
+	}
+	if err := qemu.CheckPrerequisites(); err != nil {
+		t.Skip(err)
+	}
+	if _, err := exec.LookPath("virt-format"); err != nil {
+		t.Skip("virt-format not on PATH; install libguestfs-tools")
+	}
+
+	logger, _ := zap.NewDevelopment()
+
+	// CacheDir is the qemu provisioner's per-test scratch.
+	// dataDiskDir is deliberately a separate tempdir so the
+	// teardown-doesn't-touch-it contract has somewhere external
+	// to point at; in the production shape an operator would
+	// put this under their home dir or a customer-specific
+	// path, NOT under the cluster cache.
+	cacheDir := t.TempDir()
+	dataDiskDir := t.TempDir()
+	dataDiskPath := filepath.Join(dataDiskDir, "y-cluster-data.qcow2")
+
+	cfg := e2eQEMURuntime()
+	cfg.Name = "y-cluster-e2e-datadisk-reuse"
+	cfg.Context = "y-cluster-e2e-datadisk-reuse"
+	cfg.CacheDir = cacheDir
+	cfg.Memory = "2048"
+	cfg.CPUs = "2"
+	cfg.SSHPort = "2230"
+	cfg.PortForwards = e2eUniqueForwards("26450", "28450")
+	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
+	if cfg.Kubeconfig == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+	cfg.DataDisk = dataDiskPath
+	cfg.DataDiskSize = "1G"
+	// Skip the bundled gateway install for both provisions --
+	// this test is about disk reuse, not the EG install path,
+	// and skipping the EG install knocks ~30s off each
+	// provision (1 min over both passes).
+	cfg.Gateway.Skip = true
+
+	ctx := context.Background()
+
+	// === Provision 1: write the sentinel ===
+	cluster1, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatalf("Provision (pass 1): %v", err)
+	}
+
+	// The DataDisk was created at the operator-configured path,
+	// not the cache dir. Asserting BOTH so a future refactor
+	// doesn't accidentally relocate operator state.
+	if _, err := os.Stat(dataDiskPath); err != nil {
+		t.Errorf("DataDisk should exist post-provision at the operator path: %v", err)
+	}
+	if filepath.Dir(dataDiskPath) == cacheDir {
+		t.Errorf("DataDisk leaked into CacheDir; that defeats teardown safety")
+	}
+
+	// Mount must be the labeled volume (not the boot disk's /data/yolean).
+	if out, err := cluster1.SSH(ctx, "mountpoint -q /data/yolean && echo mounted"); err != nil {
+		t.Fatalf("mountpoint check (pass 1): %s: %v", out, err)
+	} else if !strings.Contains(string(out), "mounted") {
+		t.Errorf("/data/yolean must be a mountpoint when DataDisk is configured: %s", out)
+	}
+	if out, err := cluster1.SSH(ctx, "findmnt -no SOURCE /data/yolean"); err != nil {
+		t.Fatalf("findmnt /data/yolean: %s: %v", out, err)
+	} else if !strings.Contains(string(out), "/dev/vd") {
+		t.Errorf("/data/yolean should be backed by a virtio drive (the attached qcow2): %s", out)
+	}
+
+	// Plant the sentinel. lost+found is a normal ext4 reserved
+	// inode and proves the filesystem is the freshly-formatted
+	// labeled volume rather than a host bind-mount.
+	if out, err := cluster1.SSH(ctx,
+		"sudo ls -la /data/yolean && echo data-disk-reuse-v1 | sudo tee /data/yolean/sentinel.txt >/dev/null"); err != nil {
+		t.Fatalf("plant sentinel (pass 1): %s: %v", out, err)
+	}
+
+	// Teardown without --keepDisk: boot disk + cache go;
+	// DataDisk must stay.
+	if err := qemu.TeardownConfig(cfg, false, logger); err != nil {
+		t.Fatalf("TeardownConfig (pass 1): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, cfg.Name+".qcow2")); !os.IsNotExist(err) {
+		t.Errorf("boot disk should be gone after teardown: err=%v", err)
+	}
+	if _, err := os.Stat(dataDiskPath); err != nil {
+		t.Fatalf("DataDisk must survive teardown without --keepDisk: %v", err)
+	}
+
+	// === Provision 2: re-attach the same DataDisk ===
+	cluster2, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatalf("Provision (pass 2 / disk-reuse): %v", err)
+	}
+
+	// Sentinel must be readable unchanged on pass 2 -- the
+	// whole point of the primitive. cat sentinel.txt > 0 bytes
+	// implies the boot disk is brand new (no leftovers from
+	// the boot disk's /data/yolean) BUT the labeled volume
+	// brought the file along.
+	if out, err := cluster2.SSH(ctx, "cat /data/yolean/sentinel.txt"); err != nil {
+		t.Fatalf("read sentinel (pass 2): %v", err)
+	} else if got := strings.TrimSpace(string(out)); got != "data-disk-reuse-v1" {
+		t.Errorf("sentinel content lost across teardown + re-provision; got %q", got)
+	}
+
+	// Final teardown leaves the data disk in place (just like
+	// pass 1's teardown did).
+	if err := qemu.TeardownConfig(cfg, false, logger); err != nil {
+		t.Errorf("final TeardownConfig: %v", err)
+	}
+	if _, err := os.Stat(dataDiskPath); err != nil {
+		t.Errorf("DataDisk must still survive the second teardown: %v", err)
+	}
+}
+
 // TestQemu_Seed_VolumeAttached exercises the production-shape happy
 // path that TestQemu_Seed_GateAndBypass deliberately doesn't:
 //
