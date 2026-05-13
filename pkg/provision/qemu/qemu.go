@@ -652,18 +652,58 @@ func (c *Cluster) DiskPath() string {
 	return filepath.Join(c.cfg.CacheDir, c.cfg.Name+".qcow2")
 }
 
-// ImportVMDK converts a VMDK to qcow2 for use as a VM disk.
-func ImportVMDK(vmdkPath, diskPath string) error {
-	if _, err := os.Stat(vmdkPath); err != nil {
-		return fmt.Errorf("VMDK not found: %s", vmdkPath)
+// Import writes a VM disk to diskPath by converting from a
+// supported input format. Format is sniffed by extension on
+// inputPath:
+//
+//   - .vmdk  -> qemu-img convert -f vmdk  -O qcow2 (the original
+//              VMware-import path; vmdk subformat doesn't matter
+//              because qemu-img -f vmdk auto-detects the variant).
+//   - .qcow2 -> qemu-img convert -f qcow2 -O qcow2 (rewrites the
+//              qcow2 into the cache layout; usually a quick
+//              copy + compaction, no format change).
+//
+// A local-qemu e2e loop that does `y-cluster export
+// --format=qcow2 ... | y-cluster import` doesn't need any
+// out-of-band format conversion -- qcow2 is the native format on
+// both ends. Other formats (raw, vdi, OVA, gcp-tar) aren't on
+// the import path; add them when a real consumer asks.
+func Import(inputPath, diskPath string) error {
+	if _, err := os.Stat(inputPath); err != nil {
+		return fmt.Errorf("input not found: %s", inputPath)
+	}
+	srcFormat, err := importFormatFromExt(inputPath)
+	if err != nil {
+		return err
 	}
 	cmd := exec.Command("qemu-img", "convert",
-		"-f", "vmdk", "-O", "qcow2",
-		vmdkPath, diskPath)
+		"-f", srcFormat, "-O", "qcow2",
+		inputPath, diskPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img convert: %s: %w", out, err)
 	}
 	return nil
+}
+
+// ImportVMDK is the deprecated alias for Import retained for any
+// out-of-tree caller pinned to the old name. Prefer Import.
+func ImportVMDK(vmdkPath, diskPath string) error {
+	return Import(vmdkPath, diskPath)
+}
+
+// importFormatFromExt maps a file extension to the qemu-img `-f`
+// argument. Centralised so the supported-set is in one place and a
+// new format becomes a one-line table update.
+func importFormatFromExt(path string) (string, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".vmdk":
+		return "vmdk", nil
+	case ".qcow2":
+		return "qcow2", nil
+	default:
+		return "", fmt.Errorf("unsupported import format %q for %s (supported: .vmdk, .qcow2)", ext, path)
+	}
 }
 
 // --- internal helpers ---

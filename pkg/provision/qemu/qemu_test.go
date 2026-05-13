@@ -154,6 +154,58 @@ func TestImportVMDK_MissingVMDK(t *testing.T) {
 	}
 }
 
+// TestImport_MissingInput guards both extensions: a non-existent
+// file should fail fast before any qemu-img invocation.
+func TestImport_MissingInput(t *testing.T) {
+	for _, ext := range []string{".vmdk", ".qcow2"} {
+		if err := Import("/nonexistent/disk"+ext, "/tmp/out.qcow2"); err == nil {
+			t.Errorf("expected error for missing input with ext %q", ext)
+		}
+	}
+}
+
+// TestImportFormatFromExt pins the supported-format set. New
+// formats land here first; the switch statement is the canonical
+// list. Any addition surfaces as a new test case.
+func TestImportFormatFromExt(t *testing.T) {
+	cases := []struct {
+		path    string
+		want    string
+		wantErr bool
+	}{
+		// Happy cases: case-insensitive on extension because
+		// operators sometimes get .VMDK off VMware exports.
+		{"foo.vmdk", "vmdk", false},
+		{"foo.VMDK", "vmdk", false},
+		{"foo.qcow2", "qcow2", false},
+		{"foo.QCOW2", "qcow2", false},
+		{"/tmp/a/b.qcow2", "qcow2", false},
+		// Reject explicit unsupported extensions so a typo
+		// ("disk.qcow" / "disk.img" / "disk.raw") doesn't fall
+		// through to a confusing qemu-img error.
+		{"foo.raw", "", true},
+		{"foo.vdi", "", true},
+		{"foo.tar.gz", "", true},
+		{"noext", "", true},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		got, err := importFormatFromExt(c.path)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("importFormatFromExt(%q) expected error, got %q", c.path, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("importFormatFromExt(%q) unexpected error: %v", c.path, err)
+		}
+		if got != c.want {
+			t.Errorf("importFormatFromExt(%q) = %q, want %q", c.path, got, c.want)
+		}
+	}
+}
+
 func TestTeardownConfig_NoPidFile(t *testing.T) {
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = t.TempDir()

@@ -461,9 +461,24 @@ func (k *dockerNamedTeardown) run() error {
 func importCmd() *cobra.Command {
 	var configDir string
 	cmd := &cobra.Command{
-		Use:   "import <input.vmdk>",
-		Short: "Import a VMware appliance as the cluster disk",
-		Args:  cobra.ExactArgs(1),
+		Use:   "import <input.vmdk|input.qcow2>",
+		Short: "Import a disk image as the cluster disk",
+		Long: `Imports a disk image into the cluster's cache as the boot
+disk for a subsequent ` + "`y-cluster start`" + ` or ` + "`provision`" + `.
+Format is sniffed by file extension:
+
+  .vmdk   imported from VMware-style disks (the original
+          VirtualBox / VMware export path).
+  .qcow2  imported by re-writing the qcow2 into the cache layout
+          (essentially a copy + compaction). Lets a local
+          qemu-only e2e loop chain ` + "`y-cluster export --format=qcow2`" + `
+          straight into this command with no out-of-band
+          qemu-img conversion.
+
+Other formats (raw, vdi, gcp-tar) aren't on the import path; the
+flow expects them to be converted to qcow2 first or handled by
+a different verb.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			loaded, err := loadProvision(configDir)
 			if err != nil {
@@ -474,7 +489,7 @@ func importCmd() *cobra.Command {
 				return err
 			}
 			rc := qemu.FromConfig(q)
-			return qemu.ImportVMDK(args[0], filepath.Join(rc.CacheDir, rc.Name+".qcow2"))
+			return qemu.Import(args[0], filepath.Join(rc.CacheDir, rc.Name+".qcow2"))
 		},
 	}
 	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")

@@ -305,6 +305,91 @@ func TestQemu_ExportImport(t *testing.T) {
 	}
 }
 
+// TestQemu_ExportImport_Qcow2 is the local-qemu-only counterpart
+// to TestQemu_ExportImport: export the disk as native qcow2,
+// then re-import via the same `qemu.Import` entrypoint without
+// going through vmdk. Maintainers exercising disk-reuse / appliance
+// e2e loops shouldn't have to bounce through a foreign format
+// just to satisfy the import verb. The format-sniff path
+// (importFormatFromExt(".qcow2") -> qemu-img convert -f qcow2)
+// is what this test actually validates end-to-end.
+func TestQemu_ExportImport_Qcow2(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("QEMU tests require /dev/kvm")
+	}
+	if err := qemu.CheckPrerequisites(); err != nil {
+		t.Skip(err)
+	}
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eQEMURuntime()
+	cfg.Name = "y-cluster-e2e-export-qcow2"
+	cfg.Context = "y-cluster-e2e-export-qcow2"
+	cfg.CacheDir = t.TempDir()
+	cfg.Memory = "4096"
+	cfg.CPUs = "2"
+	cfg.SSHPort = "2229"
+	cfg.PortForwards = e2eUniqueForwards("26449", "28449")
+	cfg.Kubeconfig = os.Getenv("KUBECONFIG")
+	if cfg.Kubeconfig == "" {
+		t.Skip("KUBECONFIG must be set")
+	}
+
+	ctx := context.Background()
+
+	cluster, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cluster.Teardown(true); err != nil {
+		t.Fatal(err)
+	}
+
+	bundleDir := filepath.Join(cfg.CacheDir, "bundle")
+	if err := qemu.Export(ctx, qemu.ExportOptions{
+		CacheDir:  cfg.CacheDir,
+		Name:      cfg.Name,
+		BundleDir: bundleDir,
+		Format:    qemu.FormatQcow2,
+		Logger:    logger,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	qcow2Path := filepath.Join(bundleDir, cfg.Name+".qcow2")
+	if _, err := os.Stat(qcow2Path); err != nil {
+		t.Fatalf("qcow2 should exist after export: %v", err)
+	}
+
+	// Drop the original disk so the import is unambiguously the
+	// source of the boot disk on the next provision.
+	if err := os.Remove(cluster.DiskPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Import via the same qemu.Import that the CLI calls. The
+	// .qcow2 extension dispatches to the qcow2-format branch.
+	if err := qemu.Import(qcow2Path, cluster.DiskPath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cluster.DiskPath()); err != nil {
+		t.Fatal("disk should exist after qcow2 import")
+	}
+
+	cluster2, err := qemu.Provision(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cluster2.SSH(ctx, "hostname"); err != nil {
+		t.Fatalf("SSH after qcow2 import: %v", err)
+	} else {
+		t.Logf("hostname after qcow2 import: %s", out)
+	}
+	if err := cluster2.Teardown(false); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestQemu_StopStart provisions, stops the VM, asserts disk +
 // state sidecar are preserved while the pidfile is gone, then
 // starts the VM and asserts kubectl still works against the
