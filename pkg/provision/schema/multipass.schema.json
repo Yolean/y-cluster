@@ -53,6 +53,26 @@
       },
       "type": "object"
     },
+    "LifetimeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "maxRun": {
+          "description": "Wall-clock budget as a Go duration such as 8h or 90m. Counted from cluster start. Empty disables auto-expiry.",
+          "type": "string"
+        },
+        "onExpiry": {
+          "default": "stop",
+          "description": "Local action on expiry. Ignored on the GCP appliance path (always deletes the instance).",
+          "enum": [
+            "stop",
+            "pause",
+            "teardown"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "MultipassConfig": {
       "additionalProperties": false,
       "properties": {
@@ -78,6 +98,10 @@
         "k3s": {
           "$ref": "#/$defs/K3sConfig",
           "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
+        },
+        "lifetime": {
+          "$ref": "#/$defs/LifetimeConfig",
+          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
         },
         "memory": {
           "default": "8192",

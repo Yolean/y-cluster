@@ -30,6 +30,8 @@
 //     keys is portable across providers
 package config
 
+import "time"
+
 // Provider IDs. Single source of truth for both the per-provider
 // `Validate()` checks and the `enum` constraint on
 // CommonConfig.Provider — schemagen reads AllProviders to build
@@ -54,16 +56,87 @@ var AllProviders = []string{ProviderDocker, ProviderMultipass, ProviderQEMU}
 // Per-provider Validate() must call validateCommon to enforce the
 // shared invariants (provider discriminator, k3s.version present).
 type CommonConfig struct {
-	Provider     string        `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -> multipass; Linux+/dev/kvm+qemu-system-x86_64 -> qemu; else reachable docker daemon -> docker). Per-provider schemas narrow this to a single literal and keep it required."`
-	Name         string        `yaml:"name,omitempty"         json:"name,omitempty"         jsonschema:"default=y-cluster,description=Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files."`
-	Context      string        `yaml:"context,omitempty"      json:"context,omitempty"      jsonschema:"default=local,description=kubeconfig context name to write."`
-	Memory       string        `yaml:"memory,omitempty"       json:"memory,omitempty"       jsonschema:"default=8192,description=Memory in MB. qemu allocates this to the VM; docker passes it to --memory."`
-	CPUs         string        `yaml:"cpus,omitempty"         json:"cpus,omitempty"         jsonschema:"default=4,description=vCPU count. qemu sets -smp; docker passes --cpus."`
-	K3s          K3sConfig     `yaml:"k3s,omitempty"          json:"k3s,omitempty"          jsonschema:"description=k3s install settings. Defaults track pkg/provision/config/k3s.yaml."`
-	PortForwards []PortForward `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
-	Registries   Registries    `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
-	Gateway      GatewayConfig `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs, controller, or GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
-	Storage      StorageConfig `yaml:"storage,omitempty"      json:"storage,omitempty"      jsonschema:"description=Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/<ns>_<pvc>) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."`
+	Provider     string         `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -> multipass; Linux+/dev/kvm+qemu-system-x86_64 -> qemu; else reachable docker daemon -> docker). Per-provider schemas narrow this to a single literal and keep it required."`
+	Name         string         `yaml:"name,omitempty"         json:"name,omitempty"         jsonschema:"default=y-cluster,description=Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files."`
+	Context      string         `yaml:"context,omitempty"      json:"context,omitempty"      jsonschema:"default=local,description=kubeconfig context name to write."`
+	Memory       string         `yaml:"memory,omitempty"       json:"memory,omitempty"       jsonschema:"default=8192,description=Memory in MB. qemu allocates this to the VM; docker passes it to --memory."`
+	CPUs         string         `yaml:"cpus,omitempty"         json:"cpus,omitempty"         jsonschema:"default=4,description=vCPU count. qemu sets -smp; docker passes --cpus."`
+	K3s          K3sConfig      `yaml:"k3s,omitempty"          json:"k3s,omitempty"          jsonschema:"description=k3s install settings. Defaults track pkg/provision/config/k3s.yaml."`
+	PortForwards []PortForward  `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
+	Registries   Registries     `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
+	Gateway      GatewayConfig  `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs, controller, or GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
+	Storage      StorageConfig  `yaml:"storage,omitempty"      json:"storage,omitempty"      jsonschema:"description=Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/<ns>_<pvc>) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."`
+	Lifetime     LifetimeConfig `yaml:"lifetime,omitempty"    json:"lifetime,omitempty"     jsonschema:"description=Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."`
+}
+
+// LifetimeConfig is the cluster-level cost-control policy. A dev
+// cluster left running after a task is paused or finished is pure
+// cost (host RAM/CPU locally, hourly billing in cloud); a lifetime
+// makes the cluster expire on its own.
+//
+// The budget is always counted from when the cluster STARTS, never
+// from provision time. This matters for the appliance flow: a disk
+// is provisioned, exported, then imported and booted cloud-side
+// possibly days later -- the countdown must begin at that boot. On
+// the GCP path this falls out for free because the duration is
+// handed to GCP's native max-run-duration, which GCP measures from
+// instance start; locally the deadline is recomputed on each
+// `y-cluster start`.
+//
+// MaxRun empty (or "0") disables the whole feature -- a cluster
+// with no lifetime runs until manually stopped, the historical
+// behaviour.
+type LifetimeConfig struct {
+	// MaxRun is the wall-clock budget as a Go duration string
+	// (e.g. "8h", "90m", "24h"). Empty disables. Validated to
+	// parse via time.ParseDuration and be strictly positive.
+	MaxRun string `yaml:"maxRun,omitempty" json:"maxRun,omitempty" jsonschema:"description=Wall-clock budget as a Go duration such as 8h or 90m. Counted from cluster start. Empty disables auto-expiry."`
+
+	// OnExpiry is the action a LOCAL cluster takes when MaxRun
+	// elapses: stop (graceful, disk preserved -- the default and
+	// cheapest reversible action), pause (SIGSTOP; RAM stays
+	// reserved), or teardown (delete). Ignored on the GCP
+	// appliance path, which always decommissions via instance
+	// delete. Defaulted to stop when MaxRun is set.
+	OnExpiry string `yaml:"onExpiry,omitempty" json:"onExpiry,omitempty" jsonschema:"enum=stop,enum=pause,enum=teardown,default=stop,description=Local action on expiry. Ignored on the GCP appliance path (always deletes the instance)."`
+}
+
+// Lifetime action names. Single source of truth for the OnExpiry
+// enum and the reaper's dispatch switch.
+const (
+	OnExpiryStop     = "stop"
+	OnExpiryPause    = "pause"
+	OnExpiryTeardown = "teardown"
+)
+
+// AllOnExpiry is the canonical OnExpiry value list, used by
+// validation error messages.
+var AllOnExpiry = []string{OnExpiryStop, OnExpiryPause, OnExpiryTeardown}
+
+// LifetimePolicy returns the configured lifetime. Promoted to every
+// provider config via CommonConfig embedding, so a caller holding an
+// `any` from LoadProvision can read the budget without switching on
+// the concrete provider type.
+func (c CommonConfig) LifetimePolicy() LifetimeConfig { return c.Lifetime }
+
+// Enabled reports whether a lifetime budget is configured.
+func (l LifetimeConfig) Enabled() bool {
+	return l.MaxRun != "" && l.MaxRun != "0"
+}
+
+// MaxRunDuration parses MaxRun. Returns (0, nil) when disabled so
+// callers can treat "no lifetime" and "zero budget" uniformly; a
+// non-nil error means MaxRun is set but unparseable, which Validate
+// rejects up front.
+func (l LifetimeConfig) MaxRunDuration() (time.Duration, error) {
+	if !l.Enabled() {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(l.MaxRun)
+	if err != nil {
+		return 0, errInvalid("lifetime.maxRun %q is not a valid Go duration (e.g. 8h, 90m): %w", l.MaxRun, err)
+	}
+	return d, nil
 }
 
 // StorageConfig controls the local-path-provisioner install that
@@ -328,7 +401,32 @@ func (c *CommonConfig) validateCommon(expected string) error {
 	if c.K3s.Version == "" {
 		return errInvalid("k3s.version is empty; check pkg/provision/config/k3s.yaml")
 	}
+	if err := c.Lifetime.validate(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validate enforces the lifetime invariants. A disabled lifetime
+// (empty MaxRun) is always valid. When set, MaxRun must parse to a
+// strictly positive duration and OnExpiry must name a known action.
+func (l LifetimeConfig) validate() error {
+	if !l.Enabled() {
+		return nil
+	}
+	d, err := l.MaxRunDuration()
+	if err != nil {
+		return err
+	}
+	if d <= 0 {
+		return errInvalid("lifetime.maxRun must be positive, got %q", l.MaxRun)
+	}
+	switch l.OnExpiry {
+	case "", OnExpiryStop, OnExpiryPause, OnExpiryTeardown:
+		return nil
+	default:
+		return errInvalid("lifetime.onExpiry must be one of %v, got %q", AllOnExpiry, l.OnExpiry)
+	}
 }
 
 // requireHostAPIPort enforces the guest:6443 PortForwards invariant

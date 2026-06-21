@@ -131,6 +131,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(prepareExportCmd())
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
+	root.AddCommand(lifetimeCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(imagesCmd())
 	root.AddCommand(manifestsCmd())
@@ -361,6 +362,9 @@ message naming what was checked.`,
 				if _, err := qemu.Provision(cmd.Context(), rt, logger); err != nil {
 					return err
 				}
+				// Provision armed the deadline; install the host-side
+				// timer that fires the local expiry action.
+				armHostTimerIfLifetime(rt.CacheDir, rt.Name, rt.Context, logger)
 				logger.Info("cluster ready",
 					zap.String("ssh", fmt.Sprintf("ssh -p %s -i %s ystack@localhost",
 						rt.SSHPort, filepath.Join(rt.CacheDir, rt.Name+"-ssh"))),
@@ -411,6 +415,9 @@ func teardownCmd() *cobra.Command {
 			}
 			switch v := loaded.(type) {
 			case *config.QEMUConfig:
+				// Remove the host expiry timer before the cluster goes;
+				// the deadline is moot once teardown removes the sidecar.
+				disarmHostTimer(v.Context, logger)
 				return qemu.TeardownConfig(qemu.FromConfig(v), keepDisk, logger)
 			case *config.DockerConfig:
 				// docker has no persistent disk; keepDisk is

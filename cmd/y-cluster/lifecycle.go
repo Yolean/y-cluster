@@ -55,6 +55,9 @@ func stopCmd() *cobra.Command {
 			}
 			switch lr.Backend {
 			case cluster.BackendQEMU:
+				// A manual stop ends this run's budget; remove the
+				// host expiry timer. `start` re-arms a fresh window.
+				disarmHostTimer(contextName, logger)
 				return qemu.Stop(qemuCacheDir(), lr.ClusterName, logger)
 			case cluster.BackendDocker:
 				return docker.Stop(ctx, lr.ClusterName, logger)
@@ -240,6 +243,9 @@ func startCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Start re-anchored the deadline to now; install the host
+			// timer for the fresh window.
+			armHostTimerIfLifetime(qemuCacheDir(), clusterName, contextName, logger)
 			logger.Info("cluster started",
 				zap.String("context", c.Context()),
 			)
