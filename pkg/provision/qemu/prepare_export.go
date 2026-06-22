@@ -78,12 +78,6 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	if _, err := exec.LookPath("virt-customize"); err != nil {
 		return fmt.Errorf("virt-customize not found in PATH; install with: sudo apt install libguestfs-tools")
 	}
-	// virt-customize (offline phase) and virt-tar-out (seed snapshot)
-	// both build a supermin appliance from the host kernel; bail early
-	// with a durable fix if it isn't readable.
-	if err := requireReadableHostKernel(); err != nil {
-		return err
-	}
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return fmt.Errorf("kubectl not found in PATH; install kubectl (prepare-export now snapshots reconciled Gateway state, which needs kubectl)")
 	}
@@ -101,6 +95,15 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if _, err := os.Stat(diskPath); err != nil {
 		return fmt.Errorf("disk image not found at %s: %w", diskPath, err)
+	}
+
+	// The offline phase runs virt-customize + virt-tar-out, which
+	// build a supermin appliance from the host kernel. Gate that here,
+	// AFTER the cheap correctness preconditions (so a missing/stopped
+	// cluster reports its own actionable error) but BEFORE the live
+	// phase mutates anything, so an unreadable kernel fails clean.
+	if err := requireReadableHostKernel(); err != nil {
+		return err
 	}
 
 	// --- LIVE phase ---

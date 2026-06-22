@@ -43,7 +43,12 @@ func runningKernelRelease() (string, bool) {
 // blocker), or on a non-permission error -- in those cases we let
 // libguestfs run and surface its own diagnostics rather than block
 // on a false positive.
-func requireReadableHostKernel() error {
+//
+// A var (not a plain func) so a test can force it to fail and assert
+// that a call site checks it only after its cheap correctness
+// preconditions -- otherwise an unreadable kernel on the build host
+// masks the actionable error (it did, on the CI runner).
+var requireReadableHostKernel = func() error {
 	rel, ok := runningKernelRelease()
 	if !ok {
 		return nil
@@ -81,5 +86,5 @@ HOOK
   sudo chmod 0644 /boot/vmlinuz-*
 
 The hook re-applies on every future kernel; the chmod fixes the ones
-already installed.`, path, kernelReadableHookName, kernelReadableHookName)
+already installed`, path, kernelReadableHookName, kernelReadableHookName)
 }

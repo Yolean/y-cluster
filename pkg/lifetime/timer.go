@@ -142,6 +142,7 @@ func Disarm(kubeContext string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	logger.Debug("disarming lifetime host timer", zap.String("context", kubeContext))
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		// Stopping a transient timer unit also cleans it up.
 		_ = exec.Command("systemctl", "--user", "stop", unitName(kubeContext)+".timer").Run()
