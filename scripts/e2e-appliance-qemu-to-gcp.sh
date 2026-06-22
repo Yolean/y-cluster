@@ -188,13 +188,10 @@ export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY"
 # `storage cp` for files >150 MiB).
 export CLOUDSDK_STORAGE_PARALLEL_COMPOSITE_UPLOAD_ENABLED=True
 
-if ! [ -r /boot/vmlinuz-"$(uname -r)" ]; then
-    cat >&2 <<EOF
-/boot/vmlinuz-$(uname -r) is not readable; virt-sysprep will fail.
-  sudo chmod +r /boot/vmlinuz-*
-EOF
-    exit 1
-fi
+# virt-sysprep / virt-customize need to read /boot/vmlinuz-* (libguestfs
+# supermin). Fail fast with the durable fix if it isn't readable.
+# shellcheck source=scripts/_check-host-kernel.sh
+. "$REPO_ROOT/scripts/_check-host-kernel.sh"
 
 # === 0. Auth ===
 stage "activating GCP service account"
@@ -218,6 +215,15 @@ mkdir -p "$CFG_DIR"
     echo 'memory: "4096"'
     echo 'cpus: "2"'
     echo 'diskSize: "40G"'
+    # Lifetime exercises the cloud-side auto-decommission path: the
+    # GCP instance gets a max-run-duration so it self-deletes. The
+    # default is long enough never to fire during the build itself
+    # (it would otherwise stop the local cluster mid-e2e via the
+    # host timer); the e2e only asserts the flag plumbs through to
+    # GCP, not that GCP actually deletes hours later.
+    echo "lifetime:"
+    printf '  maxRun: "%s"\n' "${LIFETIME_MAXRUN:-8h}"
+    echo "  onExpiry: stop"
     if [ -n "${APP_HTTP_PORT:-}" ] || [ -n "${APP_HTTPS_PORT:-}" ] || [ -n "${APP_API_PORT:-}" ]; then
         echo "portForwards:"
         [ -n "${APP_API_PORT:-}" ]   && printf '  - host: "%s"\n    guest: "6443"\n' "$APP_API_PORT"
@@ -320,6 +326,9 @@ if gcloud compute instances describe "$VM_NAME" --project="$GCP_PROJECT" --zone=
     gcloud compute instances delete "$VM_NAME" \
         --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
 fi
+# Cloud-side lifetime: GCP self-deletes the instance at the deadline
+# (counted from instance start). Empty when no lifetime is set.
+read -r -a LIFETIME_FLAGS <<< "$("$Y_CLUSTER" lifetime gcp-flags -c "$CFG_DIR")"
 gcloud compute instances create "$VM_NAME" \
     --project="$GCP_PROJECT" \
     --zone="$GCP_ZONE" \
@@ -328,12 +337,26 @@ gcloud compute instances create "$VM_NAME" \
     --image-project="$GCP_PROJECT" \
     --boot-disk-size=20GB \
     --tags=y-cluster-appliance \
+    "${LIFETIME_FLAGS[@]}" \
     >/dev/null
 PUBLIC_IP=$(gcloud compute instances describe "$VM_NAME" \
     --project="$GCP_PROJECT" \
     --zone="$GCP_ZONE" \
     --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
 echo "  public ip: $PUBLIC_IP"
+
+# Assert the lifetime plumbed through to GCP scheduling. This is the
+# cloud-side, host-independent enforcement: GCP deletes the instance
+# at the deadline whether or not this machine or the cluster is up.
+stage "verifying cloud lifetime enforcement on $VM_NAME"
+SCHED=$(gcloud compute instances describe "$VM_NAME" \
+    --project="$GCP_PROJECT" --zone="$GCP_ZONE" \
+    --format='value(scheduling.maxRunDuration.seconds,scheduling.instanceTerminationAction)')
+echo "  scheduling.maxRunDuration/terminationAction: $SCHED"
+case "$SCHED" in
+    *DELETE*) echo "  ok: instance will self-delete at its max-run-duration" ;;
+    *) echo "FAIL: expected scheduling.instanceTerminationAction=DELETE, got: '$SCHED'"; exit 1 ;;
+esac
 
 # === 12. Wait for ssh + probe HTTP ===
 SSH_KEY="$CACHE_DIR/$NAME-ssh"

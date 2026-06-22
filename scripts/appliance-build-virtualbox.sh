@@ -76,19 +76,11 @@ for tool in go qemu-system-x86_64 qemu-img kubectl ssh ssh-keygen curl virt-sysp
         || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
-# virt-sysprep needs to read /boot/vmlinuz-* (libguestfs supermin
-# builds an appliance VM with the host kernel). Ubuntu installs
-# kernel images 0600 root, so non-root invocations bail with an
-# opaque "supermin exited with error status 1". Surface the fix.
-if ! [ -r /boot/vmlinuz-"$(uname -r)" ]; then
-    cat >&2 <<EOF
-/boot/vmlinuz-$(uname -r) is not readable; virt-sysprep will fail.
-Fix one of:
-  sudo chmod +r /boot/vmlinuz-*
-  sudo dpkg-statoverride --update --add root root 0644 /boot/vmlinuz-$(uname -r)
-EOF
-    exit 1
-fi
+# virt-sysprep / virt-customize need to read /boot/vmlinuz-* (libguestfs
+# builds a supermin appliance from the host kernel). Fail fast with the
+# durable fix if it isn't readable.
+# shellcheck source=scripts/_check-host-kernel.sh
+. "$REPO_ROOT/scripts/_check-host-kernel.sh"
 
 # === Build dev binary ===
 stage "building dev binary -> $Y_CLUSTER"

@@ -745,16 +745,10 @@ for tool in go qemu-system-x86_64 qemu-img kubectl ssh ssh-keygen curl virt-sysp
         || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
-# virt-sysprep needs to read /boot/vmlinuz-* (libguestfs supermin).
-if ! [ -r /boot/vmlinuz-"$(uname -r)" ]; then
-    cat >&2 <<EOF
-/boot/vmlinuz-$(uname -r) is not readable; virt-sysprep will fail.
-Fix one of:
-  sudo chmod +r /boot/vmlinuz-*
-  sudo dpkg-statoverride --update --add root root 0644 /boot/vmlinuz-$(uname -r)
-EOF
-    exit 1
-fi
+# virt-sysprep / virt-customize need to read /boot/vmlinuz-* (libguestfs
+# supermin). Fail fast with the durable fix if it isn't readable.
+# shellcheck source=scripts/_check-host-kernel.sh
+. "$REPO_ROOT/scripts/_check-host-kernel.sh"
 
 # === Stage 1: build dev binary + provision local qemu ===
 stage "building dev binary -> $Y_CLUSTER"
@@ -1075,6 +1069,16 @@ if gcloud compute instances describe "$VM_NAME" --project="$GCP_PROJECT" --zone=
     gcloud compute instances delete "$VM_NAME" \
         --project="$GCP_PROJECT" --zone="$GCP_ZONE" --quiet >/dev/null
 fi
+# Cloud-side lifetime enforcement. When the appliance config carries
+# a lifetime.maxRun this emits
+# `--max-run-duration=<secs>s --instance-termination-action=DELETE`
+# so GCP deletes the instance at the deadline (measured from instance
+# START, not build time) with no dependency on this host or on the
+# cluster staying up. The data disk is boot=no, so DELETE stops
+# compute billing while preserving the customer's data. Empty (no
+# flags) when no lifetime is configured.
+read -r -a LIFETIME_FLAGS <<< "$("$Y_CLUSTER" lifetime gcp-flags -c "$CFG_DIR")"
+
 # device-name=datadir is what GCE writes after the
 # `scsi-0Google_PersistentDisk_` prefix in /dev/disk/by-id/
 # inside the VM; the SSH-side mount block uses that stable path
@@ -1088,6 +1092,7 @@ gcloud compute instances create "$VM_NAME" \
     --boot-disk-size=40GB \
     --disk="name=$GCP_DATADIR_DISK,device-name=datadir,mode=rw,boot=no" \
     --tags=y-cluster-appliance \
+    "${LIFETIME_FLAGS[@]}" \
     >/dev/null
 
 PUBLIC_IP=$(gcloud compute instances describe "$VM_NAME" \
