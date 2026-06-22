@@ -2,6 +2,7 @@ package qemu
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -308,5 +309,31 @@ func TestPrepareExport_MissingVirtCustomize(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "libguestfs-tools") {
 		t.Errorf("error should hint at apt install libguestfs-tools: %v", err)
+	}
+}
+
+// TestPrepareExport_PreconditionsBeforeKernelCheck guards the
+// ordering that broke CI: an unreadable host kernel (libguestfs
+// capability) must not mask a cheap correctness precondition like
+// "no saved state". On the CI runner the kernel image was 0600, so
+// the kernel check -- placed too early -- returned its own error
+// instead of the actionable "run provision" hint. Force the kernel
+// check to fail regardless of host state and assert the precondition
+// still wins.
+func TestPrepareExport_PreconditionsBeforeKernelCheck(t *testing.T) {
+	stubPrepareExportTools(t)
+	orig := requireReadableHostKernel
+	requireReadableHostKernel = func() error { return errors.New("host kernel unreadable (forced)") }
+	t.Cleanup(func() { requireReadableHostKernel = orig })
+
+	err := PrepareExport(context.Background(), t.TempDir(), "missing", nil)
+	if err == nil {
+		t.Fatal("expected error when no saved state exists")
+	}
+	if !strings.Contains(err.Error(), "y-cluster provision") {
+		t.Errorf("no-saved-state precondition must win over the kernel check: %v", err)
+	}
+	if strings.Contains(err.Error(), "unreadable") {
+		t.Errorf("kernel check fired before the precondition: %v", err)
 	}
 }

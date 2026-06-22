@@ -66,6 +66,13 @@ type Config struct {
 	// Provision creates the file if missing; Teardown leaves it.
 	DataDisk     string
 	DataDiskSize string
+
+	// Lifetime/OnExpiry are the cost-control auto-expiry policy
+	// (Go duration string + local action). Persisted to the state
+	// sidecar; the absolute deadline is armed separately so it
+	// anchors to start, not provision. Empty Lifetime disables.
+	Lifetime string
+	OnExpiry string
 }
 
 // K3s carries the runtime view of K3sConfig: which version to
@@ -178,6 +185,8 @@ func FromConfig(c *config.QEMUConfig) Config {
 		Storage:      c.Storage,
 		DataDisk:     dataDisk,
 		DataDiskSize: dataDiskSize,
+		Lifetime:     c.Lifetime.MaxRun,
+		OnExpiry:     c.Lifetime.OnExpiry,
 	}
 }
 
@@ -347,6 +356,17 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// teardown if they care that the sidecar is missing.
 	if err := saveState(cfg); err != nil {
 		logger.Warn("could not save state sidecar (start will not work without it)", zap.Error(err))
+	}
+
+	// Arm the auto-expiry deadline (no-op when no lifetime budget).
+	// Anchored to now: the clock starts when the cluster comes up,
+	// which for provision is also "now" but for the appliance start
+	// path is the meaningful anchor (the disk may have been built
+	// long before this boot).
+	if deadline, err := armLifetime(cfg.CacheDir, cfg.Name); err != nil {
+		logger.Warn("could not arm lifetime deadline", zap.Error(err))
+	} else if !deadline.IsZero() {
+		logger.Info("lifetime armed", zap.Time("expiresAt", deadline), zap.String("onExpiry", cfg.OnExpiry))
 	}
 
 	// Wait for SSH
@@ -705,11 +725,11 @@ func (c *Cluster) DiskPath() string {
 // inputPath:
 //
 //   - .vmdk  -> qemu-img convert -f vmdk  -O qcow2 (the original
-//              VMware-import path; vmdk subformat doesn't matter
-//              because qemu-img -f vmdk auto-detects the variant).
+//     VMware-import path; vmdk subformat doesn't matter
+//     because qemu-img -f vmdk auto-detects the variant).
 //   - .qcow2 -> qemu-img convert -f qcow2 -O qcow2 (rewrites the
-//              qcow2 into the cache layout; usually a quick
-//              copy + compaction, no format change).
+//     qcow2 into the cache layout; usually a quick
+//     copy + compaction, no format change).
 //
 // A local-qemu e2e loop that does `y-cluster export
 // --format=qcow2 ... | y-cluster import` doesn't need any

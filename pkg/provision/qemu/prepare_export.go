@@ -97,6 +97,15 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 		return fmt.Errorf("disk image not found at %s: %w", diskPath, err)
 	}
 
+	// The offline phase runs virt-customize + virt-tar-out, which
+	// build a supermin appliance from the host kernel. Gate that here,
+	// AFTER the cheap correctness preconditions (so a missing/stopped
+	// cluster reports its own actionable error) but BEFORE the live
+	// phase mutates anything, so an unreadable kernel fails clean.
+	if err := requireReadableHostKernel(); err != nil {
+		return err
+	}
+
 	// --- LIVE phase ---
 	// Clear the per-deploy dns-hint-ip annotation so the snapshot
 	// doesn't ship our LB IP. Then dump reconciled gateway state

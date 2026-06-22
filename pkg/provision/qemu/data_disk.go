@@ -90,5 +90,10 @@ func checkDataDiskTools(path string) error {
 			"DataDisk %s does not exist and virt-format is not on PATH; "+
 				"install libguestfs-tools to let y-cluster create labeled data disks", path)
 	}
+	// virt-format builds a supermin appliance from the host kernel;
+	// bail early with a durable fix if it isn't readable.
+	if err := requireReadableHostKernel(); err != nil {
+		return err
+	}
 	return nil
 }

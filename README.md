@@ -31,6 +31,13 @@ Subcommand groups:
   and arbitrary user-built images.
 - **cache info / purge** — inspect or wipe y-cluster's shared
   download cache (k3s airgap bundles, image OCI layouts).
+- **lifetime status / reap / extend / arm / disarm / gcp-flags** —
+  cost-control auto-expiry. A `lifetime.maxRun` in the config gives
+  the cluster a wall-clock budget counted from when it starts; on
+  expiry a local cluster runs its `onExpiry` action (stop by
+  default) via a host timer, and a GCP appliance is deleted by GCP
+  itself (`gcp-flags` emits the `--max-run-duration` flags). See the
+  "lifetime" idea below.
 - **serve / serve ensure / serve stop / serve logs** — a
   lightweight HTTP server that exposes config assets to the
   cluster: kustomize-built Secrets named
@@ -42,7 +49,20 @@ context. The README is intentionally short — when something is
 discoverable from `y-cluster <cmd> --help`, that's where it
 lives.
 
-## Two ideas worth knowing before you start
+## Three ideas worth knowing before you start
+
+**lifetime: the budget is counted from start, and the trigger lives
+where the cost is.** `lifetime.maxRun` is a wall-clock budget that
+begins when the cluster *starts* (re-anchored on every `y-cluster
+start`), not when it was provisioned — an appliance disk may boot
+days after it was built. Locally the host *is* the cost, so a host
+timer fires `y-cluster lifetime reap`, which stops the cluster (or
+the configured `onExpiry` action). On a GCP appliance the host
+mustn't be the trigger (it may be offline), so `lifetime gcp-flags`
+hands the duration to GCP's native `--max-run-duration`, and GCP
+deletes the instance on its own — the attached data disk survives.
+`reap` re-checks the persisted deadline and re-arms if it isn't due,
+so `lifetime extend 2h` is safe and a stale timer is harmless.
 
 **yconverge: ordering vs checks come from different places.**
 CUE imports in `yconverge.cue` declare ordering — each import is

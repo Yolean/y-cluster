@@ -173,6 +173,15 @@ func Start(ctx context.Context, cacheDir, name string, logger *zap.Logger) (*Clu
 	if err := c.Kubeconfig.Import(rawKubeconfig); err != nil {
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
+	// Re-anchor the auto-expiry deadline to this start. A
+	// stopped-then-started cluster gets a fresh budget; this is the
+	// "count from when the cluster starts" guarantee (no-op when no
+	// lifetime is configured).
+	if deadline, err := armLifetime(cacheDir, name); err != nil {
+		logger.Warn("could not re-arm lifetime deadline on start", zap.Error(err))
+	} else if !deadline.IsZero() {
+		logger.Info("lifetime armed", zap.Time("expiresAt", deadline))
+	}
 	logger.Info("k3s ready", zap.String("context", c.cfg.Context))
 	return c, nil
 }
