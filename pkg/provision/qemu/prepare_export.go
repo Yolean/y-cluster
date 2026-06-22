@@ -78,6 +78,12 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	if _, err := exec.LookPath("virt-customize"); err != nil {
 		return fmt.Errorf("virt-customize not found in PATH; install with: sudo apt install libguestfs-tools")
 	}
+	// virt-customize (offline phase) and virt-tar-out (seed snapshot)
+	// both build a supermin appliance from the host kernel; bail early
+	// with a durable fix if it isn't readable.
+	if err := requireReadableHostKernel(); err != nil {
+		return err
+	}
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return fmt.Errorf("kubectl not found in PATH; install kubectl (prepare-export now snapshots reconciled Gateway state, which needs kubectl)")
 	}
