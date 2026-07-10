@@ -332,17 +332,17 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		}
 	}
 
-	// Phase 2: install the in-cluster reaper Job. Sleeps for
-	// AutoTeardownHours, then calls hcloud delete for the server
-	// and (if no other lb-group members remain) the LB. Lives in
-	// the cluster so an operator-machine going away doesn't strand
-	// paid Hetzner resources -- the trade earlier at(1)-on-host
-	// work didn't pass.
+	// Phase 2: install the in-cluster reaper Job. Sleeps the
+	// configured window, then runs the expiry action via the
+	// hcloud API. Lives in the cluster so an operator-machine
+	// going away doesn't strand paid Hetzner resources -- the
+	// trade earlier at(1)-on-host work didn't pass.
 	if err := installReaper(ctx, installReaperOpts{
 		KubectlContext: cfg.Context,
 		ContextName:    cfg.Context,
 		HCloudToken:    readHCloudToken(),
-		Hours:          cfg.AutoTeardownHours,
+		MaxRun:         time.Duration(cfg.AutoTeardownHours) * time.Hour,
+		OnExpiry:       config.OnExpiryTeardown,
 		ServerID:       c.state.ServerID,
 		LBID:           c.state.LBID,
 		LBGroup:        cfg.LBGroup,

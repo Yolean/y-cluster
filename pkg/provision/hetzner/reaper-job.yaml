@@ -24,15 +24,25 @@ metadata:
   namespace: {{NAMESPACE}}
   labels:
     managed-by: y-cluster
+    y-cluster.yolean.se/on-expiry: {{ON_EXPIRY}}
+  # Operator-facing surface for "what happens when": a future
+  # `y-cluster lifetime status` for hetzner reads these instead of
+  # re-deriving from pod logs. expires-at is computed at install
+  # time; a pod retry restarts the full sleep, so the action can
+  # only fire LATER than expires-at (never earlier).
+  annotations:
+    y-cluster.yolean.se/max-run: "{{MAX_RUN}}"
+    y-cluster.yolean.se/on-expiry: "{{ON_EXPIRY}}"
+    y-cluster.yolean.se/expires-at: "{{EXPIRES_AT}}"
 spec:
   ttlSecondsAfterFinished: 300
   # backoffLimit > 0 is what makes the reaper survive node reboots
   # and transient pod failures: with restartPolicy Never each pod
   # loss counts one attempt, and a fresh pod re-runs the script
   # from the top. Retry semantics: every attempt sleeps the FULL
-  # HOURS again, so a retry only ever moves the teardown later
-  # (never fires early), and the delete steps are guarded so a
-  # retry after partial cleanup is harmless.
+  # SLEEP_SECONDS again, so a retry only ever moves the expiry
+  # later (never fires early), and the action steps are guarded so
+  # a retry after partial cleanup is harmless.
   backoffLimit: 6
   template:
     metadata:
@@ -44,15 +54,25 @@ spec:
       - name: reaper
         image: {{IMAGE}}
         command: ["/bin/sh", "-c"]
-        # Sleep for HOURS, then (if we're the last lb-group member)
-        # delete the LB FIRST and the server SECOND. Order matters:
-        # this Pod runs ON the server it's about to delete, and the
-        # server-delete API returns before Hetzner physically shuts
-        # the VM down -- if we did LB-after-server, the Pod could be
-        # killed mid-cleanup and orphan the LB. Pre-counting also
-        # means: when other lb-group members exist, we leave the LB
-        # alone (label_selector drops us automatically once the
-        # server is gone).
+        # Sleep for SLEEP_SECONDS, then run the ON_EXPIRY action:
+        #
+        #   teardown: if we're the last lb-group member, delete the
+        #     LB FIRST and the server SECOND. Order matters: this
+        #     Pod runs ON the server it's about to delete, and the
+        #     server-delete API returns before Hetzner physically
+        #     shuts the VM down -- if we did LB-after-server, the
+        #     Pod could be killed mid-cleanup and orphan the LB.
+        #     Pre-counting also means: when other lb-group members
+        #     exist, we leave the LB alone (label_selector drops us
+        #     automatically once the server is gone).
+        #
+        #   stop: graceful ACPI shutdown of our own server. No LB
+        #     or server delete -- identity (server id, IP, disk) is
+        #     preserved for `y-cluster start`. The Pod dies with the
+        #     node, leaving the Job frozen mid-attempt; a start via
+        #     y-cluster deletes and re-installs the Job with a fresh
+        #     window, and a start via the Hetzner console re-runs
+        #     this Pod, which sleeps the full window again.
         #
         # Hetzner Certificate + SSH key cleanup is intentionally NOT
         # in here -- those are free, need LB-detach-then-delete
@@ -61,20 +81,29 @@ spec:
         args:
         - |
           set -eu
-          echo "[reaper] sleeping ${HOURS}h before tearing down server=${SERVER_ID} lb-group=${LB_GROUP}"
-          sleep $((HOURS * 3600))
-          TOTAL=$(/ko-app/hcloud server list -l "managed-by=y-cluster,lb-group=${LB_GROUP}" --output=noheader 2>/dev/null | wc -l)
-          echo "[reaper] lb-group has ${TOTAL} servers (including us)"
-          if [ "${TOTAL}" = "1" ] && [ "${LB_ID}" != "0" ]; then
-            echo "[reaper] last member; deleting LB ${LB_ID} BEFORE server"
-            /ko-app/hcloud load-balancer delete "${LB_ID}" || echo "[reaper] LB delete failed (already gone?)"
+          echo "[reaper] sleeping ${SLEEP_SECONDS}s (maxRun ${MAX_RUN}) until onExpiry=${ON_EXPIRY} of server=${SERVER_ID} lb-group=${LB_GROUP}"
+          sleep "${SLEEP_SECONDS}"
+          if [ "${ON_EXPIRY}" = "teardown" ]; then
+            TOTAL=$(/ko-app/hcloud server list -l "managed-by=y-cluster,lb-group=${LB_GROUP}" --output=noheader 2>/dev/null | wc -l)
+            echo "[reaper] lb-group has ${TOTAL} servers (including us)"
+            if [ "${TOTAL}" = "1" ] && [ "${LB_ID}" != "0" ]; then
+              echo "[reaper] last member; deleting LB ${LB_ID} BEFORE server"
+              /ko-app/hcloud load-balancer delete "${LB_ID}" || echo "[reaper] LB delete failed (already gone?)"
+            fi
+            echo "[reaper] deleting server ${SERVER_ID}"
+            /ko-app/hcloud server delete "${SERVER_ID}" || echo "[reaper] server delete failed (already gone?)"
+          else
+            echo "[reaper] shutting down server ${SERVER_ID} (graceful ACPI; a stopped Hetzner server keeps billing)"
+            /ko-app/hcloud server shutdown "${SERVER_ID}" || echo "[reaper] server shutdown failed (already stopped?)"
           fi
-          echo "[reaper] deleting server ${SERVER_ID}"
-          /ko-app/hcloud server delete "${SERVER_ID}" || echo "[reaper] server delete failed (already gone?)"
           echo "[reaper] done"
         env:
-        - name: HOURS
-          value: "{{HOURS}}"
+        - name: SLEEP_SECONDS
+          value: "{{SLEEP_SECONDS}}"
+        - name: MAX_RUN
+          value: "{{MAX_RUN}}"
+        - name: ON_EXPIRY
+          value: "{{ON_EXPIRY}}"
         - name: SERVER_ID
           value: "{{SERVER_ID}}"
         - name: LB_ID
