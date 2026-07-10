@@ -19,7 +19,7 @@
 // Later phases bolt on:
 //
 //   - k3s install + envoy-gateway           (phase 1 finish)
-//   - Auto-teardown via in-cluster reaper Job (phase 2;
+//   - Lifetime expiry via in-cluster reaper Job (phase 2;
 //     supersedes the reverted at(1)-on-host approach)
 //   - Shared LB + TLS + dns-hint-ip          (phase 3)
 //   - images load <archive|-|url>            (phase 4)
@@ -332,25 +332,43 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		}
 	}
 
-	// Phase 2: install the in-cluster reaper Job. Sleeps the
-	// configured window, then runs the expiry action via the
-	// hcloud API. Lives in the cluster so an operator-machine
-	// going away doesn't strand paid Hetzner resources -- the
-	// trade earlier at(1)-on-host work didn't pass.
-	if err := installReaper(ctx, installReaperOpts{
-		KubectlContext: cfg.Context,
-		ContextName:    cfg.Context,
-		HCloudToken:    readHCloudToken(),
-		MaxRun:         time.Duration(cfg.AutoTeardownHours) * time.Hour,
-		OnExpiry:       config.OnExpiryTeardown,
-		ServerID:       c.state.ServerID,
-		LBID:           c.state.LBID,
-		LBGroup:        cfg.LBGroup,
-	}, logger); err != nil {
-		return nil, fmt.Errorf("install reaper: %w", err)
+	// Phase 2, unified with the standard lifetime feature: the
+	// in-cluster reaper Job is hetzner's expiry mechanism (the
+	// analog of GCP's max-run-duration). It sleeps lifetime.maxRun
+	// then runs onExpiry via the hcloud API. Installed only when a
+	// budget is configured -- an empty lifetime disables expiry
+	// entirely, matching local semantics. Lives in the cluster so
+	// an operator-machine going away doesn't strand paid Hetzner
+	// resources -- the trade earlier at(1)-on-host work didn't
+	// pass.
+	if cfg.Lifetime.Enabled() {
+		maxRun, err := cfg.Lifetime.MaxRunDuration()
+		if err != nil {
+			return nil, err // unreachable: Validate parsed it above
+		}
+		if cfg.Lifetime.OnExpiry != config.OnExpiryTeardown {
+			// Mirrors the lifetime spec's billing note: unlike a
+			// local VM, a stopped Hetzner server is not free.
+			logger.Warn("lifetime.onExpiry stop keeps billing on hetzner: a stopped server still bills its resources; identity (server id + IP + disk) is preserved for `y-cluster start`; set onExpiry teardown for cost control")
+		}
+		if err := installReaper(ctx, installReaperOpts{
+			KubectlContext: cfg.Context,
+			ContextName:    cfg.Context,
+			HCloudToken:    readHCloudToken(),
+			MaxRun:         maxRun,
+			OnExpiry:       cfg.Lifetime.OnExpiry,
+			ServerID:       c.state.ServerID,
+			LBID:           c.state.LBID,
+			LBGroup:        cfg.LBGroup,
+		}, logger); err != nil {
+			return nil, fmt.Errorf("install reaper: %w", err)
+		}
+		logger.Info("lifetime expiry reaper installed",
+			zap.Duration("maxRun", maxRun),
+			zap.String("onExpiry", cfg.Lifetime.OnExpiry))
+	} else {
+		logger.Info("no lifetime configured; cluster runs (and bills) until manual stop or teardown")
 	}
-	logger.Info("auto-teardown reaper installed",
-		zap.Int("hours", cfg.AutoTeardownHours))
 
 	// Phase 6.d: lock down upstream pulls. Lands LAST so the
 	// bootstrap (pre-load, envoy-gateway, reaper apply) finishes

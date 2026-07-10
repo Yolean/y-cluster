@@ -14,15 +14,20 @@
 # After provision:
 #   - kubeconfig is merged into the operator's $KUBECONFIG under
 #     <context> (cluster name == context).
-#   - An at(1) job runs `y-cluster teardown -c <this-dir>` after
-#     <autoTeardownHours> hours. atrm <id> if you want to extend.
+#   - With lifetime.maxRun set, an in-cluster reaper Job runs the
+#     onExpiry action (stop or teardown; pause has no Hetzner
+#     primitive) when the budget elapses. `y-cluster stop` removes
+#     the Job; `y-cluster start` re-arms a fresh full window. NB a
+#     stopped Hetzner server keeps billing; teardown frees billing.
 #   - Hetzner LB IPv4 is the dns-hint-ip on the GatewayClass;
 #     ystack's y-k8s-ingress-hosts populates /etc/hosts on the
 #     operator's host so *.<context>.local.test routes through
 #     the LB.
 provider: hetzner
 context: alice-dev
-# autoTeardownHours: 8       # default; override for long-running CI shapes
+lifetime:
+  maxRun: 8h                 # empty/omitted disables auto-expiry (cluster bills until teardown)
+  onExpiry: teardown         # default stop preserves identity but keeps billing
 # location: hel1             # default; nbg1, fsn1, ash, hil also work
 # serverType: cx23           # default; bump for memory-hungry workloads
 # lbGroup: alice             # default = $USER; share LB across multiple contexts

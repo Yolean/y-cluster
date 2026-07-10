@@ -35,22 +35,6 @@ type HetznerConfig struct {
 	// qemu provisioner's convention.
 	SSHUser string `yaml:"sshUser,omitempty"     json:"sshUser,omitempty"     jsonschema:"default=ystack,description=Unprivileged user the y-cluster CLI SSHes as. Created by cloud-init at first boot."`
 
-	// AutoTeardownHours sets the deadline for the in-cluster
-	// reaper Job (see pkg/provision/hetzner/reaper.go). The Job
-	// sleeps the configured duration then issues hcloud delete
-	// calls for the server and (if no other lb-group members
-	// remain) the LB. Default 8 hours, mandatory (zero / unset
-	// is treated as "use default" -- this is a dev-cluster, not
-	// a long-lived production VM, and a permanent dev cluster
-	// is what we're trying to prevent).
-	//
-	// Trade documented in HETZNER_PROVISIONER.md: a cluster-side
-	// reaper survives operator-host loss; a node reboot resets
-	// the timer (acceptable for dev). An earlier on-host at(1)
-	// approach got reverted because a wiped operator laptop
-	// stranded paid Hetzner resources.
-	AutoTeardownHours int `yaml:"autoTeardownHours,omitempty" json:"autoTeardownHours,omitempty" jsonschema:"default=8,description=Hours until the in-cluster reaper Job tears the cluster down. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24)."`
-
 	// LBGroup keys the per-developer shared LoadBalancer. Default
 	// $USER (resolved at ApplyDefaults time). Two contexts with
 	// the same lbGroup share one Hetzner Load Balancer; the LB is
@@ -144,10 +128,10 @@ func (c HetznerImageCache) validate() error {
 }
 
 // SetDir satisfies configfile.DirAware. Nothing hetzner-specific
-// reads Dir today (auto-teardown runs as an in-cluster reaper Job,
-// which needs no host-side paths); the field exists so relative
-// paths in future config surface can resolve against the config
-// file location like the other providers do.
+// reads Dir today (lifetime expiry runs as an in-cluster reaper
+// Job, which needs no host-side paths); the field exists so
+// relative paths in future config surface can resolve against the
+// config file location like the other providers do.
 func (c *HetznerConfig) SetDir(dir string) { c.Dir = dir }
 
 // hetznerContextRE constrains the context (and therefore the
@@ -171,8 +155,6 @@ var hetznerContextRE = regexp.MustCompile(`^[a-z][a-z0-9-]{2,}[a-z0-9]$`)
 //     Context); we force Name = Context here BEFORE
 //     applyCommonDefaults so the operator never has to specify
 //     both fields.
-//   - AutoTeardownHours: int field, applyTagDefaults handles
-//     only string fields. We set the 8-hour default explicitly.
 //   - LBGroup: $USER fallback for the per-developer LB key.
 //     Host-dependent so it can't be a tag default.
 func (c *HetznerConfig) ApplyDefaults() {
@@ -186,9 +168,6 @@ func (c *HetznerConfig) ApplyDefaults() {
 	c.applyCommonDefaults()
 	if c.LBGroup == "" {
 		c.LBGroup = os.Getenv("USER")
-	}
-	if c.AutoTeardownHours == 0 {
-		c.AutoTeardownHours = 8
 	}
 	c.ImageCache.applyDefaults()
 }
@@ -239,16 +218,17 @@ func (c *HetznerConfig) Validate() error {
 	if c.Name != "" && c.Name != c.Context {
 		return errInvalid("name %q must equal context %q on hetzner (the Hetzner server name is the cluster identifier)", c.Name, c.Context)
 	}
-	if c.AutoTeardownHours < 0 {
-		return errInvalid("autoTeardownHours %d cannot be negative", c.AutoTeardownHours)
-	}
-	// lifetime is the qemu / GCP-appliance mechanism and has no
-	// runtime on hetzner; cost control here is the in-cluster
-	// reaper Job driven by autoTeardownHours. Reject loudly so a
-	// budget the operator thinks is in force never silently
-	// no-ops.
-	if c.Lifetime.Enabled() {
-		return errInvalid("lifetime.maxRun is not supported on hetzner; use autoTeardownHours (the in-cluster reaper) for auto-teardown")
+	// lifetime: the standard config drives hetzner's expiry
+	// mechanism, an in-cluster reaper Job installed at provision
+	// (the analog of GCP's max-run-duration). stop and teardown
+	// map to hcloud server shutdown / delete; pause has no
+	// Hetzner Cloud primitive, so a set budget with onExpiry
+	// pause is rejected instead of silently downgraded. The
+	// Enabled() guard matters: applyTagDefaults fills onExpiry
+	// (stop) even when no budget is set, and a disabled lifetime
+	// must stay valid.
+	if c.Lifetime.Enabled() && c.Lifetime.OnExpiry == OnExpiryPause {
+		return errInvalid("lifetime.onExpiry %q is not supported on hetzner (Hetzner Cloud has no pause/resume primitive); use %s or %s", OnExpiryPause, OnExpiryStop, OnExpiryTeardown)
 	}
 	switch c.K3s.Install {
 	case "", "airgap", "script":

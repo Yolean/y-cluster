@@ -207,6 +207,11 @@ func TestHetzner_RejectUpstream(t *testing.T) {
 		CommonConfig: config.CommonConfig{
 			Provider: config.ProviderHetzner,
 			Context:  ctxName,
+			// A lifetime makes Provision install the expiry reaper,
+			// which is what the rejectUpstream readiness gate (and
+			// assertion 4 below) exercises. 2h outlives the test;
+			// teardown in Cleanup wins long before expiry.
+			Lifetime: config.LifetimeConfig{MaxRun: "2h", OnExpiry: config.OnExpiryTeardown},
 		},
 		ImageCache: config.HetznerImageCache{
 			Bucket:         os.Getenv("H_S3_BUCKET"),
@@ -290,6 +295,17 @@ func TestHetzner_RejectUpstream(t *testing.T) {
 		// expected
 	default:
 		t.Errorf("reaper Pod phase = %q after rejectUpstream; want Running/Succeeded (lockdown raced the image pull?)", string(phase))
+	}
+
+	// (5) The Job carries the lifetime inspection surface: an
+	// expires-at annotation computed at install. This is what a
+	// future `lifetime status` for hetzner reads.
+	expiresAt, err := cluster.SSH(ctx, `sudo k3s kubectl -n y-cluster-reaper get job reaper -o jsonpath="{.metadata.annotations['y-cluster\.yolean\.se/expires-at']}"`)
+	if err != nil {
+		t.Fatalf("get reaper Job expires-at annotation: %v", err)
+	}
+	if strings.TrimSpace(string(expiresAt)) == "" {
+		t.Errorf("reaper Job is missing the y-cluster.yolean.se/expires-at annotation")
 	}
 }
 

@@ -393,11 +393,12 @@ message naming what was checked.`,
 				if err != nil {
 					return err
 				}
+				// Lifetime expiry details (or the lack of a budget)
+				// are logged by Provision's reaper step.
 				logger.Info("cluster ready",
 					zap.String("ssh", fmt.Sprintf("ssh -i %s %s@%s",
 						filepath.Join(hetzner.CacheDir(), v.Context+"-ssh"),
 						v.SSHUser, cluster.PublicIPv4())),
-					zap.Int("autoTeardownHours", v.AutoTeardownHours),
 				)
 				return nil
 			default:

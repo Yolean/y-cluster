@@ -24,9 +24,6 @@ func TestHetzner_ApplyDefaults_Empty(t *testing.T) {
 	if c.SSHUser != "ystack" {
 		t.Errorf("SSHUser: %q (want ystack)", c.SSHUser)
 	}
-	if c.AutoTeardownHours != 8 {
-		t.Errorf("AutoTeardownHours: %d (want 8)", c.AutoTeardownHours)
-	}
 	if c.FQDNDomain != "local.test" {
 		t.Errorf("FQDNDomain: %q (want local.test, RFC 6761 reserved)", c.FQDNDomain)
 	}
@@ -48,17 +45,13 @@ func TestHetzner_ApplyDefaults_RespectsExplicitValues(t *testing.T) {
 			Context:  "alice-dev",
 			Name:     "alice-dev",
 		},
-		ServerType:        "cx32",
-		AutoTeardownHours: 24,
-		LBGroup:           "team-eu",
-		FQDNDomain:        "dev.yolean.se",
+		ServerType: "cx32",
+		LBGroup:    "team-eu",
+		FQDNDomain: "dev.yolean.se",
 	}
 	c.ApplyDefaults()
 	if c.ServerType != "cx32" {
 		t.Errorf("ServerType clobbered: %q", c.ServerType)
-	}
-	if c.AutoTeardownHours != 24 {
-		t.Errorf("AutoTeardownHours clobbered: %d", c.AutoTeardownHours)
 	}
 	if c.LBGroup != "team-eu" {
 		t.Errorf("LBGroup clobbered (USER fallback fired): %q", c.LBGroup)
@@ -168,53 +161,65 @@ func TestHetzner_Validate_NameDefaultsToContext(t *testing.T) {
 	}
 }
 
-// TestHetzner_Validate_AutoTeardownHoursNonNegative: 0 means
-// "use default" (ApplyDefaults rewrites to 8); negative is an
-// operator typo we reject loudly. Auto-teardown is mandatory --
-// permanent dev clusters defeat the point.
-func TestHetzner_Validate_AutoTeardownHoursNonNegative(t *testing.T) {
-	c := &HetznerConfig{
-		CommonConfig:      CommonConfig{Provider: ProviderHetzner, Context: "alice-dev"},
-		AutoTeardownHours: -1,
-	}
-	c.ApplyDefaults()
-	// ApplyDefaults' explicit zero-handler doesn't override
-	// negative values, so -1 survives.
-	if c.AutoTeardownHours != -1 {
-		t.Fatalf("ApplyDefaults clobbered explicit -1: %d", c.AutoTeardownHours)
-	}
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "negative") {
-		t.Fatalf("want negative-hours error, got %v", err)
+// TestHetzner_Validate_LifetimeAccepted: the standard lifetime
+// config drives hetzner expiry (the in-cluster reaper Job). A set
+// maxRun with onExpiry stop / teardown (or empty, which
+// ApplyDefaults resolves to stop) must validate.
+func TestHetzner_Validate_LifetimeAccepted(t *testing.T) {
+	for _, onExpiry := range []string{"", OnExpiryStop, OnExpiryTeardown} {
+		c := &HetznerConfig{CommonConfig: CommonConfig{
+			Provider: ProviderHetzner,
+			Context:  "alice-dev",
+			Lifetime: LifetimeConfig{MaxRun: "8h", OnExpiry: onExpiry},
+		}}
+		c.ApplyDefaults()
+		if err := c.Validate(); err != nil {
+			t.Errorf("onExpiry %q should validate on hetzner: %v", onExpiry, err)
+		}
 	}
 }
 
-// TestHetzner_Validate_RejectsLifetime: lifetime (maxRun) has no
-// runtime on the hetzner provider -- auto-teardown is the
-// in-cluster reaper Job configured via autoTeardownHours. A set
-// budget must fail validation instead of silently no-oping.
-func TestHetzner_Validate_RejectsLifetime(t *testing.T) {
+// TestHetzner_Validate_LifetimePauseRejected: Hetzner Cloud has no
+// pause/resume primitive (no SIGSTOP analog for a cloud server),
+// so an armed budget with onExpiry pause must fail loudly instead
+// of silently downgrading to stop.
+func TestHetzner_Validate_LifetimePauseRejected(t *testing.T) {
 	c := &HetznerConfig{CommonConfig: CommonConfig{
 		Provider: ProviderHetzner,
 		Context:  "alice-dev",
-		Lifetime: LifetimeConfig{MaxRun: "8h"},
+		Lifetime: LifetimeConfig{MaxRun: "8h", OnExpiry: OnExpiryPause},
 	}}
 	c.ApplyDefaults()
 	err := c.Validate()
 	if err == nil {
-		t.Fatal("want error for lifetime.maxRun on hetzner, got nil")
+		t.Fatal("want error for lifetime.onExpiry pause on hetzner, got nil")
 	}
-	if !strings.Contains(err.Error(), "autoTeardownHours") {
-		t.Fatalf("error should point at autoTeardownHours as the hetzner mechanism: %v", err)
+	if !strings.Contains(err.Error(), "no pause/resume primitive") {
+		t.Errorf("error should explain the missing primitive: %v", err)
 	}
-	// A disabled lifetime (empty maxRun) stays valid even though
-	// ApplyDefaults fills lifetime.onExpiry's tag default.
-	c2 := &HetznerConfig{CommonConfig: CommonConfig{
+	if !strings.Contains(err.Error(), "stop") || !strings.Contains(err.Error(), "teardown") {
+		t.Errorf("error should name stop and teardown as the options: %v", err)
+	}
+}
+
+// TestHetzner_Validate_LifetimeDisabledValid: empty maxRun keeps
+// the whole feature off and must stay valid even though
+// ApplyDefaults fills lifetime.onExpiry's tag default (stop) on a
+// disabled lifetime -- Enabled() is the emptiness test, not
+// onExpiry presence.
+func TestHetzner_Validate_LifetimeDisabledValid(t *testing.T) {
+	c := &HetznerConfig{CommonConfig: CommonConfig{
 		Provider: ProviderHetzner,
 		Context:  "alice-dev",
 	}}
-	c2.ApplyDefaults()
-	if err := c2.Validate(); err != nil {
+	c.ApplyDefaults()
+	if c.Lifetime.Enabled() {
+		t.Fatalf("lifetime unexpectedly enabled by defaults: %+v", c.Lifetime)
+	}
+	if c.Lifetime.OnExpiry != OnExpiryStop {
+		t.Fatalf("expected tag default onExpiry stop even when disabled, got %q", c.Lifetime.OnExpiry)
+	}
+	if err := c.Validate(); err != nil {
 		t.Fatalf("disabled lifetime should pass: %v", err)
 	}
 }

@@ -91,11 +91,12 @@ var rejectUpstreamRegistries = []string{
 // rejectUpstreamScript renders the bash snippet the cluster node
 // runs to apply the lockdown. Three steps:
 //
-//  1. Wait for the just-applied reaper Pod to reach Running -- if
-//     the lockdown lands while kubelet is still pulling
-//     hetznercloud/cli, the Pod ends up ImagePullBackOff and the
-//     auto-teardown safety net is dead. The wait removes that
-//     race.
+//  1. When a lifetime reaper was installed (waitForReaper), wait
+//     for its Pod to reach Running -- if the lockdown lands while
+//     kubelet is still pulling hetznercloud/cli, the Pod ends up
+//     ImagePullBackOff and the expiry safety net is dead. The wait
+//     removes that race. A cluster without a lifetime has no
+//     reaper to wait for.
 //  2. Drop registries.yaml (k3s source-of-truth, durable across
 //     k3s restarts).
 //  3. Drop a per-registry hosts.toml -- the actual lockdown that
@@ -103,19 +104,21 @@ var rejectUpstreamRegistries = []string{
 //
 // `set -euo pipefail` makes any failed sudo / write surface as a
 // non-zero exit through SSH.
-func rejectUpstreamScript() string {
+func rejectUpstreamScript(waitForReaper bool) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	// (1) Wait for reaper. The Job is named "reaper" in
-	// y-cluster-reaper namespace; its Pod gets the implicit
-	// `job-name=reaper` label k8s adds. ~120s ceiling covers a
-	// slow first-pull on a saturated link.
-	b.WriteString("for i in $(seq 1 60); do\n")
-	b.WriteString("  phase=$(sudo k3s kubectl -n y-cluster-reaper get pods -l job-name=reaper -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)\n")
-	b.WriteString("  if [ \"$phase\" = \"Running\" ] || [ \"$phase\" = \"Succeeded\" ]; then break; fi\n")
-	b.WriteString("  if [ \"$i\" = \"60\" ]; then echo \"reaper Pod did not reach Running within 120s; refusing to lock down upstream pulls\" >&2; exit 1; fi\n")
-	b.WriteString("  sleep 2\n")
-	b.WriteString("done\n")
+	if waitForReaper {
+		// (1) Wait for reaper. The Job is named "reaper" in
+		// y-cluster-reaper namespace; its Pod gets the implicit
+		// `job-name=reaper` label k8s adds. ~120s ceiling covers a
+		// slow first-pull on a saturated link.
+		b.WriteString("for i in $(seq 1 60); do\n")
+		b.WriteString("  phase=$(sudo k3s kubectl -n y-cluster-reaper get pods -l job-name=reaper -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)\n")
+		b.WriteString("  if [ \"$phase\" = \"Running\" ] || [ \"$phase\" = \"Succeeded\" ]; then break; fi\n")
+		b.WriteString("  if [ \"$i\" = \"60\" ]; then echo \"reaper Pod did not reach Running within 120s; refusing to lock down upstream pulls\" >&2; exit 1; fi\n")
+		b.WriteString("  sleep 2\n")
+		b.WriteString("done\n")
+	}
 	// (2) k3s registries.yaml.
 	b.WriteString("sudo install -d -m 0755 /etc/rancher/k3s\n")
 	b.WriteString("sudo tee /etc/rancher/k3s/registries.yaml >/dev/null <<'YCLUSTER_REGISTRIES_EOF'\n")
@@ -150,7 +153,7 @@ func (c *Cluster) applyRejectUpstream(ctx context.Context) error {
 		User:    c.cfg.SSHUser,
 		KeyPath: filepath.Join(c.cacheDir, c.cfg.Context+"-ssh"),
 	}
-	out, err := sshexec.Exec(ctx, target, "bash -s", strings.NewReader(rejectUpstreamScript()))
+	out, err := sshexec.Exec(ctx, target, "bash -s", strings.NewReader(rejectUpstreamScript(c.cfg.Lifetime.Enabled())))
 	if err != nil {
 		return fmt.Errorf("apply: %w; output=%s", err, string(out))
 	}

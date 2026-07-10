@@ -36,11 +36,6 @@
     "HetznerConfig": {
       "additionalProperties": false,
       "properties": {
-        "autoTeardownHours": {
-          "default": 8,
-          "description": "Hours until the in-cluster reaper Job tears the cluster down. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24).",
-          "type": "integer"
-        },
         "context": {
           "default": "local",
           "description": "kubeconfig context name to write.",

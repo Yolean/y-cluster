@@ -51,19 +51,20 @@ func TestRejectUpstreamRegistries(t *testing.T) {
 	}
 }
 
-// TestRejectUpstreamScript: the script must
+// TestRejectUpstreamScript: with a lifetime reaper installed the
+// script must
 //
 //   - wait for the reaper Pod to reach Running before dropping
 //     hosts.toml (otherwise the lockdown can land mid-pull of
 //     hetznercloud/cli and leave the reaper Pod ImagePullBackOff,
-//     killing the auto-teardown safety net);
+//     killing the lifetime expiry safety net);
 //   - drop both registries.yaml (durability across k3s restarts)
 //     AND a hosts.toml per registry (the immediate-effect
 //     lockdown);
 //   - NOT restart k3s (containerd re-reads hosts.toml per pull,
 //     so a restart would be wasted work plus a brief API outage).
 func TestRejectUpstreamScript(t *testing.T) {
-	got := rejectUpstreamScript()
+	got := rejectUpstreamScript(true)
 
 	for _, want := range []string{
 		"set -euo pipefail",
@@ -94,5 +95,25 @@ func TestRejectUpstreamScript(t *testing.T) {
 	// pull, not load-time) and would briefly take the API down.
 	if strings.Contains(got, "systemctl restart k3s") {
 		t.Errorf("script should not restart k3s; hosts.toml is read per-pull:\n%s", got)
+	}
+}
+
+// TestRejectUpstreamScript_NoLifetime: a cluster without a
+// lifetime has no reaper Job, so the readiness gate would spin
+// its full 120s and then abort the lockdown. The gate must be
+// absent while the file drops stay intact.
+func TestRejectUpstreamScript_NoLifetime(t *testing.T) {
+	got := rejectUpstreamScript(false)
+
+	if strings.Contains(got, "job-name=reaper") {
+		t.Errorf("script waits for a reaper that was never installed:\n%s", got)
+	}
+	for _, want := range []string{
+		"sudo tee /etc/rancher/k3s/registries.yaml",
+		"sudo tee /var/lib/rancher/k3s/agent/etc/containerd/certs.d/_default/hosts.toml",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script missing %q", want)
+		}
 	}
 }
