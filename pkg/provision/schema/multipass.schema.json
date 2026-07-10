@@ -46,7 +46,7 @@
           "type": "string"
         },
         "version": {
-          "default": "v1.35.4+k3s1",
+          "default": "v1.35.6+k3s1",
           "description": "k3s release version e.g. vX.Y.Z+k3sN.",
           "type": "string"
         }

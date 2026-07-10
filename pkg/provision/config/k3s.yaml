@@ -30,7 +30,7 @@
 #   4. CI's generate-drift job re-runs schemagen and fails until the
 #      regenerated schemas are committed alongside the bump.
 
-version: v1.35.4+k3s1
+version: v1.35.6+k3s1
 
 mirror:
   upstream: docker.io/rancher/k3s
