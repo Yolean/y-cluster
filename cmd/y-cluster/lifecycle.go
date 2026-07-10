@@ -10,6 +10,7 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
@@ -65,6 +66,8 @@ func stopCmd() *cobra.Command {
 				return docker.Stop(ctx, lr.ClusterName, logger)
 			case cluster.BackendMultipass:
 				return multipass.Stop(ctx, lr.ClusterName, logger)
+			case cluster.BackendHetzner:
+				return hetzner.Stop(ctx, lr.ClusterName, logger)
 			default:
 				return fmt.Errorf("stop: not yet implemented for %s", lr.Backend)
 			}
@@ -93,6 +96,13 @@ func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.L
 			switch lr.Backend {
 			case cluster.BackendQEMU:
 				return run(qemuCacheDir(), lr.ClusterName, logger)
+			case cluster.BackendHetzner:
+				// pause / resume have no Hetzner Cloud analog
+				// (no SIGSTOP/SIGCONT against a guest). Surface a
+				// clean refusal rather than the generic
+				// "not yet implemented" so the operator knows it
+				// will not be implemented.
+				return fmt.Errorf("%s: not supported on hetzner provider (Hetzner Cloud has no pause/resume primitive); use `y-cluster stop` + `y-cluster start` to power-cycle the server, or `y-cluster teardown` to free billing", name)
 			default:
 				return fmt.Errorf("%s: not yet implemented for %s", name, lr.Backend)
 			}
@@ -151,6 +161,15 @@ and kubectl.`,
 			}
 			if clusterName == "" {
 				return fmt.Errorf("kubeconfig context %q has no associated cluster; nothing to prepare", contextName)
+			}
+			// prepare-export is a libguestfs-on-qcow2 operation and
+			// has no Hetzner Cloud equivalent (no disk-image upload
+			// API). Detect a hetzner-provisioned context up front
+			// and refuse cleanly so the operator gets the
+			// "use the qemu provisioner" guidance instead of a
+			// confusing qemu-shaped failure deep inside virt-sysprep.
+			if hetzner.HasState(clusterName) {
+				return fmt.Errorf("prepare-export: not supported on hetzner provider (Hetzner Cloud has no custom-disk-image upload API); use the qemu provisioner for disk-bound appliances")
 			}
 			return qemu.PrepareExport(cmd.Context(), qemuCacheDir(), clusterName, logger)
 		},
@@ -246,6 +265,21 @@ func startCmd() *cobra.Command {
 			}
 			if clusterName == "" {
 				return fmt.Errorf("kubeconfig context %q has no associated cluster; nothing to start", contextName)
+			}
+			// Hetzner: a stopped server still has a state sidecar
+			// (Stop only powers off; the cache files stay put).
+			// Use that as the discriminator since cluster.Lookup
+			// can't probe a powered-off server.
+			if hetzner.HasState(clusterName) {
+				ipv4, err := hetzner.Start(cmd.Context(), clusterName, logger)
+				if err != nil {
+					return err
+				}
+				logger.Info("cluster started",
+					zap.String("context", clusterName),
+					zap.String("ipv4", ipv4),
+				)
+				return nil
 			}
 			c, err := qemu.Start(cmd.Context(), qemuCacheDir(), clusterName, logger)
 			if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
@@ -387,6 +388,19 @@ message naming what was checked.`,
 					zap.String("multipass", fmt.Sprintf("multipass shell %s", rt.Name)),
 				)
 				return nil
+			case *config.HetznerConfig:
+				cluster, err := hetzner.Provision(cmd.Context(), *v, logger)
+				if err != nil {
+					return err
+				}
+				// Lifetime expiry details (or the lack of a budget)
+				// are logged by Provision's reaper step.
+				logger.Info("cluster ready",
+					zap.String("ssh", fmt.Sprintf("ssh -i %s %s@%s",
+						filepath.Join(hetzner.CacheDir(), v.Context+"-ssh"),
+						v.SSHUser, cluster.PublicIPv4())),
+				)
+				return nil
 			default:
 				return fmt.Errorf("provider %T not supported by provision", v)
 			}
@@ -432,6 +446,8 @@ func teardownCmd() *cobra.Command {
 				return cluster.Teardown(false)
 			case *config.MultipassConfig:
 				return multipass.TeardownConfig(multipass.FromConfig(v), keepDisk, logger)
+			case *config.HetznerConfig:
+				return hetzner.Teardown(cmd.Context(), v.Context, logger)
 			default:
 				return fmt.Errorf("provider %T not supported by teardown", v)
 			}

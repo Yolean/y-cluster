@@ -1,68 +1,5 @@
 {
   "$defs": {
-    "CommonConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "default": "local",
-          "description": "kubeconfig context name to write.",
-          "type": "string"
-        },
-        "cpus": {
-          "default": "4",
-          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
-          "type": "string"
-        },
-        "gateway": {
-          "$ref": "#/$defs/GatewayConfig",
-          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."
-        },
-        "k3s": {
-          "$ref": "#/$defs/K3sConfig",
-          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
-        },
-        "lifetime": {
-          "$ref": "#/$defs/LifetimeConfig",
-          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
-        },
-        "memory": {
-          "default": "8192",
-          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
-          "type": "string"
-        },
-        "name": {
-          "default": "y-cluster",
-          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
-          "type": "string"
-        },
-        "portForwards": {
-          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
-          "items": {
-            "$ref": "#/$defs/PortForward"
-          },
-          "type": "array"
-        },
-        "provider": {
-          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
-          "enum": [
-            "docker",
-            "hetzner",
-            "multipass",
-            "qemu"
-          ],
-          "type": "string"
-        },
-        "registries": {
-          "$ref": "#/$defs/Registries",
-          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
-        },
-        "storage": {
-          "$ref": "#/$defs/StorageConfig",
-          "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
-        }
-      },
-      "type": "object"
-    },
     "GatewayConfig": {
       "additionalProperties": false,
       "properties": {
@@ -92,6 +29,123 @@
         "proxy": {
           "$ref": "#/$defs/ResourceRequests",
           "description": "Per-Gateway envoy proxy container requests. Default cpu 10m and memory 128Mi."
+        }
+      },
+      "type": "object"
+    },
+    "HetznerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "default": "local",
+          "description": "kubeconfig context name to write.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": "4",
+          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
+          "type": "string"
+        },
+        "fqdnDomain": {
+          "default": "local.test",
+          "description": "Parent domain for per-context FQDNs. Per-context FQDN is \u003ccontext\u003e.\u003clbGroup\u003e.\u003cfqdnDomain\u003e. Default uses the RFC 6761 reserved test TLD.",
+          "type": "string"
+        },
+        "gateway": {
+          "$ref": "#/$defs/GatewayConfig",
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."
+        },
+        "imageCache": {
+          "$ref": "#/$defs/HetznerImageCache",
+          "description": "Hetzner Object Storage-backed image cache. Leave bucket empty to disable; see HETZNER_PROVISIONER.md phase 6."
+        },
+        "k3s": {
+          "$ref": "#/$defs/K3sConfig",
+          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
+        },
+        "lbGroup": {
+          "description": "Per-developer LoadBalancer key. Empty defaults to $USER at provision time. Multiple contexts with the same lbGroup share one LB.",
+          "type": "string"
+        },
+        "lifetime": {
+          "$ref": "#/$defs/LifetimeConfig",
+          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
+        },
+        "location": {
+          "default": "hel1",
+          "description": "Hetzner Cloud location. hel1 (Helsinki) is the default; nbg1/fsn1 are the German alternatives.",
+          "type": "string"
+        },
+        "memory": {
+          "default": "8192",
+          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
+          "type": "string"
+        },
+        "name": {
+          "default": "y-cluster",
+          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
+          "type": "string"
+        },
+        "osImage": {
+          "default": "ubuntu-24.04",
+          "description": "Hetzner Cloud OS image name. Ubuntu cloud images get k3s installed at first boot via cloud-init.",
+          "type": "string"
+        },
+        "portForwards": {
+          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
+          "items": {
+            "$ref": "#/$defs/PortForward"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "const": "hetzner",
+          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
+          "type": "string"
+        },
+        "registries": {
+          "$ref": "#/$defs/Registries",
+          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
+        },
+        "serverType": {
+          "default": "cx23",
+          "description": "Hetzner Cloud server type. cx23 is the default; pick a larger one for resource-heavy workloads.",
+          "type": "string"
+        },
+        "sshUser": {
+          "default": "ystack",
+          "description": "Unprivileged user the y-cluster CLI SSHes as. Created by cloud-init at first boot.",
+          "type": "string"
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig",
+          "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "HetznerImageCache": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "description": "Hetzner Object Storage bucket holding the OCI layouts + index.json. Empty disables the image-cache feature.",
+          "type": "string"
+        },
+        "indexKey": {
+          "description": "Object key within Bucket holding the cache index. Defaults to index.json when bucket is set.",
+          "type": "string"
+        },
+        "region": {
+          "description": "Hetzner Object Storage region (hel1 / fsn1 / nbg1). Defaults to hel1 when bucket is set.",
+          "type": "string"
+        },
+        "rejectUpstream": {
+          "default": false,
+          "description": "Makes k3s refuse to pull from any upstream registry so cache misses become hard errors. Off by default.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -292,7 +346,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/common-config",
-  "$ref": "#/$defs/CommonConfig",
+  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/hetzner-config",
+  "$ref": "#/$defs/HetznerConfig",
   "$schema": "https://json-schema.org/draft/2020-12/schema"
 }
