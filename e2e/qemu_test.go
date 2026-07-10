@@ -753,6 +753,11 @@ func TestQemu_DataDisk_ReuseAcrossProvisions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Provision (pass 1): %v", err)
 	}
+	// Cleanup covers both passes: pass 1 and pass 2 share
+	// CacheDir/Name, and TeardownConfig is idempotent, so one
+	// registration keeps a failure in either pass from leaking a
+	// running VM that then holds this test's host ports.
+	t.Cleanup(func() { _ = qemu.TeardownConfig(cfg, false, logger) })
 
 	// The DataDisk was created at the operator-configured path,
 	// not the cache dir. Asserting BOTH so a future refactor
@@ -808,7 +813,9 @@ func TestQemu_DataDisk_ReuseAcrossProvisions(t *testing.T) {
 	// the boot disk's /data/yolean) BUT the labeled volume
 	// brought the file along.
 	if out, err := cluster2.SSH(ctx, "cat /data/yolean/sentinel.txt"); err != nil {
-		t.Fatalf("read sentinel (pass 2): %v", err)
+		diag, _ := cluster2.SSH(ctx,
+			"findmnt /data/yolean; lsblk -o NAME,LABEL,MOUNTPOINT; ls -la /data/yolean; sudo journalctl -b -u cloud-init.service --no-pager 2>&1 | tail -20")
+		t.Fatalf("read sentinel (pass 2): %s: %v\nmount diagnostics:\n%s", out, err, diag)
 	} else if got := strings.TrimSpace(string(out)); got != "data-disk-reuse-v1" {
 		t.Errorf("sentinel content lost across teardown + re-provision; got %q", got)
 	}
