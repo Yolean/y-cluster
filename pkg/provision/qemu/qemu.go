@@ -486,7 +486,22 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		logger = zap.NewNop()
 	}
 
+	// Graceful guest shutdown first, same as Stop: SIGTERM on the
+	// qemu process is a hard power-off, and the guest's ext4
+	// commit interval means writes from the last few seconds never
+	// reach disk. That silently truncated recent data on the
+	// operator-preserved DataDisk (the disk-reuse contract) and
+	// left keepDisk=true disks dirty for the export flow. SSH
+	// failures fall through to the signal ladder within seconds.
 	pidFile := filepath.Join(cfg.CacheDir, cfg.Name+".pid")
+	if pid, err := readPidFile(pidFile); err == nil {
+		if err := guestPoweroff(cfg.CacheDir, cfg.Name, pid, logger); err != nil {
+			logger.Warn("graceful guest shutdown failed; falling back to qemu signals",
+				zap.Error(err))
+		} else if !pidAlive(pid) {
+			_ = os.Remove(pidFile)
+		}
+	}
 	if err := stopVM(pidFile, logger); err != nil {
 		// The VM is still alive after SIGKILL. Don't continue with
 		// disk delete -- the operator needs to know the previous
