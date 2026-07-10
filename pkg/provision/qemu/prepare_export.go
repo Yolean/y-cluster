@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,8 +38,8 @@ var prepareInguestScript string
 // appliance image. Runs in two phases:
 //
 //   - LIVE phase (cluster running): clears the per-deploy
-//     yolean.se/dns-hint-ip GatewayClass annotation so the
-//     customer's snapshot doesn't carry our LB IP, then dumps
+//     yolean.se/dns-hint-ip annotation from all GatewayClasses so
+//     the customer's snapshot doesn't carry our LB IP, then dumps
 //     the reconciled Gateway state to <cacheDir>/<name>-
 //     gateway-state.json so the bundle ships a record of what
 //     the appliance looked like at export time. Then stops
@@ -107,26 +108,34 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	}
 
 	// --- LIVE phase ---
-	// Clear the per-deploy dns-hint-ip annotation so the snapshot
-	// doesn't ship our LB IP. Then dump reconciled gateway state
-	// for the bundle. Both steps need the apiserver up.
-	logger.Info("clearing yolean.se/dns-hint-ip annotation on GatewayClass",
+	// Clear the per-deploy dns-hint-ip annotation from every
+	// GatewayClass that carries it, so the snapshot doesn't ship
+	// our LB IP. Then dump reconciled gateway state for the
+	// bundle. Both steps need the apiserver up. Clusters
+	// provisioned with `gateway.skip: true` have no Gateway API
+	// at all; both steps degrade to no-ops there and the bundle
+	// ships without a gateway-state record.
+	logger.Info("clearing yolean.se/dns-hint-ip GatewayClass annotations",
 		zap.String("context", cfg.Context))
-	if err := gateway.ClearDNSHintIPAnnotation(ctx, cfg.Context, "y-cluster"); err != nil {
+	if err := gateway.ClearDNSHintIPAnnotations(ctx, cfg.Context); err != nil {
 		return fmt.Errorf("clear dns-hint-ip: %w", err)
 	}
 	gatewayStatePath := filepath.Join(cacheDir, name+"-gateway-state.json")
-	logger.Info("snapshotting reconciled gateway state", zap.String("path", gatewayStatePath))
 	state, err := gateway.Fetch(ctx, cfg.Context)
-	if err != nil {
+	switch {
+	case errors.Is(err, gateway.ErrNoGatewayAPI):
+		logger.Info("cluster has no Gateway API; skipping gateway state snapshot")
+	case err != nil:
 		return fmt.Errorf("fetch gateway state: %w", err)
-	}
-	stateJSON, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gateway state: %w", err)
-	}
-	if err := os.WriteFile(gatewayStatePath, append(stateJSON, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write gateway state: %w", err)
+	default:
+		logger.Info("snapshotting reconciled gateway state", zap.String("path", gatewayStatePath))
+		stateJSON, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal gateway state: %w", err)
+		}
+		if err := os.WriteFile(gatewayStatePath, append(stateJSON, '\n'), 0o644); err != nil {
+			return fmt.Errorf("write gateway state: %w", err)
+		}
 	}
 
 	// Stop the VM. virt-customize (offline phase) needs the disk

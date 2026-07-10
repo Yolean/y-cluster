@@ -332,6 +332,13 @@ func extractTargetRefs(spec json.RawMessage) json.RawMessage {
 func fetchClientTrafficPolicies(ctx context.Context, kubectlContext string, out *State) error {
 	var list rawList
 	if err := kubectlGetJSON(ctx, kubectlContext, "clienttrafficpolicy", &list); err != nil {
+		if isNoResourceType(err) {
+			// The extension policy CRDs ship with the bundled
+			// envoy-gateway install; a cluster serving the Gateway
+			// API through another implementation legitimately
+			// lacks them. No CRD means no policies.
+			return nil
+		}
 		return err
 	}
 	policies := make([]ClientTrafficPolicy, 0, len(list.Items))
@@ -361,6 +368,10 @@ func fetchClientTrafficPolicies(ctx context.Context, kubectlContext string, out 
 func fetchBackendTrafficPolicies(ctx context.Context, kubectlContext string, out *State) error {
 	var list rawList
 	if err := kubectlGetJSON(ctx, kubectlContext, "backendtrafficpolicy", &list); err != nil {
+		if isNoResourceType(err) {
+			// Same rationale as fetchClientTrafficPolicies.
+			return nil
+		}
 		return err
 	}
 	policies := make([]BackendTrafficPolicy, 0, len(list.Items))

@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -35,6 +36,27 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 )
+
+// ErrNoGatewayAPI signals that the cluster serves no Gateway API
+// resource types at all -- the `gateway.skip: true` provisioning
+// path never installs the CRDs. Callers that snapshot or clean
+// gateway state should treat this as "nothing to do", not a
+// failure.
+var ErrNoGatewayAPI = errors.New("cluster has no gatewayclass resource type (Gateway API not installed)")
+
+// isNoResourceType matches kubectl's failure modes for a resource
+// type the apiserver does not serve: the classic "the server
+// doesn't have a resource type" and the discovery wording "no
+// matches for kind". kubectl gives no structured error over exec,
+// so substring matching on the combined output is what we have.
+func isNoResourceType(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "doesn't have a resource type") ||
+		strings.Contains(msg, "no matches for kind")
+}
 
 // SchemaID is the canonical $id for the generated JSON Schema.
 // Kept in sync with the file at pkg/gateway/state.schema.json
@@ -304,6 +326,12 @@ func Fetch(ctx context.Context, kubectlContext string) (*State, error) {
 
 	gc, err := fetchGatewayClass(ctx, kubectlContext)
 	if err != nil {
+		if isNoResourceType(err) {
+			// No Gateway API CRDs at all (gateway.skip clusters).
+			// Distinct from "CRDs present but no class yet", which
+			// fetchGatewayClass reports as a nil class.
+			return nil, ErrNoGatewayAPI
+		}
 		return nil, fmt.Errorf("fetch gatewayclass: %w", err)
 	}
 	st.GatewayClass = gc
@@ -341,24 +369,83 @@ func Fetch(ctx context.Context, kubectlContext string) (*State, error) {
 	return st, nil
 }
 
+// ClearDNSHintIPAnnotations removes the yolean.se/dns-hint-ip
+// annotation from EVERY GatewayClass that carries it. The
+// annotation is y-cluster's own host-routability hint, so any
+// occurrence in an exported appliance is a per-deploy leak
+// regardless of which class name the deploy configured --
+// gateway.className is not recoverable from the qemu state
+// sidecar at prepare-export time, hence no name parameter.
+// A cluster without the Gateway API at all (gateway.skip) is a
+// successful no-op.
+func ClearDNSHintIPAnnotations(ctx context.Context, kubectlContext string) error {
+	out, err := runKubectl(ctx, kubectlContext, "get", "gatewayclass", "-o", "json")
+	if err != nil {
+		if isNoResourceType(err) {
+			return nil
+		}
+		return fmt.Errorf("list gatewayclasses: %w", err)
+	}
+	names, err := classesWithDNSHintIP(out)
+	if err != nil {
+		return fmt.Errorf("parse gatewayclass list: %w", err)
+	}
+	for _, name := range names {
+		if err := patchAnnotationRemove(ctx, kubectlContext, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// classesWithDNSHintIP returns the names of GatewayClasses whose
+// annotations include the dns-hint-ip key, given `kubectl get
+// gatewayclass -o json` output. Split out for unit testing.
+func classesWithDNSHintIP(kubectlJSON []byte) ([]string, error) {
+	var list rawList
+	if err := json.Unmarshal(kubectlJSON, &list); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, raw := range list.Items {
+		var gc rawGatewayClass
+		if err := json.Unmarshal(raw, &gc); err != nil {
+			return nil, err
+		}
+		if _, ok := gc.Metadata.Annotations[envoygateway.DNSHintIPAnnotation]; ok {
+			names = append(names, gc.Metadata.Name)
+		}
+	}
+	return names, nil
+}
+
+// patchAnnotationRemove issues the dns-hint-ip removal patch
+// against one named GatewayClass. The patch path encodes "/" as
+// ~1 (RFC 6901 JSON Pointer).
+func patchAnnotationRemove(ctx context.Context, kubectlContext, gatewayClassName string) error {
+	jsonPath := strings.ReplaceAll(envoygateway.DNSHintIPAnnotation, "/", "~1")
+	patch := fmt.Sprintf(`[{"op":"remove","path":"/metadata/annotations/%s"}]`, jsonPath)
+	if _, err := runKubectl(ctx, kubectlContext,
+		"patch", "gatewayclass", gatewayClassName,
+		"--type=json", "-p", patch); err != nil {
+		return fmt.Errorf("patch gatewayclass %s: %w", gatewayClassName, err)
+	}
+	return nil
+}
+
 // ClearDNSHintIPAnnotation removes the yolean.se/dns-hint-ip
-// annotation from the y-cluster GatewayClass. Idempotent: if
-// the annotation isn't there (or the GatewayClass doesn't
-// exist), the function is a successful no-op.
-//
-// Used by prepare-export to strip the per-deploy IP from the
-// appliance snapshot. Safe in that context because prepare-
-// export is only invoked in the export flow, never against a
-// cluster a developer is using interactively.
+// annotation from one named GatewayClass. Idempotent when the
+// class exists without the annotation; a MISSING GatewayClass
+// (or absent Gateway API) surfaces kubectl's error -- the CLI
+// caller names the class explicitly, so a typo should fail
+// loudly. prepare-export uses ClearDNSHintIPAnnotations instead.
 func ClearDNSHintIPAnnotation(ctx context.Context, kubectlContext, gatewayClassName string) error {
 	if gatewayClassName == "" {
 		gatewayClassName = "y-cluster"
 	}
 	// JSON-patch's remove op fails if the annotation isn't
-	// present, so we do a describe-first to decide. The patch
-	// path encodes "/" as ~1 (RFC 6901 JSON Pointer).
+	// present, so we do a describe-first to decide.
 	annotation := envoygateway.DNSHintIPAnnotation
-	jsonPath := strings.ReplaceAll(annotation, "/", "~1")
 	out, err := runKubectl(ctx, kubectlContext,
 		"get", "gatewayclass", gatewayClassName,
 		"-o", "jsonpath={.metadata.annotations."+strings.ReplaceAll(annotation, ".", "\\.")+"}")
@@ -366,17 +453,10 @@ func ClearDNSHintIPAnnotation(ctx context.Context, kubectlContext, gatewayClassN
 		return fmt.Errorf("describe gatewayclass: %w", err)
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
-		// Annotation absent (or GatewayClass missing -- both
-		// fall through to the same no-op).
+		// Annotation absent -- nothing to remove.
 		return nil
 	}
-	patch := fmt.Sprintf(`[{"op":"remove","path":"/metadata/annotations/%s"}]`, jsonPath)
-	if _, err := runKubectl(ctx, kubectlContext,
-		"patch", "gatewayclass", gatewayClassName,
-		"--type=json", "-p", patch); err != nil {
-		return fmt.Errorf("patch gatewayclass: %w", err)
-	}
-	return nil
+	return patchAnnotationRemove(ctx, kubectlContext, gatewayClassName)
 }
 
 // runKubectl is the shared kubectl shellout helper. Stdout +

@@ -944,15 +944,40 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 	return nil
 }
 
+// sshWaitTimeout bounds waitForSSH. Cold-cache first boots are
+// dominated by cloud-init: 5-15 minutes observed when the qcow2,
+// seed image and host page cache are all cold, while warm-cache
+// boots take well under a minute. The prior 120s aborted cold
+// boots while qemu kept running, leaving a "VM already running"
+// trap for the next provision. See the specs repo,
+// ISSUE_QEMU_PROVISION_SSH_TIMEOUT.md.
+const sshWaitTimeout = 600 * time.Second
+
+// sshWaitHeartbeat spaces the progress log lines during the wait
+// so a slow cloud-init doesn't read as a hang.
+const sshWaitHeartbeat = 30 * time.Second
+
 func (c *Cluster) waitForSSH(ctx context.Context) error {
-	c.logger.Info("waiting for SSH")
-	deadline := time.Now().Add(120 * time.Second)
+	consolePath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-console.log")
+	c.logger.Info("waiting for SSH",
+		zap.Duration("timeout", sshWaitTimeout),
+		zap.String("console", consolePath))
+	start := time.Now()
+	deadline := start.Add(sshWaitTimeout)
+	nextHeartbeat := start.Add(sshWaitHeartbeat)
 	for {
 		if _, err := sshExec(ctx, c.sshKey, c.cfg.SSHPort, "true"); err == nil {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("SSH not available after 120s")
+		now := time.Now()
+		if now.After(deadline) {
+			return fmt.Errorf("SSH not available after %s; first boots can spend minutes in cloud-init -- see console log %s", sshWaitTimeout, consolePath)
+		}
+		if now.After(nextHeartbeat) {
+			c.logger.Info("waiting for SSH",
+				zap.String("elapsed", now.Sub(start).Truncate(time.Second).String()),
+				zap.Duration("timeout", sshWaitTimeout))
+			nextHeartbeat = now.Add(sshWaitHeartbeat)
 		}
 		select {
 		case <-ctx.Done():
