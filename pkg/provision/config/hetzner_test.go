@@ -189,6 +189,36 @@ func TestHetzner_Validate_AutoTeardownHoursNonNegative(t *testing.T) {
 	}
 }
 
+// TestHetzner_Validate_RejectsLifetime: lifetime (maxRun) has no
+// runtime on the hetzner provider -- auto-teardown is the
+// in-cluster reaper Job configured via autoTeardownHours. A set
+// budget must fail validation instead of silently no-oping.
+func TestHetzner_Validate_RejectsLifetime(t *testing.T) {
+	c := &HetznerConfig{CommonConfig: CommonConfig{
+		Provider: ProviderHetzner,
+		Context:  "alice-dev",
+		Lifetime: LifetimeConfig{MaxRun: "8h"},
+	}}
+	c.ApplyDefaults()
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("want error for lifetime.maxRun on hetzner, got nil")
+	}
+	if !strings.Contains(err.Error(), "autoTeardownHours") {
+		t.Fatalf("error should point at autoTeardownHours as the hetzner mechanism: %v", err)
+	}
+	// A disabled lifetime (empty maxRun) stays valid even though
+	// ApplyDefaults fills lifetime.onExpiry's tag default.
+	c2 := &HetznerConfig{CommonConfig: CommonConfig{
+		Provider: ProviderHetzner,
+		Context:  "alice-dev",
+	}}
+	c2.ApplyDefaults()
+	if err := c2.Validate(); err != nil {
+		t.Fatalf("disabled lifetime should pass: %v", err)
+	}
+}
+
 // TestHetzner_Validate_HappyPath confirms a config that satisfies
 // every rule passes Validate.
 func TestHetzner_Validate_HappyPath(t *testing.T) {

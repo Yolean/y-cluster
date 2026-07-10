@@ -49,7 +49,7 @@ type HetznerConfig struct {
 	// the timer (acceptable for dev). An earlier on-host at(1)
 	// approach got reverted because a wiped operator laptop
 	// stranded paid Hetzner resources.
-	AutoTeardownHours int `yaml:"autoTeardownHours,omitempty" json:"autoTeardownHours,omitempty" jsonschema:"default=8,description=Hours until host-side auto-teardown fires. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24)."`
+	AutoTeardownHours int `yaml:"autoTeardownHours,omitempty" json:"autoTeardownHours,omitempty" jsonschema:"default=8,description=Hours until the in-cluster reaper Job tears the cluster down. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24)."`
 
 	// LBGroup keys the per-developer shared LoadBalancer. Default
 	// $USER (resolved at ApplyDefaults time). Two contexts with
@@ -107,7 +107,7 @@ type HetznerImageCache struct {
 	// turning any upstream image pull into a hard error. Off by
 	// default; intended for e2e runs that need to surface cache
 	// misses instead of silently pulling from upstream.
-	RejectUpstream bool `yaml:"rejectUpstream,omitempty" json:"rejectUpstream,omitempty" jsonschema:"default=false,description=When true, k3s refuses to pull from any upstream registry. Cache misses become hard errors. Off by default."`
+	RejectUpstream bool `yaml:"rejectUpstream,omitempty" json:"rejectUpstream,omitempty" jsonschema:"default=false,description=Makes k3s refuse to pull from any upstream registry so cache misses become hard errors. Off by default."`
 }
 
 // Enabled is the canonical "is the cache configured" check. Empty
@@ -143,9 +143,11 @@ func (c HetznerImageCache) validate() error {
 	return nil
 }
 
-// SetDir satisfies configfile.DirAware so the provisioner can
-// resolve relative paths (the auto-teardown at(1) job needs the
-// absolute config dir to call `y-cluster teardown -c <dir>`).
+// SetDir satisfies configfile.DirAware. Nothing hetzner-specific
+// reads Dir today (auto-teardown runs as an in-cluster reaper Job,
+// which needs no host-side paths); the field exists so relative
+// paths in future config surface can resolve against the config
+// file location like the other providers do.
 func (c *HetznerConfig) SetDir(dir string) { c.Dir = dir }
 
 // hetznerContextRE constrains the context (and therefore the
@@ -239,6 +241,14 @@ func (c *HetznerConfig) Validate() error {
 	}
 	if c.AutoTeardownHours < 0 {
 		return errInvalid("autoTeardownHours %d cannot be negative", c.AutoTeardownHours)
+	}
+	// lifetime is the qemu / GCP-appliance mechanism and has no
+	// runtime on hetzner; cost control here is the in-cluster
+	// reaper Job driven by autoTeardownHours. Reject loudly so a
+	// budget the operator thinks is in force never silently
+	// no-ops.
+	if c.Lifetime.Enabled() {
+		return errInvalid("lifetime.maxRun is not supported on hetzner; use autoTeardownHours (the in-cluster reaper) for auto-teardown")
 	}
 	switch c.K3s.Install {
 	case "", "airgap", "script":
