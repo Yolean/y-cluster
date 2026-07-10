@@ -9,7 +9,7 @@ import (
 // when `provider: hetzner`. CommonConfig carries portable fields;
 // the fields below are Hetzner-specific.
 //
-// See specs/y-cluster/HETZNER_PROVISIONER.md for the dev-cluster
+// See HETZNER_PROVISIONER.md in the specs repo for the dev-cluster
 // shape this provisioner targets and the rationale behind the
 // validation rules + defaults.
 type HetznerConfig struct {

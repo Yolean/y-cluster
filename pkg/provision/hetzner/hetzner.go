@@ -25,7 +25,7 @@
 //   - images load <archive|-|url>            (phase 4)
 //   - Per-dev .env defaults + polish         (phase 5)
 //
-// See specs/y-cluster/HETZNER_PROVISIONER.md.
+// See HETZNER_PROVISIONER.md in the specs repo (specs/y-cluster/).
 package hetzner
 
 import (
