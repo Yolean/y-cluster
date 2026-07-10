@@ -41,6 +41,14 @@ type state struct {
 	// the Certificate resource (Hetzner refuses to delete a cert
 	// that's still referenced by an LB service).
 	CertificateID int64 `json:"certificateID,omitempty"`
+	// LifetimeMaxRun / LifetimeOnExpiry mirror cfg.Lifetime so
+	// `y-cluster start` -- which resolves the cluster from the
+	// kubeconfig context and has no YAML config in hand -- can
+	// re-install the expiry reaper with a fresh full window after
+	// poweron. Empty LifetimeMaxRun means no lifetime was
+	// configured; start then leaves the cluster reaper-free.
+	LifetimeMaxRun   string `json:"lifetimeMaxRun,omitempty"`
+	LifetimeOnExpiry string `json:"lifetimeOnExpiry,omitempty"`
 }
 
 func statePath(cacheDir, context string) string {

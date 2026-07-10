@@ -213,6 +213,12 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		SSHUser:    cfg.SSHUser,
 		SSHKeyName: cfg.Context,
 	}
+	// The lifetime policy rides in the sidecar so `y-cluster
+	// start` can re-arm the expiry reaper without the YAML config.
+	if cfg.Lifetime.Enabled() {
+		st.LifetimeMaxRun = cfg.Lifetime.MaxRun
+		st.LifetimeOnExpiry = cfg.Lifetime.OnExpiry
+	}
 	if err := saveState(cacheDir, st); err != nil {
 		return nil, fmt.Errorf("save state: %w", err)
 	}
@@ -550,6 +556,11 @@ func (c *Cluster) State() state { return c.state }
 // cluster identity (server ID, IPv4, kubeconfig context, in-cluster
 // state) across breaks without re-installing k3s.
 //
+// A manual stop also ends the current lifetime window: the expiry
+// reaper Job is deleted (best-effort) before the shutdown, and
+// Start re-arms a fresh full window -- the same semantics as the
+// local providers' host timer.
+//
 // Operators wanting to free billing entirely should run
 // `y-cluster teardown` instead.
 func Stop(ctx context.Context, contextName string, logger *zap.Logger) error {
@@ -567,6 +578,11 @@ func Stop(ctx context.Context, contextName string, logger *zap.Logger) error {
 	if srv == nil {
 		return fmt.Errorf("no Hetzner server named %q in this project", contextName)
 	}
+	// Lifecycle parity with local lifetime semantics: a manual stop
+	// ends this run's budget. Remove the reaper Job while the
+	// cluster is still reachable -- once the server is down there
+	// is no API to delete it through. Best-effort by design.
+	removeReaperJob(ctx, contextName, logger)
 	logger.Info("hcloud server shutdown",
 		zap.Int64("id", srv.ID), zap.String("name", srv.Name))
 	action, _, err := hc.Server.Shutdown(ctx, srv)
@@ -584,6 +600,10 @@ func Stop(ctx context.Context, contextName string, logger *zap.Logger) error {
 // Start powers on a server stopped by Stop. Returns the refreshed
 // public IPv4 in case Hetzner rotated it (it doesn't, in practice,
 // but the contract leaves the door open for floating-IP setups).
+// When the state sidecar carries a lifetime policy, Start waits for
+// the kube API and re-installs the expiry reaper with a fresh full
+// window (the budget counts from cluster start, matching local
+// lifetime semantics).
 func Start(ctx context.Context, contextName string, logger *zap.Logger) (string, error) {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -615,10 +635,24 @@ func Start(ctx context.Context, contextName string, logger *zap.Logger) (string,
 	if err != nil {
 		return "", fmt.Errorf("re-describe server id=%d: %w", srv.ID, err)
 	}
+	ipv4 := ""
 	if srv != nil && srv.PublicNet.IPv4.IP != nil {
-		return srv.PublicNet.IPv4.IP.String(), nil
+		ipv4 = srv.PublicNet.IPv4.IP.String()
 	}
-	return "", nil
+	// Lifecycle parity with local lifetime semantics: start re-arms
+	// a fresh full window. The sidecar carries the policy captured
+	// at provision; a missing sidecar (exotic: Start is gated on
+	// HasState) can only warn since there is no policy to re-arm.
+	if st, lerr := loadState(CacheDir(), contextName); lerr != nil {
+		logger.Warn("no state sidecar; cannot re-arm the expiry reaper", zap.Error(lerr))
+	} else if err := rearmReaper(ctx, st, logger); err != nil {
+		// Fatal, not best-effort: an un-armed reaper on a running
+		// server means unbounded billing, the exact failure mode
+		// the lifetime feature exists to prevent. The server IS
+		// running at this point; say so.
+		return ipv4, fmt.Errorf("server is running but the expiry reaper was not re-armed: %w; retry `y-cluster start` or run `y-cluster stop` / `y-cluster teardown`", err)
+	}
+	return ipv4, nil
 }
 
 // waitForSSH polls the configured ystack@<ipv4>:22 until a trivial

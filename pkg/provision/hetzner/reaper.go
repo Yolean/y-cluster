@@ -185,6 +185,80 @@ type installReaperOpts struct {
 	LBGroup  string
 }
 
+// removeReaperJob deletes the expiry reaper Job (if any) via the
+// cluster API. Called from Stop while the cluster is still
+// reachable, BEFORE the server shutdown -- lifecycle parity with
+// local lifetime semantics where a manual stop ends this run's
+// budget. Best-effort: a frozen Job on a stopped server is
+// harmless but stale, so a failed delete only warns.
+func removeReaperJob(ctx context.Context, kubectlContext string, logger *zap.Logger) {
+	out, err := kubectlRun(ctx, "",
+		"--context="+kubectlContext,
+		"-n", reaperNamespace,
+		"delete", "job", reaperJobName,
+		"--ignore-not-found",
+	)
+	if err != nil {
+		logger.Warn("could not delete expiry reaper Job before stop; the stale Job re-runs with a full window if the server is started outside y-cluster",
+			zap.Error(err), zap.String("output", string(out)))
+		return
+	}
+	logger.Info("expiry reaper Job removed; `y-cluster start` re-arms a fresh window",
+		zap.String("context", kubectlContext))
+}
+
+// rearmReaper re-installs the expiry reaper with a fresh full
+// window. Parity with local lifetime semantics: the budget counts
+// from cluster start, so every start re-anchors the deadline.
+// No-op when the sidecar carries no lifetime (empty maxRun =
+// disabled). Called from Start after poweron; waits for the kube
+// API to answer first since the Job apply needs it.
+func rearmReaper(ctx context.Context, st state, logger *zap.Logger) error {
+	if st.LifetimeMaxRun == "" {
+		return nil
+	}
+	maxRun, err := time.ParseDuration(st.LifetimeMaxRun)
+	if err != nil {
+		return fmt.Errorf("state lifetimeMaxRun %q: %w", st.LifetimeMaxRun, err)
+	}
+	if err := waitForKubeAPI(ctx, st.Context, 5*time.Minute, logger); err != nil {
+		return err
+	}
+	return installReaper(ctx, installReaperOpts{
+		KubectlContext: st.Context,
+		ContextName:    st.Context,
+		HCloudToken:    readHCloudToken(),
+		MaxRun:         maxRun,
+		OnExpiry:       st.LifetimeOnExpiry,
+		ServerID:       st.ServerID,
+		LBID:           st.LBID,
+		LBGroup:        st.LBGroup,
+	}, logger)
+}
+
+// waitForKubeAPI polls the context's API server /readyz until it
+// answers or timeout fires. k3s needs tens of seconds after a
+// poweron; anything that wants to kubectl-apply right after Start
+// (the reaper re-arm) has to wait this out.
+func waitForKubeAPI(ctx context.Context, kubectlContext string, timeout time.Duration, logger *zap.Logger) error {
+	logger.Info("waiting for the kube API", zap.String("context", kubectlContext))
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := kubectlRun(ctx, "", "--context="+kubectlContext, "get", "--raw=/readyz")
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("kube API for context %q not ready after %s: %w: %s", kubectlContext, timeout, err, string(out))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
 // readHCloudToken pulls the operator's HCLOUD_TOKEN from the env
 // (the same source newClient uses for the API client). Captured
 // here as a separate helper so unit tests can stub it.
