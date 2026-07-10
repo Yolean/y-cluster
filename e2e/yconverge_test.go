@@ -140,8 +140,9 @@ func TestOrdering_ChecksGateNextApply(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// Delete the marker to ensure a clean slate
-	exec.Command("kubectl", "--context="+contextName, "delete", "configmap", "db-check-marker", "--ignore-not-found").Run()
+	// Delete the marker to ensure a clean slate; best-effort,
+	// --ignore-not-found makes absence a non-error already.
+	_ = exec.Command("kubectl", "--context="+contextName, "delete", "configmap", "db-check-marker", "--ignore-not-found").Run()
 
 	// backend depends on db. The db check creates a marker ConfigMap.
 	// The backend check verifies the marker exists, proving:

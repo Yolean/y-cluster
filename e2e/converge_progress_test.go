@@ -118,7 +118,7 @@ step: verify.#Step & { checks: [{
 	depIdx := strings.Index(got, "yconverge dependency")
 	tgtIdx := strings.Index(got, "yconverge target")
 	chkIdx := strings.Index(got, "yconverge check 1/1 exec")
-	if !(depIdx < tgtIdx && tgtIdx < chkIdx) {
+	if depIdx >= tgtIdx || tgtIdx >= chkIdx {
 		t.Errorf("progress lines out of order: dep=%d target=%d check=%d\nfull output:\n%s",
 			depIdx, tgtIdx, chkIdx, got)
 	}
