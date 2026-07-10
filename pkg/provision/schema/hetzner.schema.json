@@ -8,9 +8,27 @@
           "description": "GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true.",
           "type": "string"
         },
+        "resources": {
+          "$ref": "#/$defs/GatewayResources",
+          "description": "Resource requests for the bundled EG install. Defaults: controller 10m/64Mi"
+        },
         "skip": {
           "description": "If true",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GatewayResources": {
+      "additionalProperties": false,
+      "properties": {
+        "controller": {
+          "$ref": "#/$defs/ResourceRequests",
+          "description": "EG controller container requests. Default cpu 10m"
+        },
+        "proxy": {
+          "$ref": "#/$defs/ResourceRequests",
+          "description": "Per-Gateway envoy proxy container requests. Default cpu 10m"
         }
       },
       "type": "object"
@@ -20,7 +38,7 @@
       "properties": {
         "autoTeardownHours": {
           "default": 8,
-          "description": "Hours until host-side auto-teardown fires. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24).",
+          "description": "Hours until the in-cluster reaper Job tears the cluster down. 0 / unset uses the 8-hour default. Pick a higher value for an overnight session (e.g. 24).",
           "type": "integer"
         },
         "context": {
@@ -53,6 +71,10 @@
         "lbGroup": {
           "description": "Per-developer LoadBalancer key. Empty defaults to $USER at provision time. Multiple contexts with the same lbGroup share one LB.",
           "type": "string"
+        },
+        "lifetime": {
+          "$ref": "#/$defs/LifetimeConfig",
+          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
         },
         "location": {
           "default": "hel1",
@@ -127,7 +149,7 @@
         },
         "rejectUpstream": {
           "default": false,
-          "description": "When true",
+          "description": "Makes k3s refuse to pull from any upstream registry so cache misses become hard errors. Off by default.",
           "type": "boolean"
         }
       },
@@ -148,6 +170,26 @@
         "version": {
           "default": "v1.35.4+k3s1",
           "description": "k3s release version e.g. vX.Y.Z+k3sN.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "LifetimeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "maxRun": {
+          "description": "Wall-clock budget as a Go duration such as 8h or 90m. Counted from cluster start. Empty disables auto-expiry.",
+          "type": "string"
+        },
+        "onExpiry": {
+          "default": "stop",
+          "description": "Local action on expiry. Ignored on the GCP appliance path (always deletes the instance).",
+          "enum": [
+            "stop",
+            "pause",
+            "teardown"
+          ],
           "type": "string"
         }
       },
@@ -264,6 +306,20 @@
         },
         "key_file": {
           "description": "Path to client key file on the node.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ResourceRequests": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "description": "CPU request in Kubernetes notation (e.g. 10m",
+          "type": "string"
+        },
+        "memory": {
+          "description": "Memory request in Kubernetes notation (e.g. 64Mi",
           "type": "string"
         }
       },
