@@ -18,9 +18,12 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
 
-// TestQemu_PrepareExport_GracefulShutdown covers the "y-cluster
-// stop -> prepare-export gives workloads their full
+// TestQemu_PrepareExport_GracefulShutdown covers the
+// "prepare-export gives workloads their full
 // terminationGracePeriodSeconds before snapshotting" property.
+// prepare-export runs against the RUNNING cluster and performs
+// the stop itself between its live and offline phases; the
+// graceful-shutdown window under test is that internal stop.
 //
 // Without this, a workload whose final-state write happens in its
 // SIGTERM handler (mariadb's grastate.dat being the canonical
@@ -38,8 +41,8 @@ import (
 // 30s terminationGracePeriodSeconds across the cluster shutdown.
 //
 // Failure modes the test surfaces:
-//   - SIGTERM not delivered to pods on `y-cluster stop` ->
-//     no markers past started.txt.
+//   - SIGTERM not delivered to pods on prepare-export's internal
+//     stop -> no markers past started.txt.
 //   - Grace period cut short (kubelet kill at <15s) ->
 //     step-N.txt for some N<15, no step-15.txt, no done.txt.
 //   - Test workload's PVC didn't reach /data/yolean ->
@@ -115,22 +118,18 @@ func TestQemu_PrepareExport_GracefulShutdown(t *testing.T) {
 	pvDir := filepath.Dir(startedPath)
 	t.Logf("workload PV dir on appliance: %s", pvDir)
 
-	// Stop -- the path under test. systemd shuts down the
-	// kubelet/containerd/k3s, which in turn SIGTERMs running
-	// pods. The trap should run for 15s and write step-{1..15}.txt
-	// + done.txt before the 30s terminationGracePeriodSeconds
-	// expires.
-	stopStart := time.Now()
-	if err := qemu.Stop(cfg.CacheDir, cfg.Name, logger); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	t.Logf("Stop elapsed: %s", time.Since(stopStart))
-
-	// prepare-export packs /data/yolean (which now contains the
-	// post-shutdown markers) into /var/lib/y-cluster/data-seed.tar.zst.
+	// prepare-export -- the path under test. Its internal stop has
+	// systemd shut down the kubelet/containerd/k3s, which in turn
+	// SIGTERMs running pods. The trap should run for 15s and write
+	// step-{1..15}.txt + done.txt before the 30s
+	// terminationGracePeriodSeconds expires; the offline phase then
+	// packs /data/yolean (which now contains the post-shutdown
+	// markers) into /var/lib/y-cluster/data-seed.tar.zst.
+	prepStart := time.Now()
 	if err := qemu.PrepareExport(ctx, cfg.CacheDir, cfg.Name, logger); err != nil {
 		t.Fatalf("PrepareExport: %v", err)
 	}
+	t.Logf("PrepareExport (incl. internal stop) elapsed: %s", time.Since(prepStart))
 
 	// Crack open the seed tarball via libguestfs. The disk has
 	// been prepared (cluster is offline at this point), so we
