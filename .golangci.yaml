@@ -9,6 +9,7 @@ run:
     - docker
     - kvm
     - multipass
+    - hetzner
 linters:
   default: none
   enable:
