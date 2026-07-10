@@ -436,6 +436,7 @@ func TestTeardownConfig_DeletesKeypair(t *testing.T) {
 		cfg.Name + "-ssh.pub",
 		cfg.Name + "-seed.img",
 		cfg.Name + "-cloud-init.yaml",
+		cfg.Name + "-meta-data.yaml",
 		cfg.Name + "-console.log",
 		cfg.Name + "-gateway-state.json",
 	}
@@ -486,6 +487,7 @@ func TestPerVMArtefacts(t *testing.T) {
 		"/c/n-ssh.pub",
 		"/c/n-seed.img",
 		"/c/n-cloud-init.yaml",
+		"/c/n-meta-data.yaml",
 		"/c/n-console.log",
 		"/c/n-gateway-state.json",
 	}
@@ -496,5 +498,19 @@ func TestPerVMArtefacts(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("artefact[%d]: got %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestRenderCloudInitMetaData_UniqueInstanceIDPerProvision(t *testing.T) {
+	a := renderCloudInitMetaData("foo", 1111)
+	b := renderCloudInitMetaData("foo", 2222)
+	if a == b {
+		t.Fatalf("meta-data must differ across provisions (staged-disk boots rely on a new instance-id to re-run cloud-init):\n%s", a)
+	}
+	if !strings.Contains(a, "instance-id: foo-1111\n") {
+		t.Errorf("instance-id must carry the name + nonce:\n%s", a)
+	}
+	if !strings.Contains(a, "local-hostname: foo\n") {
+		t.Errorf("meta-data must carry local-hostname:\n%s", a)
 	}
 }

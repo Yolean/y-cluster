@@ -579,6 +579,7 @@ func perVMArtefacts(cacheDir, name string) []string {
 		prefix + "-ssh.pub",
 		prefix + "-seed.img",
 		prefix + "-cloud-init.yaml",
+		prefix + "-meta-data.yaml",
 		prefix + "-console.log",
 		// PrepareExport's live phase writes the reconciled
 		// Gateway snapshot here; export copies it into
@@ -900,12 +901,37 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 		return "", err
 	}
 
+	// Explicit meta-data with a per-provision instance-id.
+	// cloud-init applies user-data (including the freshly
+	// generated ssh key -- ensureSSHKey never reuses keypairs)
+	// only when the instance-id differs from the one recorded on
+	// the disk by a previous boot. cloud-localds' default
+	// meta-data hardcodes instance-id "iid-local01", so a staged
+	// disk from import (already initialized, and unlike a
+	// prepare-export'd appliance its cloud-init state is intact)
+	// would never receive the new key and provision would sit in
+	// waitForSSH until timeout. stop/start reuses the seed image
+	// as-is, so the id only changes across provisions, where the
+	// keypair changes anyway.
+	metaDataPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-meta-data.yaml")
+	metaData := renderCloudInitMetaData(c.cfg.Name, time.Now().UnixNano())
+	if err := os.WriteFile(metaDataPath, []byte(metaData), 0o644); err != nil {
+		return "", err
+	}
+
 	seedPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-seed.img")
-	cmd := exec.Command("cloud-localds", seedPath, cloudInitPath)
+	cmd := exec.Command("cloud-localds", seedPath, cloudInitPath, metaDataPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloud-localds: %s: %w", out, err)
 	}
 	return seedPath, nil
+}
+
+// renderCloudInitMetaData builds the NoCloud meta-data document.
+// nowNanos makes the instance-id unique per provision; see the
+// call site for why that uniqueness is load-bearing.
+func renderCloudInitMetaData(name string, nowNanos int64) string {
+	return fmt.Sprintf("instance-id: %s-%d\nlocal-hostname: %s\n", name, nowNanos, name)
 }
 
 func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error {

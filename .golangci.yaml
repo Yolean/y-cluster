@@ -1,6 +1,14 @@
 version: "2"
 run:
   timeout: 5m
+  # Lint the tag-fenced e2e files too. Without these, the entire
+  # e2e/ tree is invisible to lint (locally and in CI) and debt
+  # accumulates where only kvm-capable hosts ever build it.
+  build-tags:
+    - e2e
+    - docker
+    - kvm
+    - multipass
 linters:
   default: none
   enable:
