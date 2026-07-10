@@ -33,6 +33,10 @@ func TestReaperManifestSubstitutions(t *testing.T) {
 		"hcloud load-balancer delete",
 		"managed-by: y-cluster",
 		"sleep $((HOURS * 3600))",
+		// backoffLimit > 0 is what lets the reaper survive a node
+		// reboot / transient pod failure; 0 would permanently kill
+		// auto-teardown on the first pod loss.
+		"backoffLimit: 6",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("rendered manifest missing %q\n%s", want, rendered)

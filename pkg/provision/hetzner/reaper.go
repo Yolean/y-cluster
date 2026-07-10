@@ -44,8 +44,9 @@ var reaperJobTemplate string
 //   - Survives operator-machine loss: the trigger lives on the
 //     server, so a wiped/retired laptop doesn't strand the
 //     resource.
-//   - Survives cluster reboots: a node restart re-schedules the
-//     Pod and the sleep starts over, pushing the deadline back
+//   - Survives cluster reboots: the Job's backoffLimit lets a
+//     node restart (or transient pod failure) re-schedule the
+//     Pod, and the sleep starts over, pushing the deadline back
 //     rather than firing prematurely.
 //   - Limited blast radius: only deletes resources whose IDs
 //     were captured at provision time. A re-purposed lb-group

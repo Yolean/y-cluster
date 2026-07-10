@@ -26,7 +26,14 @@ metadata:
     managed-by: y-cluster
 spec:
   ttlSecondsAfterFinished: 300
-  backoffLimit: 0
+  # backoffLimit > 0 is what makes the reaper survive node reboots
+  # and transient pod failures: with restartPolicy Never each pod
+  # loss counts one attempt, and a fresh pod re-runs the script
+  # from the top. Retry semantics: every attempt sleeps the FULL
+  # HOURS again, so a retry only ever moves the teardown later
+  # (never fires early), and the delete steps are guarded so a
+  # retry after partial cleanup is harmless.
+  backoffLimit: 6
   template:
     metadata:
       labels:
