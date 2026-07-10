@@ -264,8 +264,9 @@ done
 # envoy proxy data plane comes up, the VersityGW StatefulSet
 # rebinds its PV, klipper-lb binds :80. The probe loop is long
 # enough to cover the whole chain on a fresh cx23.
+PROBE_ATTEMPTS=60
 probe() {
-    local what=$1 url=$2 attempts=${3:-60}
+    local what=$1 url=$2 attempts=${3:-$PROBE_ATTEMPTS}
     local out
     out=$(mktemp)
     for i in $(seq 1 "$attempts"); do
@@ -297,7 +298,7 @@ if probe echo "http://$PUBLIC_IP/q/envoy/echo" \
 fi
 
 echo >&2
-echo "echo never answered within $((ATTEMPTS * 10))s. server still up for diagnosis:" >&2
+echo "echo never answered within $((PROBE_ATTEMPTS * 10))s. server still up for diagnosis:" >&2
 # shellcheck disable=SC2086
 ssh $SSH_OPTS root@"$PUBLIC_IP" 'systemctl is-active k3s; kubectl get pods -A 2>&1 | head -30' >&2 \
     || true # y-script-lint:disable=or-true # diagnostic best-effort -- main failure already exits 1
