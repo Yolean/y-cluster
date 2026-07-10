@@ -11,10 +11,10 @@ import (
 	"github.com/Yolean/y-cluster/pkg/gateway"
 )
 
-// gatewayCmd is the parent of `y-cluster gateway *`. Today
-// it has one child (`state`); `clear-dns-hint-ip` is wired
-// here too because it lives in the same surface area, but
-// the canonical caller is prepare-export, not interactive.
+// gatewayCmd is the parent of `y-cluster gateway *`: state,
+// hostnames, and clear-dns-hint-ip. clear-dns-hint-ip is wired
+// here because it lives in the same surface area, but the
+// canonical caller is prepare-export, not interactive.
 //
 // Future ops (rotate-cert, diff-vs-baseline, route-test) slot
 // under this same command group when use cases land.
