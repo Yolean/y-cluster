@@ -125,8 +125,8 @@ func rejectUpstreamScript() string {
 	// that makes pulls fail.
 	b.WriteString("sudo install -d -m 0755 /var/lib/rancher/k3s/agent/etc/containerd/certs.d\n")
 	for _, reg := range rejectUpstreamRegistries {
-		b.WriteString(fmt.Sprintf("sudo install -d -m 0755 /var/lib/rancher/k3s/agent/etc/containerd/certs.d/%s\n", reg))
-		b.WriteString(fmt.Sprintf("sudo tee /var/lib/rancher/k3s/agent/etc/containerd/certs.d/%s/hosts.toml >/dev/null <<'YCLUSTER_HOSTS_EOF'\n", reg))
+		fmt.Fprintf(&b, "sudo install -d -m 0755 /var/lib/rancher/k3s/agent/etc/containerd/certs.d/%s\n", reg)
+		fmt.Fprintf(&b, "sudo tee /var/lib/rancher/k3s/agent/etc/containerd/certs.d/%s/hosts.toml >/dev/null <<'YCLUSTER_HOSTS_EOF'\n", reg)
 		b.WriteString(rejectUpstreamHostsToml)
 		b.WriteString("YCLUSTER_HOSTS_EOF\n")
 	}

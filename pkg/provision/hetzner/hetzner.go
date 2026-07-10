@@ -636,14 +636,12 @@ func (c *Cluster) waitForSSH(ctx context.Context, timeout time.Duration) error {
 // terminal state. Any single action erroring fails the whole wait;
 // caller decides whether to clean up partial work.
 func waitForActions(ctx context.Context, hc *hcloud.Client, actions []*hcloud.Action) error {
-	for _, a := range actions {
-		if _, errCh := hc.Action.WatchProgress(ctx, a); errCh != nil {
-			if err := <-errCh; err != nil {
-				return fmt.Errorf("action %d (%s): %w", a.ID, a.Command, err)
-			}
+	return hc.Action.WaitForFunc(ctx, func(update *hcloud.Action) error {
+		if update.Status == hcloud.ActionStatusError {
+			return fmt.Errorf("action %d (%s): %w", update.ID, update.Command, update.Error())
 		}
-	}
-	return nil
+		return nil
+	}, actions...)
 }
 
 // labelSelectorForGroup returns a Hetzner-API label selector
@@ -653,7 +651,7 @@ func waitForActions(ctx context.Context, hc *hcloud.Client, actions []*hcloud.Ac
 // the same label vocabulary.
 func labelSelectorForGroup(lbGroup string) string {
 	return strings.Join([]string{
-		"managed-by=y-cluster",
+		labelManagedBy,
 		"lb-group=" + lbGroup,
 	}, ",")
 }

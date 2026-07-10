@@ -54,7 +54,7 @@ func TestBuildPreloadScript_ShapeAndSafety(t *testing.T) {
 	posBbb := strings.Index(got, "blobs/sha256/bbb\"")
 	posIdx := strings.Index(got, "index.json\"")
 	posOci := strings.Index(got, "oci-layout\"")
-	if !(posAaa < posBbb && posBbb < posIdx && posIdx < posOci) {
+	if posAaa >= posBbb || posBbb >= posIdx || posIdx >= posOci {
 		t.Errorf("file order not lexicographic:\naaa@%d  bbb@%d  index@%d  oci@%d",
 			posAaa, posBbb, posIdx, posOci)
 	}

@@ -496,7 +496,7 @@ func ReadIndex(ctx context.Context, c S3Config) (Index, error) {
 	if err != nil {
 		return Index{}, fmt.Errorf("get index: %w", err)
 	}
-	defer obj.Close()
+	defer func() { _ = obj.Close() }()
 	stat, err := obj.Stat()
 	if err != nil {
 		// minio-go reports NoSuchKey through Stat()'s ErrorResponse.

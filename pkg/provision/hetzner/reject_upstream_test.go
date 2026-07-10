@@ -85,7 +85,7 @@ func TestRejectUpstreamScript(t *testing.T) {
 	// Reaper gate must precede the file drops.
 	gate := strings.Index(got, "-l job-name=reaper")
 	hosts := strings.Index(got, "certs.d/_default/hosts.toml")
-	if !(gate >= 0 && hosts >= 0 && gate < hosts) {
+	if gate < 0 || hosts < 0 || gate >= hosts {
 		t.Errorf("reaper gate must precede hosts.toml drop; gate=%d hosts=%d", gate, hosts)
 	}
 
