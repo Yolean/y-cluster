@@ -1,2 +1,5 @@
 /kustomize-traverse
 /dist/
+
+# operator-local defaults sourced by the appliance scripts
+.env
