@@ -1,16 +1,30 @@
 # shellcheck shell=bash
 # Sourced by the appliance build / e2e scripts before any libguestfs
 # (virt-sysprep / virt-customize) work, to fail fast with a DURABLE
-# fix when the running kernel image is not readable. libguestfs builds
-# a supermin appliance from the host kernel, and Ubuntu ships
-# /boot/vmlinuz-* mode 0600, so a fresh 0600 image lands on every
-# kernel upgrade. This message is kept in sync with
-# requireReadableHostKernel() in pkg/provision/qemu/libguestfs.go (the
-# binary enforces the same check at its libguestfs call sites).
-__krel="$(uname -r)"
-if ! [ -r "/boot/vmlinuz-$__krel" ]; then
+# fix when the kernel image supermin will use is not readable.
+# libguestfs builds a supermin appliance from a host kernel, and
+# Ubuntu ships /boot/vmlinuz-* mode 0600, so a fresh 0600 image lands
+# on every kernel upgrade. Supermin picks the NEWEST /boot/vmlinuz-*
+# that has a matching /lib/modules/<release> dir -- not the running
+# kernel -- so the check mirrors that selection. This message is kept
+# in sync with requireReadableHostKernel() in
+# pkg/provision/qemu/libguestfs.go (the binary enforces the same
+# check at its libguestfs call sites).
+__kimg=""
+__kbest=""
+for __k in /boot/vmlinuz-*; do
+    [ -e "$__k" ] || continue
+    __krel="${__k#/boot/vmlinuz-}"
+    [ -d "/lib/modules/$__krel" ] || continue
+    if [ -z "$__kbest" ] || [ "$(printf '%s\n%s\n' "$__kbest" "$__krel" | sort -V | tail -1)" = "$__krel" ]; then
+        __kbest="$__krel"
+        __kimg="$__k"
+    fi
+done
+[ -n "$__kimg" ] || __kimg="/boot/vmlinuz-$(uname -r)"
+if ! [ -r "$__kimg" ]; then
     {
-        echo "host kernel /boot/vmlinuz-$__krel is not readable by this user, so"
+        echo "host kernel $__kimg is not readable by this user, so"
         echo "libguestfs (virt-customize / virt-sysprep) will fail building its"
         echo 'supermin appliance with "supermin exited with error status 1".'
         cat <<'EOM'
@@ -34,4 +48,4 @@ EOM
     } >&2
     exit 1
 fi
-unset __krel
+unset __kimg __kbest __krel __k

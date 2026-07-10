@@ -61,3 +61,56 @@ func TestRunningKernelRelease(t *testing.T) {
 		t.Fatal("ok=true but release is empty")
 	}
 }
+
+func TestSuperminKernelCandidate_PicksNewestWithModules(t *testing.T) {
+	boot := t.TempDir()
+	modules := t.TempDir()
+	for _, rel := range []string{"6.9.0-99-generic", "6.17.0-14-generic", "6.17.0-40-generic"} {
+		if err := os.WriteFile(filepath.Join(boot, "vmlinuz-"+rel), []byte("k"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Only the two 6.17 kernels have module dirs; 6.9.0-99 (which a
+	// naive string sort would rank highest) must be ignored even if
+	// present, and the newest of the eligible ones must win.
+	for _, rel := range []string{"6.17.0-14-generic", "6.17.0-40-generic"} {
+		if err := os.Mkdir(filepath.Join(modules, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok := superminKernelCandidate(boot, modules)
+	if !ok {
+		t.Fatal("expected a candidate")
+	}
+	if want := filepath.Join(boot, "vmlinuz-6.17.0-40-generic"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSuperminKernelCandidate_NoModulesDirsMeansNoCandidate(t *testing.T) {
+	boot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(boot, "vmlinuz-6.17.0-14-generic"), []byte("k"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := superminKernelCandidate(boot, t.TempDir()); ok {
+		t.Error("kernel without /lib/modules/<release> must not be a candidate")
+	}
+}
+
+func TestKernelReleaseLess_NumericSegments(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"6.9.0-99-generic", "6.17.0-14-generic", true},
+		{"6.17.0-14-generic", "6.17.0-40-generic", true},
+		{"6.17.0-40-generic", "6.17.0-14-generic", false},
+		{"6.17.0-14-generic", "6.17.0-14-generic", false},
+		{"6.17.0-14", "6.17.0-14-generic", false},
+	}
+	for _, c := range cases {
+		if got := kernelReleaseLess(c.a, c.b); got != c.want {
+			t.Errorf("kernelReleaseLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
