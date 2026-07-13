@@ -76,7 +76,13 @@ func LoadProvision(dir string) (any, error) {
 			return nil, err
 		}
 		return &c, nil
+	case ProviderHetzner:
+		var c HetznerConfig
+		if err := configfile.Load(dir, ProvisionFilename, &c); err != nil {
+			return nil, err
+		}
+		return &c, nil
 	default:
-		return nil, fmt.Errorf("%s: unknown provider %q (supported: docker, multipass, qemu)", path, hdr.Provider)
+		return nil, fmt.Errorf("%s: unknown provider %q (supported: docker, hetzner, multipass, qemu)", path, hdr.Provider)
 	}
 }

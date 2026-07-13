@@ -8,13 +8,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
+	"github.com/Yolean/y-cluster/pkg/example"
 	"github.com/Yolean/y-cluster/pkg/gateway"
+	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 )
 
-// gatewayCmd is the parent of `y-cluster gateway *`. Today
-// it has one child (`state`); `clear-dns-hint-ip` is wired
-// here too because it lives in the same surface area, but
-// the canonical caller is prepare-export, not interactive.
+// gatewayCmd is the parent of `y-cluster gateway *`: state,
+// hostnames, and clear-dns-hint-ip. clear-dns-hint-ip is wired
+// here because it lives in the same surface area, but the
+// canonical caller is prepare-export, not interactive.
 //
 // Future ops (rotate-cert, diff-vs-baseline, route-test) slot
 // under this same command group when use cases land.
@@ -26,6 +28,82 @@ func gatewayCmd() *cobra.Command {
 	cmd.AddCommand(gatewayStateCmd())
 	cmd.AddCommand(gatewayHostnamesCmd())
 	cmd.AddCommand(gatewayClearDNSHintIPCmd())
+	cmd.AddCommand(gatewayExampleCmd())
+	return cmd
+}
+
+// gatewayExampleCmd installs / removes a public-safe test
+// workload (hashicorp/http-echo) on the per-cluster default
+// Gateway. Useful as a one-command "is the LB->node->envoy
+// path actually wired?" check.
+//
+// The workload is intentionally trivial: a single Pod that
+// returns the same static text on every request. No filesystem,
+// no exec, no upstream calls -- safe to expose on the public
+// LB IP. Rationale + threat model live in pkg/example.
+func gatewayExampleCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "example",
+		Short: "Install / remove a public-safe test workload behind the default Gateway",
+	}
+	cmd.AddCommand(gatewayExampleInstallCmd())
+	cmd.AddCommand(gatewayExampleUninstallCmd())
+	return cmd
+}
+
+func gatewayExampleInstallCmd() *cobra.Command {
+	var contextName, hostname string
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install the example workload + HTTPRoute on the default Gateway",
+		Long: `Drops a hashicorp/http-echo Deployment + Service + HTTPRoute
+into the y-cluster-example namespace. The HTTPRoute attaches to
+the per-cluster default Gateway (y-cluster-gateway/default) and
+binds to --hostname.
+
+After install, verify reachability without touching /etc/hosts:
+
+  curl -k --resolve <hostname>:443:<lb-ip> https://<hostname>
+
+The LB IP is on the cluster's GatewayClass yolean.se/dns-hint-ip
+annotation:
+
+  y-cluster gateway state | jq -r '.gatewayClasses[0].metadata.annotations["yolean.se/dns-hint-ip"]'
+
+The hostname MUST match the per-cluster wildcard the default
+Gateway listens on (*.<context>.<lbGroup>.<fqdnDomain>); using a
+hostname outside that pattern produces a 404 from envoy-gateway
+because the listener never accepts the route.`,
+		Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			if hostname == "" {
+				return fmt.Errorf("--hostname is required (must match the default Gateway's wildcard, e.g. hello.<context>.<lbGroup>.local.test)")
+			}
+			return example.Install(c.Context(), example.InstallOptions{
+				KubectlContext:   contextName,
+				GatewayNamespace: hetzner.DefaultGatewayNamespace,
+				GatewayName:      hetzner.DefaultGatewayName,
+				Hostname:         hostname,
+				Logger:           loggerFromContext(c.Context()),
+			})
+		},
+	}
+	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
+	cmd.Flags().StringVar(&hostname, "hostname", "", "hostname the HTTPRoute binds (matches the default Gateway's wildcard)")
+	return cmd
+}
+
+func gatewayExampleUninstallCmd() *cobra.Command {
+	var contextName string
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Delete the example workload's namespace (and everything in it)",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return example.Uninstall(c.Context(), contextName, loggerFromContext(c.Context()))
+		},
+	}
+	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
 	return cmd
 }
 

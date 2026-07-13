@@ -81,13 +81,15 @@ The supplier builds the v1 appliance disk:
    database schemas, Kafka topic configs, file-backed PVs, etc.
 3. (Optional, normally none on a v1 build) `y-cluster manifests add`
    to stage any one-shot Jobs the customer's first boot should run.
-4. `y-cluster stop` for a clean quiesce.
-5. `y-cluster prepare-export` — virt-customize-driven identity reset
-   (machine-id, ssh host keys, cloud-init clean), netplan generic-NIC
-   match, systemd-timesyncd enable, **build the data seed** (see
-   Mechanism 1 below), **move staged manifests** into k3s's
-   auto-apply directory.
-6. `y-cluster export <bundle-dir> --format=...` packs the result for
+4. `y-cluster prepare-export` with the cluster still running (do NOT
+   `stop` first). Live phase: clears per-deploy dns-hint-ip
+   GatewayClass annotations and snapshots reconciled Gateway state
+   for the bundle, then stops the VM itself. Offline phase:
+   virt-customize-driven identity reset (machine-id, ssh host keys,
+   cloud-init clean), netplan generic-NIC match, systemd-timesyncd
+   enable, **build the data seed** (see Mechanism 1 below), **move
+   staged manifests** into k3s's auto-apply directory.
+5. `y-cluster export <bundle-dir> --format=...` packs the result for
    the target hypervisor (qcow2 / raw / vmdk / ova / gcp-tar).
 
 ### Customer side
@@ -161,7 +163,7 @@ unreachable.
 How the supplier builds v(N+1), assuming customers exist on v(N).
 
 The build flow is the SAME provision → install → manifests add →
-stop → prepare-export → export sequence as Phase 1. What's
+prepare-export → export sequence as Phase 1. What's
 different:
 
 - The supplier runs the v(N) testdata against the v(N+1) workload set,

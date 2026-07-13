@@ -10,15 +10,18 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
 
 // pauseCmd, resumeCmd, stopCmd, startCmd are the cluster lifecycle
-// subcommands -- a provisioner-neutral surface that today only
-// implements the qemu backend. docker and multipass return a "not
-// yet implemented for <backend>" error so the surface is stable
-// while the per-backend semantics are still being worked out.
+// subcommands -- a provisioner-neutral surface with per-backend
+// depth: stop dispatches to all three backends; pause and resume
+// are qemu-only and return a "not yet implemented for <backend>"
+// error elsewhere; start assumes qemu outright (it rehydrates from
+// the qemu sidecar, so a stopped docker cluster gets the qemu "no
+// saved state" error rather than a not-implemented one).
 //
 // All four resolve the cluster via the kubeconfig context (the
 // same convention detect / ctr / crictl use) -- no -c <dir>
@@ -63,6 +66,8 @@ func stopCmd() *cobra.Command {
 				return docker.Stop(ctx, lr.ClusterName, logger)
 			case cluster.BackendMultipass:
 				return multipass.Stop(ctx, lr.ClusterName, logger)
+			case cluster.BackendHetzner:
+				return hetzner.Stop(ctx, lr.ClusterName, logger)
 			default:
 				return fmt.Errorf("stop: not yet implemented for %s", lr.Backend)
 			}
@@ -91,6 +96,13 @@ func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.L
 			switch lr.Backend {
 			case cluster.BackendQEMU:
 				return run(qemuCacheDir(), lr.ClusterName, logger)
+			case cluster.BackendHetzner:
+				// pause / resume have no Hetzner Cloud analog
+				// (no SIGSTOP/SIGCONT against a guest). Surface a
+				// clean refusal rather than the generic
+				// "not yet implemented" so the operator knows it
+				// will not be implemented.
+				return fmt.Errorf("%s: not supported on hetzner provider (Hetzner Cloud has no pause/resume primitive); use `y-cluster stop` + `y-cluster start` to power-cycle the server, or `y-cluster teardown` to free billing", name)
 			default:
 				return fmt.Errorf("%s: not yet implemented for %s", name, lr.Backend)
 			}
@@ -100,40 +112,46 @@ func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.L
 	return cmd
 }
 
-// prepareExportCmd runs libguestfs's virt-sysprep against the
-// stopped appliance disk so it boots cleanly on a different
-// hypervisor. qemu-only today; other backends would need their own
-// disk-export hook so we don't stub them with a misleading "not
-// implemented" -- the surface stays narrow on purpose.
+// prepareExportCmd readies the appliance disk for export: a LIVE
+// phase against the running cluster (clear per-deploy dns-hint-ip
+// GatewayClass annotations, snapshot reconciled gateway state),
+// then an internal stop, then virt-customize against the offline
+// qcow2 for the identity reset. qemu-only today; other backends
+// would need their own disk-export hook so we don't stub them with
+// a misleading "not implemented" -- the surface stays narrow on
+// purpose.
 //
-// Cluster must be stopped first; virt-sysprep operates on the
-// offline qcow2 (libguestfs mounts it directly, no boot involved).
 // We resolve the cluster name from the kubeconfig context the same
-// way startCmd does, since cluster.Lookup needs a running cluster
-// to probe.
+// way startCmd does, not via cluster.Lookup's runtime probing --
+// the name must stay resolvable independent of VM state since
+// prepare-export transitions the VM from running to stopped.
 func prepareExportCmd() *cobra.Command {
 	var contextName string
 	cmd := &cobra.Command{
 		Use:   "prepare-export",
-		Short: "Prepare a stopped qemu appliance for export to a different hypervisor",
-		Long: `Clears host-specific state baked into the appliance disk so the
-same disk boots cleanly when imported elsewhere (VMware, KVM,
-cloud providers, Hetzner). Wipes machine-id, SSH host keys,
-udev persistent net rules, MAC-bound netplan, and the cloud-init
-state cache. Registers a firstboot ssh-keygen so the imported
-instance regenerates its own host keys.
+		Short: "Prepare the running qemu appliance for export to a different hypervisor",
+		Long: `Readies the appliance disk for shipping, in two phases.
 
-Cluster must be stopped first (virt-sysprep needs an offline
-disk):
+Live phase (cluster must be RUNNING): clears the per-deploy
+yolean.se/dns-hint-ip GatewayClass annotations and snapshots the
+reconciled Gateway state for the export bundle, then stops the
+VM itself. Do not run 'y-cluster stop' first.
 
-	y-cluster stop
-	y-cluster prepare-export
+Offline phase (virt-customize on the stopped qcow2): wipes
+machine-id, SSH host keys, udev persistent net rules, MAC-bound
+netplan, and the cloud-init state cache; stages the data seed
+and any added manifests; registers a firstboot ssh-keygen so the
+imported instance regenerates its own host keys.
+
+	y-cluster provision
+	y-cluster prepare-export   # stops the VM internally
 
 Idempotent. A prepared appliance is no longer a usable dev
 cluster locally: the next start runs cloud-init re-init and
 regenerates identity. Re-provision for a fresh dev loop.
 
-Requires libguestfs-tools (sudo apt install libguestfs-tools).`,
+Requires libguestfs-tools (sudo apt install libguestfs-tools)
+and kubectl.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			logger := loggerFromContext(cmd.Context())
@@ -143,6 +161,15 @@ Requires libguestfs-tools (sudo apt install libguestfs-tools).`,
 			}
 			if clusterName == "" {
 				return fmt.Errorf("kubeconfig context %q has no associated cluster; nothing to prepare", contextName)
+			}
+			// prepare-export is a libguestfs-on-qcow2 operation and
+			// has no Hetzner Cloud equivalent (no disk-image upload
+			// API). Detect a hetzner-provisioned context up front
+			// and refuse cleanly so the operator gets the
+			// "use the qemu provisioner" guidance instead of a
+			// confusing qemu-shaped failure deep inside virt-sysprep.
+			if hetzner.HasState(clusterName) {
+				return fmt.Errorf("prepare-export: not supported on hetzner provider (Hetzner Cloud has no custom-disk-image upload API); use the qemu provisioner for disk-bound appliances")
 			}
 			return qemu.PrepareExport(cmd.Context(), qemuCacheDir(), clusterName, logger)
 		},
@@ -238,6 +265,21 @@ func startCmd() *cobra.Command {
 			}
 			if clusterName == "" {
 				return fmt.Errorf("kubeconfig context %q has no associated cluster; nothing to start", contextName)
+			}
+			// Hetzner: a stopped server still has a state sidecar
+			// (Stop only powers off; the cache files stay put).
+			// Use that as the discriminator since cluster.Lookup
+			// can't probe a powered-off server.
+			if hetzner.HasState(clusterName) {
+				ipv4, err := hetzner.Start(cmd.Context(), clusterName, logger)
+				if err != nil {
+					return err
+				}
+				logger.Info("cluster started",
+					zap.String("context", clusterName),
+					zap.String("ipv4", ipv4),
+				)
+				return nil
 			}
 			c, err := qemu.Start(cmd.Context(), qemuCacheDir(), clusterName, logger)
 			if err != nil {

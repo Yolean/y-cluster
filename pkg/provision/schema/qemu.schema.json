@@ -10,10 +10,10 @@
         },
         "resources": {
           "$ref": "#/$defs/GatewayResources",
-          "description": "Resource requests for the bundled EG install. Defaults: controller 10m/64Mi"
+          "description": "Resource requests for the bundled EG install. Defaults: controller 10m/64Mi and proxy 10m/128Mi. Limits are left as upstream sets them."
         },
         "skip": {
-          "description": "If true",
+          "description": "If true the Envoy Gateway install is skipped entirely. k3s still runs with --disable=traefik.",
           "type": "boolean"
         }
       },
@@ -24,11 +24,11 @@
       "properties": {
         "controller": {
           "$ref": "#/$defs/ResourceRequests",
-          "description": "EG controller container requests. Default cpu 10m"
+          "description": "EG controller container requests. Default cpu 10m and memory 64Mi."
         },
         "proxy": {
           "$ref": "#/$defs/ResourceRequests",
-          "description": "Per-Gateway envoy proxy container requests. Default cpu 10m"
+          "description": "Per-Gateway envoy proxy container requests. Default cpu 10m and memory 128Mi."
         }
       },
       "type": "object"
@@ -46,7 +46,7 @@
           "type": "string"
         },
         "version": {
-          "default": "v1.35.4+k3s1",
+          "default": "v1.35.6+k3s1",
           "description": "k3s release version e.g. vX.Y.Z+k3sN.",
           "type": "string"
         }
@@ -123,7 +123,7 @@
         },
         "gateway": {
           "$ref": "#/$defs/GatewayConfig",
-          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs"
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."
         },
         "k3s": {
           "$ref": "#/$defs/K3sConfig",
@@ -276,11 +276,11 @@
       "additionalProperties": false,
       "properties": {
         "cpu": {
-          "description": "CPU request in Kubernetes notation (e.g. 10m",
+          "description": "CPU request in Kubernetes notation (e.g. 10m or 0.5 or 1).",
           "type": "string"
         },
         "memory": {
-          "description": "Memory request in Kubernetes notation (e.g. 64Mi",
+          "description": "Memory request in Kubernetes notation (e.g. 64Mi or 256Mi or 1Gi).",
           "type": "string"
         }
       },
@@ -296,7 +296,7 @@
         },
         "pathPattern": {
           "default": "{{ .PVC.Namespace }}_{{ .PVC.Name }}",
-          "description": "Per-PV subdirectory template (Go text/template; vars: .PVName",
+          "description": "Per-PV subdirectory template (Go text/template; vars: .PVName / .PVC.Namespace / .PVC.Name / .PVC.UID). Drop .PVName for predictable upgrade rebinding; keep it if you need uniqueness across PVC delete+recreate cycles under Retain.",
           "type": "string"
         },
         "reclaimPolicy": {

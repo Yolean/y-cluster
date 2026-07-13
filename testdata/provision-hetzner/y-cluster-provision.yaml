@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../../pkg/provision/schema/hetzner.schema.json
+#
+# Worked example for the hetzner provisioner. Per-developer dev
+# clusters: rename `context` (must be >= 4 chars, DNS-label-safe,
+# not "local") and the rest defaults to per-user values driven
+# by $USER -- one LB per developer covering all that developer's
+# contexts.
+#
+# Required: HCLOUD_TOKEN in env. Convention is to source it from
+#   ~/Yolean/.yolean-bots-device/y-cluster-hetzner-$USER.env
+# so each dev keeps their own project credential isolated. The
+# provisioner errors with that hint when the env var is missing.
+#
+# After provision:
+#   - kubeconfig is merged into the operator's $KUBECONFIG under
+#     <context> (cluster name == context).
+#   - With lifetime.maxRun set, an in-cluster reaper Job runs the
+#     onExpiry action (stop or teardown; pause has no Hetzner
+#     primitive) when the budget elapses. `y-cluster stop` removes
+#     the Job; `y-cluster start` re-arms a fresh full window. NB a
+#     stopped Hetzner server keeps billing; teardown frees billing.
+#   - Hetzner LB IPv4 is the dns-hint-ip on the GatewayClass;
+#     ystack's y-k8s-ingress-hosts populates /etc/hosts on the
+#     operator's host so *.<context>.local.test routes through
+#     the LB.
+provider: hetzner
+context: alice-dev
+lifetime:
+  maxRun: 8h                 # empty/omitted disables auto-expiry (cluster bills until teardown)
+  onExpiry: teardown         # default stop preserves identity but keeps billing
+# location: hel1             # default; nbg1, fsn1, ash, hil also work
+# serverType: cx23           # default; bump for memory-hungry workloads
+# lbGroup: alice             # default = $USER; share LB across multiple contexts
+# fqdnDomain: local.test     # default; RFC 6761 reserved test TLD

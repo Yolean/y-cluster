@@ -41,12 +41,13 @@ const (
 	ProviderQEMU      = "qemu"
 	ProviderDocker    = "docker"
 	ProviderMultipass = "multipass"
+	ProviderHetzner   = "hetzner"
 )
 
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
 // supported values.
-var AllProviders = []string{ProviderDocker, ProviderMultipass, ProviderQEMU}
+var AllProviders = []string{ProviderDocker, ProviderHetzner, ProviderMultipass, ProviderQEMU}
 
 // CommonConfig is the portable subset of `y-cluster-provision.yaml`.
 // Every provider config embeds it via `yaml:",inline"` so the keys
@@ -64,7 +65,7 @@ type CommonConfig struct {
 	K3s          K3sConfig      `yaml:"k3s,omitempty"          json:"k3s,omitempty"          jsonschema:"description=k3s install settings. Defaults track pkg/provision/config/k3s.yaml."`
 	PortForwards []PortForward  `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
 	Registries   Registries     `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
-	Gateway      GatewayConfig  `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs, controller, or GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
+	Gateway      GatewayConfig  `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
 	Storage      StorageConfig  `yaml:"storage,omitempty"      json:"storage,omitempty"      jsonschema:"description=Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/<ns>_<pvc>) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."`
 	Lifetime     LifetimeConfig `yaml:"lifetime,omitempty"    json:"lifetime,omitempty"     jsonschema:"description=Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."`
 }
@@ -175,7 +176,7 @@ type StorageConfig struct {
 	// (Go text/template against the local-path-provisioner
 	// helper-pod variables: .PVName, .PVC.Namespace, .PVC.Name,
 	// .PVC.UID).
-	PathPattern string `yaml:"pathPattern,omitempty" json:"pathPattern,omitempty" jsonschema:"default={{ .PVC.Namespace }}_{{ .PVC.Name }},description=Per-PV subdirectory template (Go text/template; vars: .PVName, .PVC.Namespace, .PVC.Name, .PVC.UID). Drop .PVName for predictable upgrade rebinding; keep it if you need uniqueness across PVC delete+recreate cycles under Retain."`
+	PathPattern string `yaml:"pathPattern,omitempty" json:"pathPattern,omitempty" jsonschema:"default={{ .PVC.Namespace }}_{{ .PVC.Name }},description=Per-PV subdirectory template (Go text/template; vars: .PVName / .PVC.Namespace / .PVC.Name / .PVC.UID). Drop .PVName for predictable upgrade rebinding; keep it if you need uniqueness across PVC delete+recreate cycles under Retain."`
 
 	// ReclaimPolicy is applied to the y-cluster StorageClass.
 	// Retain (default) preserves directories on PVC delete;
@@ -207,7 +208,7 @@ type GatewayConfig struct {
 	// ingress -- saves the ~50 MB image pull and a few seconds of
 	// rollout. k3s --disable=traefik is still passed; if you want a
 	// different ingress, install it yourself.
-	Skip bool `yaml:"skip,omitempty" json:"skip,omitempty" jsonschema:"description=If true, do not install Envoy Gateway. k3s still runs with --disable=traefik."`
+	Skip bool `yaml:"skip,omitempty" json:"skip,omitempty" jsonschema:"description=If true the Envoy Gateway install is skipped entirely. k3s still runs with --disable=traefik."`
 
 	// ClassName names the default GatewayClass y-cluster applies
 	// after the EG controller is up. Consumer Gateway resources
@@ -226,7 +227,7 @@ type GatewayConfig struct {
 	// Upstream defaults are 100m/256Mi (controller) and
 	// 100m/512Mi (proxy), which oversubscribe a 2GB-RAM
 	// appliance node.
-	Resources GatewayResources `yaml:"resources,omitempty" json:"resources,omitempty" jsonschema:"description=Resource requests for the bundled EG install. Defaults: controller 10m/64Mi, proxy 10m/128Mi. Limits are left as upstream sets them."`
+	Resources GatewayResources `yaml:"resources,omitempty" json:"resources,omitempty" jsonschema:"description=Resource requests for the bundled EG install. Defaults: controller 10m/64Mi and proxy 10m/128Mi. Limits are left as upstream sets them."`
 }
 
 // GatewayResources groups the two pods whose resource requests
@@ -235,8 +236,8 @@ type GatewayConfig struct {
 // (spawned by EG via the EnvoyProxy CR our default GatewayClass
 // references).
 type GatewayResources struct {
-	Controller ResourceRequests `yaml:"controller,omitempty" json:"controller,omitempty" jsonschema:"description=EG controller container requests. Default cpu 10m, memory 64Mi."`
-	Proxy      ResourceRequests `yaml:"proxy,omitempty"      json:"proxy,omitempty"      jsonschema:"description=Per-Gateway envoy proxy container requests. Default cpu 10m, memory 128Mi."`
+	Controller ResourceRequests `yaml:"controller,omitempty" json:"controller,omitempty" jsonschema:"description=EG controller container requests. Default cpu 10m and memory 64Mi."`
+	Proxy      ResourceRequests `yaml:"proxy,omitempty"      json:"proxy,omitempty"      jsonschema:"description=Per-Gateway envoy proxy container requests. Default cpu 10m and memory 128Mi."`
 }
 
 // ResourceRequests is a minimal Kubernetes-resource-style
@@ -245,8 +246,8 @@ type GatewayResources struct {
 // idle workloads are healthier under upstream's existing
 // limits than under tighter ones we'd have to guess at.
 type ResourceRequests struct {
-	CPU    string `yaml:"cpu,omitempty"    json:"cpu,omitempty"    jsonschema:"description=CPU request in Kubernetes notation (e.g. 10m, 0.5, 1)."`
-	Memory string `yaml:"memory,omitempty" json:"memory,omitempty" jsonschema:"description=Memory request in Kubernetes notation (e.g. 64Mi, 256Mi, 1Gi)."`
+	CPU    string `yaml:"cpu,omitempty"    json:"cpu,omitempty"    jsonschema:"description=CPU request in Kubernetes notation (e.g. 10m or 0.5 or 1)."`
+	Memory string `yaml:"memory,omitempty" json:"memory,omitempty" jsonschema:"description=Memory request in Kubernetes notation (e.g. 64Mi or 256Mi or 1Gi)."`
 }
 
 // applyGatewayDefaults fills ClassName + Resources when the

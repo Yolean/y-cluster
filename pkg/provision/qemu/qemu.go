@@ -486,7 +486,22 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		logger = zap.NewNop()
 	}
 
+	// Graceful guest shutdown first, same as Stop: SIGTERM on the
+	// qemu process is a hard power-off, and the guest's ext4
+	// commit interval means writes from the last few seconds never
+	// reach disk. That silently truncated recent data on the
+	// operator-preserved DataDisk (the disk-reuse contract) and
+	// left keepDisk=true disks dirty for the export flow. SSH
+	// failures fall through to the signal ladder within seconds.
 	pidFile := filepath.Join(cfg.CacheDir, cfg.Name+".pid")
+	if pid, err := readPidFile(pidFile); err == nil {
+		if err := guestPoweroff(cfg.CacheDir, cfg.Name, pid, logger); err != nil {
+			logger.Warn("graceful guest shutdown failed; falling back to qemu signals",
+				zap.Error(err))
+		} else if !pidAlive(pid) {
+			_ = os.Remove(pidFile)
+		}
+	}
 	if err := stopVM(pidFile, logger); err != nil {
 		// The VM is still alive after SIGKILL. Don't continue with
 		// disk delete -- the operator needs to know the previous
@@ -579,6 +594,7 @@ func perVMArtefacts(cacheDir, name string) []string {
 		prefix + "-ssh.pub",
 		prefix + "-seed.img",
 		prefix + "-cloud-init.yaml",
+		prefix + "-meta-data.yaml",
 		prefix + "-console.log",
 		// PrepareExport's live phase writes the reconciled
 		// Gateway snapshot here; export copies it into
@@ -900,12 +916,37 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 		return "", err
 	}
 
+	// Explicit meta-data with a per-provision instance-id.
+	// cloud-init applies user-data (including the freshly
+	// generated ssh key -- ensureSSHKey never reuses keypairs)
+	// only when the instance-id differs from the one recorded on
+	// the disk by a previous boot. cloud-localds' default
+	// meta-data hardcodes instance-id "iid-local01", so a staged
+	// disk from import (already initialized, and unlike a
+	// prepare-export'd appliance its cloud-init state is intact)
+	// would never receive the new key and provision would sit in
+	// waitForSSH until timeout. stop/start reuses the seed image
+	// as-is, so the id only changes across provisions, where the
+	// keypair changes anyway.
+	metaDataPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-meta-data.yaml")
+	metaData := renderCloudInitMetaData(c.cfg.Name, time.Now().UnixNano())
+	if err := os.WriteFile(metaDataPath, []byte(metaData), 0o644); err != nil {
+		return "", err
+	}
+
 	seedPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-seed.img")
-	cmd := exec.Command("cloud-localds", seedPath, cloudInitPath)
+	cmd := exec.Command("cloud-localds", seedPath, cloudInitPath, metaDataPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloud-localds: %s: %w", out, err)
 	}
 	return seedPath, nil
+}
+
+// renderCloudInitMetaData builds the NoCloud meta-data document.
+// nowNanos makes the instance-id unique per provision; see the
+// call site for why that uniqueness is load-bearing.
+func renderCloudInitMetaData(name string, nowNanos int64) string {
+	return fmt.Sprintf("instance-id: %s-%d\nlocal-hostname: %s\n", name, nowNanos, name)
 }
 
 func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error {
@@ -944,15 +985,40 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 	return nil
 }
 
+// sshWaitTimeout bounds waitForSSH. Cold-cache first boots are
+// dominated by cloud-init: 5-15 minutes observed when the qcow2,
+// seed image and host page cache are all cold, while warm-cache
+// boots take well under a minute. The prior 120s aborted cold
+// boots while qemu kept running, leaving a "VM already running"
+// trap for the next provision. See the specs repo,
+// ISSUE_QEMU_PROVISION_SSH_TIMEOUT.md.
+const sshWaitTimeout = 600 * time.Second
+
+// sshWaitHeartbeat spaces the progress log lines during the wait
+// so a slow cloud-init doesn't read as a hang.
+const sshWaitHeartbeat = 30 * time.Second
+
 func (c *Cluster) waitForSSH(ctx context.Context) error {
-	c.logger.Info("waiting for SSH")
-	deadline := time.Now().Add(120 * time.Second)
+	consolePath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-console.log")
+	c.logger.Info("waiting for SSH",
+		zap.Duration("timeout", sshWaitTimeout),
+		zap.String("console", consolePath))
+	start := time.Now()
+	deadline := start.Add(sshWaitTimeout)
+	nextHeartbeat := start.Add(sshWaitHeartbeat)
 	for {
 		if _, err := sshExec(ctx, c.sshKey, c.cfg.SSHPort, "true"); err == nil {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("SSH not available after 120s")
+		now := time.Now()
+		if now.After(deadline) {
+			return fmt.Errorf("SSH not available after %s; first boots can spend minutes in cloud-init -- see console log %s", sshWaitTimeout, consolePath)
+		}
+		if now.After(nextHeartbeat) {
+			c.logger.Info("waiting for SSH",
+				zap.String("elapsed", now.Sub(start).Truncate(time.Second).String()),
+				zap.Duration("timeout", sshWaitTimeout))
+			nextHeartbeat = now.Add(sshWaitHeartbeat)
 		}
 		select {
 		case <-ctx.Done():

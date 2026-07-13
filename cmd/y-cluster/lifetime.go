@@ -19,18 +19,24 @@ import (
 // left running after a task is paused or finished is pure cost; a
 // lifetime budget makes the cluster expire on its own.
 //
-// Two enforcement paths, picked by where the cost lives:
+// Three enforcement paths, picked by where the cost lives:
 //   - LOCAL (qemu): a host-side timer (status/reap/extend/arm/disarm
 //     below) runs the onExpiry action. The host is the cost, so a
 //     host timer is the right trigger.
 //   - CLOUD (GCP appliance): `gcp-flags` emits gcloud scheduling
 //     flags so GCP itself deletes the instance at the deadline -- no
-//     host or cluster dependency. This is the only correct trigger
-//     for a paid cloud resource.
+//     host or cluster dependency.
+//   - CLOUD (hetzner): an in-cluster reaper Job installed at
+//     provision sleeps the budget then runs the expiry action via
+//     the hcloud API. Cluster-side rather than host-side for the
+//     same reason as GCP: the trigger for a paid cloud resource
+//     must survive the provisioning machine going away.
 //
-// The local subcommands are qemu-only today, matching the rest of
-// the lifecycle surface; the qemu state sidecar is where the
-// deadline lives.
+// The host-side subcommands are qemu-only today, matching the rest
+// of the lifecycle surface; the qemu state sidecar is where the
+// deadline lives. For hetzner, `kubectl -n y-cluster-reaper get
+// job reaper -o yaml` shows the armed window (max-run / on-expiry /
+// expires-at annotations).
 func lifetimeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "lifetime",
@@ -90,10 +96,12 @@ func resolveQemuCluster(contextName string) (cacheDir, name string, err error) {
 }
 
 // lifetimeStateErr renders the missing-sidecar case as a clear
-// qemu-only message rather than a raw "no such file" error.
+// scope message rather than a raw "no such file" error: the
+// host-side verbs are qemu-only, and on hetzner expiry is enforced
+// by the in-cluster reaper Job installed at provision instead.
 func lifetimeStateErr(name string, err error) error {
 	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("no lifetime state for cluster %q; lifetime is implemented for the qemu provider only", name)
+		return fmt.Errorf("no lifetime state for cluster %q; the host-side lifetime verbs are implemented for the qemu provider only (on hetzner expiry is enforced by the in-cluster reaper Job installed at provision)", name)
 	}
 	return err
 }

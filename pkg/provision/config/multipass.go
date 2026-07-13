@@ -15,7 +15,7 @@ package config
 type MultipassConfig struct {
 	CommonConfig `yaml:",inline" json:",inline"`
 
-	Image string `yaml:"image,omitempty" json:"image,omitempty" jsonschema:"default=24.04,description=Multipass image alias passed as the launch positional argument. LTS aliases (24.04, jammy) work; daily:noble and file:///path/to/img also work."`
+	Image string `yaml:"image,omitempty" json:"image,omitempty" jsonschema:"default=24.04,description=Multipass image alias passed as the launch positional argument. LTS aliases (24.04 or jammy) work; daily:noble and file:///path/to/img also work."`
 
 	// Dir is filled at load time. Not part of the schema.
 	Dir string `yaml:"-" json:"-" jsonschema:"-"`

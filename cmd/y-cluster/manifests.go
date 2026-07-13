@@ -120,7 +120,7 @@ func readManifestInput(c *cobra.Command, name, input string, contextName string)
 	if !manifestNameRE.MatchString(name) {
 		return nil, nil, "", fmt.Errorf("invalid manifest name %q: must match %s (no slashes, no .., must start with alphanumeric)", name, manifestNameRE)
 	}
-	r, closer, err := openYAMLInput(input, c.InOrStdin())
+	r, closer, err := openInput(c.Context(), input, c.InOrStdin())
 	if err != nil {
 		return nil, nil, "", err
 	}
