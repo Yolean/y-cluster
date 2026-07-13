@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -48,7 +49,23 @@ func DiscoverProvider() string { return DiscoverProviderFn() }
 // to defaultDiscoverProvider when done.
 var DiscoverProviderFn = defaultDiscoverProvider
 
+// discoverOnce/discoverResult memoize defaultDiscoverProvider's
+// outcome for the process lifetime. probeProvider shells out to
+// `docker info` under a 2 s timeout, which can flake under load --
+// one call times out while the very next one, warmed up, succeeds.
+// Without memoization that makes discovery non-idempotent even
+// though the host hasn't changed.
+var (
+	discoverOnce   sync.Once
+	discoverResult string
+)
+
 func defaultDiscoverProvider() string {
+	discoverOnce.Do(func() { discoverResult = probeProvider() })
+	return discoverResult
+}
+
+func probeProvider() string {
 	if multipassReachable() {
 		return ProviderMultipass
 	}
