@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
@@ -436,14 +435,7 @@ func teardownCmd() *cobra.Command {
 			case *config.DockerConfig:
 				// docker has no persistent disk; keepDisk is
 				// a no-op for this provider.
-				cluster, err := docker.Provision(cmd.Context(), *v, logger)
-				if err != nil {
-					// Even if Provision fails (container already
-					// gone, etc.), Teardown's docker rm -f is
-					// idempotent.
-					return (&dockerNamedTeardown{name: v.Name, ctx: v.Context, logger: logger}).run()
-				}
-				return cluster.Teardown(false)
+				return docker.TeardownConfig(*v, keepDisk, logger)
 			case *config.MultipassConfig:
 				return multipass.TeardownConfig(multipass.FromConfig(v), keepDisk, logger)
 			case *config.HetznerConfig:
@@ -459,25 +451,6 @@ func teardownCmd() *cobra.Command {
 		panic(err)
 	}
 	return cmd
-}
-
-// dockerNamedTeardown is a fallback for when a teardown is asked
-// for a container that we can't fully connect to (e.g. exited, no
-// kubeconfig). Just removes the named container and cleans up the
-// context entry in the host's kubeconfig.
-type dockerNamedTeardown struct {
-	name   string
-	ctx    string
-	logger *zap.Logger
-}
-
-func (k *dockerNamedTeardown) run() error {
-	cli, err := dockerexec.New()
-	if err != nil {
-		return fmt.Errorf("docker client: %w", err)
-	}
-	defer func() { _ = cli.Close() }()
-	return dockerexec.Remove(context.Background(), cli, k.name)
 }
 
 
