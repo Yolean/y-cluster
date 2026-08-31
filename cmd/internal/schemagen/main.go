@@ -92,6 +92,7 @@ func run() error {
 		{"docker.schema.json", config.ProviderDocker, &config.DockerConfig{}},
 		{"multipass.schema.json", config.ProviderMultipass, &config.MultipassConfig{}},
 		{"hetzner.schema.json", config.ProviderHetzner, &config.HetznerConfig{}},
+		{"glesys.schema.json", config.ProviderGlesys, &config.GlesysConfig{}},
 	}
 
 	if err := checkCollisions(providers); err != nil {

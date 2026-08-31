@@ -1,69 +1,5 @@
 {
   "$defs": {
-    "CommonConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "default": "local",
-          "description": "kubeconfig context name to write.",
-          "type": "string"
-        },
-        "cpus": {
-          "default": "4",
-          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
-          "type": "string"
-        },
-        "gateway": {
-          "$ref": "#/$defs/GatewayConfig",
-          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."
-        },
-        "k3s": {
-          "$ref": "#/$defs/K3sConfig",
-          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
-        },
-        "lifetime": {
-          "$ref": "#/$defs/LifetimeConfig",
-          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
-        },
-        "memory": {
-          "default": "8192",
-          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
-          "type": "string"
-        },
-        "name": {
-          "default": "y-cluster",
-          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
-          "type": "string"
-        },
-        "portForwards": {
-          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
-          "items": {
-            "$ref": "#/$defs/PortForward"
-          },
-          "type": "array"
-        },
-        "provider": {
-          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
-          "enum": [
-            "docker",
-            "glesys",
-            "hetzner",
-            "multipass",
-            "qemu"
-          ],
-          "type": "string"
-        },
-        "registries": {
-          "$ref": "#/$defs/Registries",
-          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
-        },
-        "storage": {
-          "$ref": "#/$defs/StorageConfig",
-          "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
-        }
-      },
-      "type": "object"
-    },
     "GatewayConfig": {
       "additionalProperties": false,
       "properties": {
@@ -95,6 +31,87 @@
           "description": "Per-Gateway envoy proxy container requests. Default cpu 10m and memory 128Mi."
         }
       },
+      "type": "object"
+    },
+    "GlesysConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "default": "local",
+          "description": "kubeconfig context name to write.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": "4",
+          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
+          "type": "string"
+        },
+        "dataCenter": {
+          "default": "Stockholm",
+          "description": "GleSYS datacenter for the server. server/allowedarguments lists the current values.",
+          "type": "string"
+        },
+        "gateway": {
+          "$ref": "#/$defs/GatewayConfig",
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."
+        },
+        "k3s": {
+          "$ref": "#/$defs/K3sConfig",
+          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
+        },
+        "lifetime": {
+          "$ref": "#/$defs/LifetimeConfig",
+          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
+        },
+        "memory": {
+          "default": "8192",
+          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
+          "type": "string"
+        },
+        "name": {
+          "default": "y-cluster",
+          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
+          "type": "string"
+        },
+        "platform": {
+          "default": "KVM",
+          "description": "GleSYS virtualization platform. KVM only - it is the platform that accepts a cloudconfig.",
+          "type": "string"
+        },
+        "portForwards": {
+          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
+          "items": {
+            "$ref": "#/$defs/PortForward"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "const": "glesys",
+          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
+          "type": "string"
+        },
+        "registries": {
+          "$ref": "#/$defs/Registries",
+          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
+        },
+        "serverDisk": {
+          "default": "30G",
+          "description": "Server disk as a [num][KMGT] string. Holds k3s state",
+          "type": "string"
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig",
+          "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
+        },
+        "template": {
+          "default": "ubuntu-24-04",
+          "description": "GleSYS OS template. An Ubuntu cloud image; k3s is installed at first boot via cloudconfig.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
       "type": "object"
     },
     "K3sConfig": {
@@ -293,7 +310,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/common-config",
-  "$ref": "#/$defs/CommonConfig",
+  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/glesys-config",
+  "$ref": "#/$defs/GlesysConfig",
   "$schema": "https://json-schema.org/draft/2020-12/schema"
 }
