@@ -35,7 +35,8 @@ type providerOps struct {
 	stop func(ctx context.Context, contextName, clusterName string, logger *zap.Logger) error
 }
 
-// providers has one entry per config.AllProviders; a test holds that.
+// providers has one entry per config.AllProviders that is not
+// config.ConfigOnly; a test holds that.
 // Each adapter asserts its own config type, which LoadProvision
 // guarantees for the provider name it was looked up by.
 var providers = map[string]providerOps{
@@ -130,13 +131,14 @@ var providers = map[string]providerOps{
 	},
 }
 
-// opsFor returns the provider's adapters. A provider that is
-// registered for config loading but has no entry here can be loaded
-// and validated, and that is all.
+// opsFor returns the provider's adapters. A provider registered as
+// config.ConfigOnly has none: its config loaded and validated, and
+// that is all this binary can do with it.
 func opsFor(cfg config.ProviderConfig) (providerOps, error) {
-	ops, ok := providers[cfg.Common().Provider]
+	name := cfg.Common().Provider
+	ops, ok := providers[name]
 	if !ok {
-		return providerOps{}, fmt.Errorf("provider %q has a config type but no provisioner in this binary", cfg.Common().Provider)
+		return providerOps{}, fmt.Errorf("provider %q: the config is valid, but this build of y-cluster has no provisioner for it yet", name)
 	}
 	return ops, nil
 }

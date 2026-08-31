@@ -45,6 +45,7 @@ const (
 	ProviderDocker    = "docker"
 	ProviderMultipass = "multipass"
 	ProviderHetzner   = "hetzner"
+	ProviderGlesys    = "glesys"
 )
 
 // ProviderConfig is one provider's y-cluster-provision.yaml, as
@@ -72,7 +73,20 @@ var providerConfigs = map[string]func() ProviderConfig{
 	ProviderDocker:    func() ProviderConfig { return &DockerConfig{} },
 	ProviderMultipass: func() ProviderConfig { return &MultipassConfig{} },
 	ProviderHetzner:   func() ProviderConfig { return &HetznerConfig{} },
+	ProviderGlesys:    func() ProviderConfig { return &GlesysConfig{} },
 }
+
+// configOnly lists providers whose config type, validation and schema
+// have landed ahead of their provisioner. Their configs load and
+// validate, and get a schema; the CLI's verbs refuse them by name. A
+// provider leaves this set in the change that adds its provisioner.
+var configOnly = map[string]bool{
+	ProviderGlesys: true,
+}
+
+// ConfigOnly reports whether provider is registered without a
+// provisioner.
+func ConfigOnly(provider string) bool { return configOnly[provider] }
 
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
