@@ -244,6 +244,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// the user fixes them in one config edit, not three.
 	pf := provision.Preflight{
 		HostPorts:      preflightHostPorts(cfg),
+		PortBinder:     provision.PortBinderSelf,
 		ContextName:    cfg.Context,
 		ContextCluster: clusterName(cfg.Name),
 		KubeconfigPath: cfg.Kubeconfig,
