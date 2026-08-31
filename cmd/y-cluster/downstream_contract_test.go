@@ -184,6 +184,14 @@ func TestProviders_RegisteredEverywhere(t *testing.T) {
 	}
 	for _, name := range config.AllProviders {
 		ops, ok := providers[name]
+		if config.ConfigOnly(name) {
+			// The day a provisioner lands, this is what says to take
+			// the provider out of the config-only set.
+			if ok || backends[name] {
+				t.Errorf("provider %q is marked config-only but has CLI adapters (%v) or a backend (%v)", name, ok, backends[name])
+			}
+			continue
+		}
 		if !ok {
 			t.Errorf("provider %q has a config type but no entry in the CLI's providers table", name)
 			continue
