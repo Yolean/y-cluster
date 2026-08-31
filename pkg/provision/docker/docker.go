@@ -442,17 +442,32 @@ func Stop(ctx context.Context, name string, logger *zap.Logger) error {
 // var so tests can shorten it.
 var dockerStopTimeoutSecs = 60
 
-// Teardown removes the container. keepDisk is ignored -- k3s state
-// lives entirely inside the container, so there is no persistent
-// disk to keep across teardowns.
+// Teardown removes the container and the kubeconfig context entry.
 func (c *Cluster) Teardown(keepDisk bool) error {
+	return TeardownConfig(c.cfg, keepDisk, c.logger)
+}
+
+// TeardownConfig removes the container by config without a running
+// Cluster instance. dockerexec.Remove treats NotFound as success,
+// so tearing down an already-gone container is a no-op. keepDisk
+// is ignored -- k3s state lives entirely inside the container, so
+// there is no persistent disk to keep across teardowns.
+func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) error {
 	_ = keepDisk // ignored
-	c.logger.Info("removing docker container", zap.String("name", c.cfg.Name))
-	if err := dockerexec.Remove(context.Background(), c.cli, c.cfg.Name); err != nil {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	cli, err := dockerexec.New()
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer func() { _ = cli.Close() }()
+	logger.Info("removing docker container", zap.String("name", cfg.Name))
+	if err := dockerexec.Remove(context.Background(), cli, cfg.Name); err != nil {
 		return err
 	}
-	if c.kubecfg != nil {
-		c.kubecfg.CleanupTeardown()
+	if kubecfg, err := kubeconfig.New(cfg.Context, cfg.Name, logger); err == nil {
+		kubecfg.CleanupTeardown()
 	}
 	return nil
 }
