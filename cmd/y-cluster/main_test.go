@@ -222,6 +222,35 @@ func TestProvisionCmd_UnknownProviderError(t *testing.T) {
 	}
 }
 
+// A config-only provider (config.ConfigOnly) gets its config
+// validated like any other, and then a refusal that says which of
+// the two the problem is: the file, or this build.
+func TestProvisionCmd_ConfigOnlyProvider(t *testing.T) {
+	for _, verb := range []string{"provision", "teardown"} {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "y-cluster-provision.yaml"), "provider: glesys\ncontext: qa-glesys\n")
+		cmd := rootCmd()
+		cmd.SetArgs([]string{verb, "-c", dir})
+		var buf strings.Builder
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "config is valid") || !strings.Contains(err.Error(), "no provisioner") {
+			t.Errorf("%s: want a no-provisioner refusal of a valid config, got %v", verb, err)
+		}
+
+		writeFile(t, filepath.Join(dir, "y-cluster-provision.yaml"), "provider: glesys\ncontext: qa-glesys\nplatform: VMware\n")
+		cmd = rootCmd()
+		cmd.SetArgs([]string{verb, "-c", dir})
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		err = cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "platform") {
+			t.Errorf("%s: want the config's own validation error, got %v", verb, err)
+		}
+	}
+}
+
 // TestProvisionCmd_MissingProviderError covers the empty-discovery
 // path: when the YAML omits provider: and DiscoverProvider also
 // returns nothing, the CLI surfaces an actionable error pointing
