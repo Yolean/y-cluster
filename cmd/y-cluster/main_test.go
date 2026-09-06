@@ -181,9 +181,11 @@ func TestFormatVersion_ShortRevisionPreserved(t *testing.T) {
 
 // TestProvisionCmd_RequiresConfig confirms the hard cut from flags:
 // `y-cluster provision` without -c errors out before touching qemu
-// state. Same constraint on teardown/export/import.
+// state. Same constraint on export/import. Teardown is exempt: bare
+// `teardown` lists candidates from the host inventory instead
+// (covered in teardown_test.go).
 func TestProvisionCmd_RequiresConfig(t *testing.T) {
-	for _, name := range []string{"provision", "teardown", "export", "import"} {
+	for _, name := range []string{"provision", "export", "import"} {
 		t.Run(name, func(t *testing.T) {
 			cmd := rootCmd()
 			args := []string{name}

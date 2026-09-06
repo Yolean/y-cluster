@@ -117,6 +117,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	// names the port but not what to change in y-cluster's config).
 	pf := provision.Preflight{
 		HostPorts:      dockerHostPorts(cfg),
+		PortBinder:     provision.PortBinderDaemon,
 		ContextName:    cfg.Context,
 		ContextCluster: cfg.Name,
 		KubeconfigPath: os.Getenv("KUBECONFIG"),

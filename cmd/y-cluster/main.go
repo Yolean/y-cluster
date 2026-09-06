@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/Yolean/y-cluster/pkg/inventory"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
@@ -365,6 +366,7 @@ message naming what was checked.`,
 				// Provision armed the deadline; install the host-side
 				// timer that fires the local expiry action.
 				armHostTimerIfLifetime(rt.CacheDir, rt.Name, rt.Context, logger)
+				recordProvisioned(loaded, configDir, logger)
 				logger.Info("cluster ready",
 					zap.String("ssh", fmt.Sprintf("ssh -p %s -i %s ystack@localhost",
 						rt.SSHPort, filepath.Join(rt.CacheDir, rt.Name+"-ssh"))),
@@ -374,6 +376,7 @@ message naming what was checked.`,
 				if _, err := docker.Provision(cmd.Context(), *v, logger); err != nil {
 					return err
 				}
+				recordProvisioned(loaded, configDir, logger)
 				logger.Info("cluster ready",
 					zap.String("docker", fmt.Sprintf("docker exec -it %s sh", v.Name)),
 				)
@@ -383,6 +386,7 @@ message naming what was checked.`,
 				if _, err := multipass.Provision(cmd.Context(), rt, logger); err != nil {
 					return err
 				}
+				recordProvisioned(loaded, configDir, logger)
 				logger.Info("cluster ready",
 					zap.String("multipass", fmt.Sprintf("multipass shell %s", rt.Name)),
 				)
@@ -392,6 +396,7 @@ message naming what was checked.`,
 				if err != nil {
 					return err
 				}
+				recordProvisioned(loaded, configDir, logger)
 				// Lifetime expiry details (or the lack of a budget)
 				// are logged by Provision's reaper step.
 				logger.Info("cluster ready",
@@ -420,37 +425,132 @@ func teardownCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "teardown",
 		Short: "Stop and remove the local cluster",
+		Long: `Stops and removes the cluster described by y-cluster-provision.yaml
+in the -c directory, including its kubeconfig context entry.
+
+Without -c, lists the clusters this host has provisioned (recorded
+at provision time) as ready-to-run teardown commands, then exits
+non-zero. Clusters provisioned by older y-cluster binaries have no
+record and are not listed; find those via their repo's cluster
+config directory.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := loggerFromContext(cmd.Context())
+			if configDir == "" {
+				return listTeardownCandidates(cmd)
+			}
 			loaded, err := loadProvision(configDir)
 			if err != nil {
 				return err
 			}
+			var ctxName string
+			var tearErr error
 			switch v := loaded.(type) {
 			case *config.QEMUConfig:
 				// Remove the host expiry timer before the cluster goes;
 				// the deadline is moot once teardown removes the sidecar.
 				disarmHostTimer(v.Context, logger)
-				return qemu.TeardownConfig(qemu.FromConfig(v), keepDisk, logger)
+				ctxName = v.Context
+				tearErr = qemu.TeardownConfig(qemu.FromConfig(v), keepDisk, logger)
 			case *config.DockerConfig:
 				// docker has no persistent disk; keepDisk is
 				// a no-op for this provider.
-				return docker.TeardownConfig(*v, keepDisk, logger)
+				ctxName = v.Context
+				tearErr = docker.TeardownConfig(*v, keepDisk, logger)
 			case *config.MultipassConfig:
-				return multipass.TeardownConfig(multipass.FromConfig(v), keepDisk, logger)
+				ctxName = v.Context
+				tearErr = multipass.TeardownConfig(multipass.FromConfig(v), keepDisk, logger)
 			case *config.HetznerConfig:
-				return hetzner.Teardown(cmd.Context(), v.Context, logger)
+				ctxName = v.Context
+				tearErr = hetzner.Teardown(cmd.Context(), v.Context, logger)
 			default:
 				return fmt.Errorf("provider %T not supported by teardown", v)
 			}
+			if tearErr == nil {
+				if err := inventory.Remove(ctxName); err != nil {
+					logger.Warn("inventory record removal failed",
+						zap.String("context", ctxName), zap.Error(err))
+				}
+			}
+			return tearErr
 		},
 	}
-	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
+	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml; omit to list candidates")
 	cmd.Flags().BoolVar(&keepDisk, "keep-disk", false, "preserve disk image / VM for faster re-provision (qemu, multipass)")
-	if err := cmd.MarkFlagRequired("config"); err != nil {
-		panic(err)
-	}
 	return cmd
+}
+
+// listTeardownCandidates is `y-cluster teardown` without -c: print
+// every cluster the host inventory records, as ready-to-paste
+// teardown commands. Returns an error either way so a script that
+// forgot -c can't mistake the listing for a completed teardown.
+func listTeardownCandidates(cmd *cobra.Command) error {
+	recs, err := inventory.List()
+	if err != nil || len(recs) == 0 {
+		return fmt.Errorf("--config (-c) is required (no provisioned clusters recorded on this host)")
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "provisioned clusters recorded on this host:")
+	fmt.Fprintln(out)
+	for _, r := range recs {
+		note := ""
+		if _, statErr := os.Stat(filepath.Join(r.ConfigDir, "y-cluster-provision.yaml")); statErr != nil {
+			note = " -- config no longer at this path"
+		}
+		fmt.Fprintf(out, "  y-cluster teardown -c %s\n", r.ConfigDir)
+		fmt.Fprintf(out, "      # %s cluster %q, context %q%s\n", r.Provider, r.Name, r.Context, note)
+	}
+	cmd.SilenceUsage = true
+	return fmt.Errorf("--config (-c) is required; pick one of the paths above")
+}
+
+// recordProvisioned saves a host inventory record after a
+// successful provision so `y-cluster teardown` without -c can
+// list the config path and preflight can attribute port
+// conflicts. Best-effort by design: inventory trouble must never
+// fail a provision that already succeeded, so errors are logged
+// and dropped.
+func recordProvisioned(loaded any, configDir string, logger *zap.Logger) {
+	abs, err := filepath.Abs(configDir)
+	if err != nil {
+		abs = configDir
+	}
+	rec := inventory.Record{ConfigDir: abs}
+	switch v := loaded.(type) {
+	case *config.QEMUConfig:
+		rec.Provider, rec.Name, rec.Context = "qemu", v.Name, v.Context
+		rec.HostPorts = forwardHostPorts(v.PortForwards)
+		if v.SSHPort != "" {
+			rec.HostPorts = append(rec.HostPorts, v.SSHPort)
+		}
+	case *config.DockerConfig:
+		rec.Provider, rec.Name, rec.Context = "docker", v.Name, v.Context
+		rec.HostPorts = forwardHostPorts(v.PortForwards)
+	case *config.MultipassConfig:
+		rec.Provider, rec.Name, rec.Context = "multipass", v.Name, v.Context
+		rec.HostPorts = forwardHostPorts(v.PortForwards)
+	case *config.HetznerConfig:
+		// Remote provider: no host ports to record, but the
+		// config path is still worth listing for teardown.
+		rec.Provider, rec.Name, rec.Context = "hetzner", v.Name, v.Context
+	default:
+		return
+	}
+	if err := inventory.Save(rec); err != nil {
+		logger.Warn("inventory record write failed", zap.Error(err))
+	}
+}
+
+// forwardHostPorts extracts the pinned host-side ports. Empty Host
+// entries (provider auto-assigns) are skipped, matching what
+// preflight checks.
+func forwardHostPorts(forwards []config.PortForward) []string {
+	var ports []string
+	for _, pf := range forwards {
+		if pf.Host != "" {
+			ports = append(ports, pf.Host)
+		}
+	}
+	return ports
 }
 
 
