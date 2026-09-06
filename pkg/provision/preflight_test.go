@@ -43,31 +43,39 @@ func TestPreflight_PortInUse(t *testing.T) {
 // provision then dies on the daemon's "address already in use".
 // A loopback probe misses it -- SO_REUSEADDR lets 127.0.0.1:port
 // bind alongside the wildcard on BSD -- so the check has to probe
-// the wildcard, which is what the provider binds anyway.
+// the wildcard, which is what the provider binds anyway. Both
+// wildcard flavors matter: Docker Desktop's port publisher holds
+// an IPv4-only socket ("tcp4"), while a Go server's default
+// listen is a dual-stack IPv6 one ("tcp"); on Darwin a probe of
+// the wrong family binds beside the other without conflict.
 func TestPreflight_WildcardListenerInUse(t *testing.T) {
-	l, err := net.Listen("tcp", "0.0.0.0:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Close() }()
-	port := portFromAddr(l.Addr().String())
+	for _, network := range []string{"tcp4", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			l, err := net.Listen(network, "0.0.0.0:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Close() }()
+			port := portFromAddr(l.Addr().String())
 
-	// Establish that this is the case a loopback probe lets through,
-	// so the test keeps meaning what it says if the probe address
-	// ever changes back.
-	if lo, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port)); err == nil {
-		_ = lo.Close()
-	} else {
-		t.Logf("loopback bind alongside wildcard already refused here (%v); "+
-			"this platform would have caught the conflict either way", err)
-	}
+			// Establish that this is the case a loopback probe lets
+			// through, so the test keeps meaning what it says if the
+			// probe address ever changes back.
+			if lo, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", port)); err == nil {
+				_ = lo.Close()
+			} else {
+				t.Logf("loopback bind alongside wildcard already refused here (%v); "+
+					"this platform would have caught the conflict either way", err)
+			}
 
-	err = checkHostPort(port, PortBinderDaemon)
-	if err == nil {
-		t.Fatalf("wildcard listener on port %s should report in-use", port)
-	}
-	if !strings.Contains(err.Error(), port) || !strings.Contains(err.Error(), "in use") {
-		t.Fatalf("error should name the port and 'in use': %v", err)
+			err = checkHostPort(port, PortBinderDaemon)
+			if err == nil {
+				t.Fatalf("wildcard listener on port %s should report in-use", port)
+			}
+			if !strings.Contains(err.Error(), port) || !strings.Contains(err.Error(), "in use") {
+				t.Fatalf("error should name the port and 'in use': %v", err)
+			}
+		})
 	}
 }
 

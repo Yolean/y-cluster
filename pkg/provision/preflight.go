@@ -120,7 +120,13 @@ func attributePort(err error) string {
 // The authoritative probe is against the IPv4 wildcard, because
 // that is what both providers bind: docker sets HostIP to 0.0.0.0,
 // and qemu's `hostfwd=tcp::<port>-` leaves the host address empty,
-// which slirp reads as 0.0.0.0.
+// which slirp reads as 0.0.0.0. The network must be "tcp4": Go
+// turns a "tcp" listen on 0.0.0.0 into a dual-stack IPv6 socket,
+// and on Darwin that binds happily beside an existing IPv4-only
+// wildcard listener -- Docker Desktop's com.docker.backend holds
+// exactly such a socket, so a "tcp" probe walks straight past the
+// conflict it exists to catch. A tcp4 probe collides with both the
+// IPv4-only and the dual-stack shape.
 //
 // Go sets SO_REUSEADDR on every listener, and on BSD that lets a
 // wildcard and a loopback bind of one port coexist, so neither
@@ -143,11 +149,11 @@ func checkHostPort(port string, binder PortBinder) error {
 	if port == "" {
 		return nil // provider auto-assigns
 	}
-	l, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", port))
+	l, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", port))
 	switch {
 	case err == nil:
 		_ = l.Close()
-		if lo, loErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port)); loErr == nil {
+		if lo, loErr := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", port)); loErr == nil {
 			_ = lo.Close()
 		} else if errors.Is(loErr, syscall.EADDRINUSE) {
 			return errHostPortInUse(port)
@@ -192,7 +198,7 @@ func errHostPortInUse(port string) error {
 // escapes it -- but it needs no privilege, so it is the only probe
 // left once the bind is refused.
 func hostPortAnswers(addr string) bool {
-	c, err := net.DialTimeout("tcp", addr, hostPortDialTimeout)
+	c, err := net.DialTimeout("tcp4", addr, hostPortDialTimeout)
 	if err != nil {
 		return false
 	}
