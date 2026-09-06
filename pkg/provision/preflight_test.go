@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Yolean/y-cluster/pkg/inventory"
 )
 
 // TestPreflight_PortFree exercises the happy path: a port that
@@ -66,6 +68,38 @@ func TestPreflight_WildcardListenerInUse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), port) || !strings.Contains(err.Error(), "in use") {
 		t.Fatalf("error should name the port and 'in use': %v", err)
+	}
+}
+
+// TestPreflight_PortInUse_AttributedToInventory: when the host
+// inventory records a cluster binding the conflicting port, the
+// error names the cluster and hands over the exact teardown
+// command instead of "likely another cluster".
+func TestPreflight_PortInUse_AttributedToInventory(t *testing.T) {
+	t.Setenv("Y_CLUSTER_INVENTORY_DIR", t.TempDir())
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	port := portFromAddr(l.Addr().String())
+	if err := inventory.Save(inventory.Record{
+		Context:   "node-agent",
+		Name:      "node-agent",
+		Provider:  "docker",
+		ConfigDir: "/repo/itest/cluster/docker",
+		HostPorts: []string{port},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = Preflight{HostPorts: []string{port}}.Run()
+	if err == nil {
+		t.Fatalf("port %s should report in-use", port)
+	}
+	for _, want := range []string{`"node-agent"`, "teardown -c /repo/itest/cluster/docker", port} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should contain %q; got %v", want, err)
+		}
 	}
 }
 
@@ -213,6 +247,9 @@ contexts:
 // caller has to fix, not a fail-fast that surfaces them one at a
 // time.
 func TestPreflight_RunAccumulatesProblems(t *testing.T) {
+	// Hermetic inventory: port attribution must not read the
+	// developer's real records.
+	t.Setenv("Y_CLUSTER_INVENTORY_DIR", t.TempDir())
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

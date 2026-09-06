@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Yolean/y-cluster/pkg/inventory"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 )
 
@@ -71,7 +72,7 @@ func (p Preflight) Run() error {
 	var problems []string
 	for _, port := range p.HostPorts {
 		if err := checkHostPort(port, p.PortBinder); err != nil {
-			problems = append(problems, err.Error())
+			problems = append(problems, attributePort(err))
 		}
 	}
 	if p.ContextName != "" {
@@ -89,6 +90,27 @@ func (p Preflight) Run() error {
 // is loopback, so anything that hasn't answered by then isn't going
 // to.
 const hostPortDialTimeout = 250 * time.Millisecond
+
+// attributePort upgrades the port-in-use outcome to name the
+// cluster holding the port, when the host inventory has a record
+// binding it. "port 26443 in use" leaves the user hunting for
+// what to tear down; the inventory knows the -c path. Every other
+// checkHostPort error (probe failure, privilege guidance) passes
+// through untouched, as does in-use with no matching record
+// (older binary, out-of-band process).
+func attributePort(err error) string {
+	var inUse portInUseError
+	if !errors.As(err, &inUse) {
+		return err.Error()
+	}
+	rec := inventory.FindByHostPort(inUse.port)
+	if rec == nil {
+		return err.Error()
+	}
+	return fmt.Sprintf(
+		"host port %s in use by y-cluster %q (context %q); tear it down with: y-cluster teardown -c %s",
+		inUse.port, rec.Name, rec.Context, rec.ConfigDir)
+}
 
 // checkHostPort verifies port (a string for cobra-friendliness) is
 // free for the provider to bind. Probes by binding briefly and
@@ -151,8 +173,17 @@ func checkHostPort(port string, binder PortBinder) error {
 	return nil
 }
 
+// portInUseError is the typed "genuinely taken" outcome, kept
+// distinct so attributePort can upgrade exactly this case with
+// inventory ownership and leave the other probe verdicts alone.
+type portInUseError struct{ port string }
+
+func (e portInUseError) Error() string {
+	return fmt.Sprintf("host port %s in use (likely another cluster); change the binding in the config", e.port)
+}
+
 func errHostPortInUse(port string) error {
-	return fmt.Errorf("host port %s in use (likely another cluster); change the binding in the config", port)
+	return portInUseError{port: port}
 }
 
 // hostPortAnswers reports whether something is accepting TCP
