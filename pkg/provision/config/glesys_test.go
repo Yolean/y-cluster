@@ -99,6 +99,26 @@ func TestGlesys_SizingMustBeNumeric(t *testing.T) {
 	}
 }
 
+// The type comment says hosting, not appliance. These are the two
+// fields through which a config could ask for the appliance shape
+// anyway, and a provisioner that ignored them would leave the
+// operator waiting for something that never happens.
+func TestGlesys_NoApplianceShape(t *testing.T) {
+	c := glesysMinimal()
+	c.K3s.Install = "airgap"
+	c.ApplyDefaults()
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "k3s.install") {
+		t.Errorf("airgap install: want it refused, got %v", err)
+	}
+
+	c = glesysMinimal()
+	c.PortForwards = []PortForward{{Host: "8443", Guest: "443"}}
+	c.ApplyDefaults()
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "portForwards") {
+		t.Errorf("explicit portForwards: want them refused, got %v", err)
+	}
+}
+
 func TestDiskSizeGB(t *testing.T) {
 	for _, tc := range []struct {
 		in      string

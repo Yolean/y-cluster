@@ -135,10 +135,17 @@ func (c *GlesysConfig) Validate() error {
 	if _, err := DiskSizeGB(c.ServerDisk); err != nil {
 		return errInvalid("serverDisk %q: %v", c.ServerDisk, err)
 	}
-	switch c.K3s.Install {
-	case "", "airgap", "script":
-	default:
-		return errInvalid("k3s.install must be one of {airgap, script}, got %q", c.K3s.Install)
+	// Hosting, not appliance (see the type comment): nothing is
+	// copied to the server ahead of k3s, so there is no airgap
+	// install to ask for.
+	if c.K3s.Install != "script" {
+		return errInvalid("k3s.install %q is not supported on glesys; the server installs k3s with the upstream script and pulls every image itself", c.K3s.Install)
+	}
+	// The server has a public address of its own, and ingress is
+	// that address. An operator who lists forwards expects them to
+	// do something.
+	if len(c.PortForwards) > 0 {
+		return errInvalid("portForwards do not apply on glesys: the server has its own public address, nothing is forwarded through this host")
 	}
 	return nil
 }

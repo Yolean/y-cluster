@@ -401,7 +401,7 @@ func (c CommonConfig) HostAPIPort() string {
 // flows to: GHA mirror, schema default, runtime default.
 type K3sConfig struct {
 	Version string `yaml:"version,omitempty" json:"version,omitempty" jsonschema:"default=__K3S_TAG__,description=k3s release version e.g. vX.Y.Z+k3sN."`
-	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and images from the host cache to the node; script lets the node download via get.k3s.io. Default airgap on qemu and script on multipass; hetzner accepts script only; docker runs the k3s image and ignores this."`
+	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and images from the host cache to the node; script lets the node download via get.k3s.io. Default airgap on qemu and script on multipass; hetzner and glesys accept script only; docker runs the k3s image and ignores this."`
 }
 
 // applyCommonDefaults fills defaults that the reflective tag-default
