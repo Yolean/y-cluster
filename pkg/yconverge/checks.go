@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -209,26 +210,67 @@ func (r *CheckRunner) runExec(ctx context.Context, check Check, timeout time.Dur
 
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	var lastOut []byte
 	for {
-		cmd := exec.CommandContext(ctx, "sh", "-c", check.Command)
-		cmd.Env = append(cmd.Environ(),
-			"CONTEXT="+r.Context,
-			"NAMESPACE="+r.Namespace,
-		)
-		if err := cmd.Run(); err == nil {
+		out, err := r.execAttempt(ctx, check.Command, deadline)
+		if err == nil {
+			// Only the attempt that passed is shown. Failed
+			// attempts are the normal shape of waiting for a
+			// condition and would bury it.
+			_, _ = r.progressOut().Write(out)
 			return nil
-		} else {
-			lastErr = err
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("exec check timed out after %s: %w", timeout, lastErr)
+		lastErr, lastOut = err, out
+		// An attempt that cannot start before the deadline is not
+		// made: it would be killed at once and replace the last real
+		// failure with "context deadline exceeded".
+		if time.Now().Add(checkRetryInterval).After(deadline) {
+			return fmt.Errorf("exec check timed out after %s: %w%s", timeout, lastErr, execOutputSuffix(lastOut))
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(checkRetryInterval):
 		}
 	}
+}
+
+// checkRetryInterval spaces the attempts of exec and gateway checks.
+const checkRetryInterval = 2 * time.Second
+
+// execAttempt runs the check command once and returns its combined
+// output. The attempt is bounded by the check's deadline, so a
+// command that hangs cannot outlive the timeout it was given.
+func (r *CheckRunner) execAttempt(ctx context.Context, command string, deadline time.Time) ([]byte, error) {
+	attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	cmd := exec.CommandContext(attemptCtx, "sh", "-c", command)
+	cmd.Env = append(cmd.Environ(),
+		"CONTEXT="+r.Context,
+		"NAMESPACE="+r.Namespace,
+	)
+	// Killing sh leaves a child it started (sleep, curl, kubectl)
+	// holding the output pipe. Without a WaitDelay, CombinedOutput
+	// would wait for that child instead of returning at the deadline.
+	cmd.WaitDelay = time.Second
+	return cmd.CombinedOutput()
+}
+
+// execOutputMax bounds how much of a failed command's output goes
+// into the error.
+const execOutputMax = 2000
+
+// execOutputSuffix renders the last attempt's output for the timeout
+// error: "exit status 1" alone says nothing about why.
+func execOutputSuffix(out []byte) string {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > execOutputMax {
+		trimmed = "..." + trimmed[len(trimmed)-execOutputMax:]
+	}
+	return "\nlast attempt's output:\n" + trimmed
 }
 
 func parseDuration(s string) (time.Duration, error) {
