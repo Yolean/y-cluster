@@ -4,6 +4,7 @@
 # Always:
 #   unit tests (no build tags) + go vet
 #   golangci-lint, if installed (CI installs it; dev machines opt in)
+#   lint of every shell script, if shellcheck is installed
 #   y-cluster binary build + serve smoke test (the same script
 #   the release pipeline runs against the published archive)
 #
@@ -14,6 +15,8 @@
 # If /dev/kvm + qemu-system-x86_64 are present:
 #   e2e tests against the qemu provisioner (bundled into the same
 #   `go test` invocation since e2e build tags compose)
+#   the appliance export/import round trip, with the hook fixture in
+#   testdata/appliance-hooks standing in for a downstream repo
 #
 # Run from the repo root or any subdir; the script cd's to its own
 # directory first so it works either way.
@@ -48,6 +51,14 @@ else
 fi
 
 echo
+if command -v shellcheck >/dev/null 2>&1; then
+  echo "==> shellcheck"
+  shellcheck -x --severity=warning test.sh scripts/*.sh testdata/appliance-hooks/*.sh
+else
+  echo "==> shellcheck  (skipped: not installed; CI runs it)"
+fi
+
+echo
 echo "==> serve smoke test against built binary"
 bin=$(mktemp -d)/y-cluster
 trap 'rm -rf "$(dirname "$bin")"' EXIT
@@ -68,3 +79,19 @@ fi
 echo
 echo "==> e2e (-tags=$tags)"
 go test -tags "$tags" -count=1 -timeout=20m ./e2e/
+
+if [[ "$tags" == *kvm* ]]; then
+  echo
+  echo "==> appliance export/import round trip with hook fixture"
+  # Unprivileged host ports and a throwaway kubeconfig, so the run
+  # neither needs CAP_NET_BIND_SERVICE nor touches the operator's
+  # contexts.
+  e2e_kubeconfig=$(mktemp)
+  KUBECONFIG="$e2e_kubeconfig" \
+  NAME=appliance-hooks-e2e \
+  APP_HTTP_PORT=39080 APP_HTTPS_PORT=39443 APP_API_PORT=39643 APP_SSH_PORT=2229 \
+  APPLIANCE_SEED_CMD="$PWD/testdata/appliance-hooks/seed.sh" \
+  APPLIANCE_VERIFY_CMD="$PWD/testdata/appliance-hooks/verify.sh" \
+    bash scripts/e2e-appliance-export-import.sh
+  rm "$e2e_kubeconfig"
+fi
