@@ -87,8 +87,21 @@ func newClient() (*hcloud.Client, error) {
 	if tok == "" {
 		return nil, fmt.Errorf("%s is unset; source ~/Yolean/.yolean-bots-device/y-cluster-hetzner.env (or wherever your token lives) before running this command", HCloudTokenEnv)
 	}
-	return hcloud.NewClient(hcloud.WithToken(tok)), nil
+	return hcloud.NewClient(append([]hcloud.ClientOption{hcloud.WithToken(tok)}, hcloudClientOptions...)...), nil
 }
+
+// The two ways this package reaches outside the process, as variables
+// so that tests can run Provision and Teardown against a fake Hetzner
+// Cloud API and a fake node. Nothing in this package can be run
+// against the real cloud from CI.
+var (
+	hcloudClientOptions []hcloud.ClientOption
+	sshExec             = sshexec.Exec
+)
+
+// sshWaitTimeout is how long Provision waits for sshd on a new
+// server. A variable so tests of the failure need not wait for it.
+var sshWaitTimeout = 3 * time.Minute
 
 // Provision creates a Hetzner Cloud server matching cfg and takes it
 // all the way to a usable cluster: SSH key, server, k3s over SSH,
@@ -226,7 +239,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 	}
 
 	// Wait for sshd, then install k3s and merge the kubeconfig.
-	if err := c.waitForSSH(ctx, 3*time.Minute); err != nil {
+	if err := c.waitForSSH(ctx, sshWaitTimeout); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 	logger.Info("SSH reachable")
@@ -531,7 +544,7 @@ func (c *Cluster) target() sshexec.Target {
 // NodeExec runs a shell command on the node, optionally piping stdin
 // into it, and returns the combined output.
 func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader) ([]byte, error) {
-	return sshexec.Exec(ctx, c.target(), command, stdin)
+	return sshExec(ctx, c.target(), command, stdin)
 }
 
 // SSH is NodeExec without stdin.
