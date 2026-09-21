@@ -1,12 +1,5 @@
 package config
 
-import "regexp"
-
-// glesysContextRE is the same DNS-label shape hetzner enforces:
-// the context name becomes the server hostname, and GleSYS
-// hostnames are DNS labels.
-var glesysContextRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-
 // GleSYS sizing defaults. Deliberately below CommonConfig's 8192/4:
 // GleSYS bills by the hour, so the default should be the smallest
 // machine that runs the stack rather than the roomiest. The
@@ -14,9 +7,8 @@ var glesysContextRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 // 200Mi, the Envoy Gateway controller 64Mi); the variable is
 // buildkit, which sizes against the image it is building.
 const (
-	glesysDefaultMemory   = "4096"
-	glesysDefaultCPUs     = "2"
-	glesysDefaultDiskSize = "30G"
+	glesysDefaultMemory = "4096"
+	glesysDefaultCPUs   = "2"
 )
 
 // GlesysSSHUser is the unprivileged user the cloudconfig creates and
@@ -100,27 +92,14 @@ type GlesysConfig struct {
 // SetDir records the directory the config was loaded from.
 func (c *GlesysConfig) SetDir(dir string) { c.Dir = dir }
 
-// ApplyDefaults fills the tag-driven defaults plus the three that
-// tags cannot express:
-//
-//   - Name is forced to Context, because the GleSYS hostname IS the
-//     cluster identifier here (Validate enforces the equality) and
-//     the operator should not have to write it twice.
-//   - Memory and CPUs are pre-set to the GleSYS sizing defaults.
-//     They live on CommonConfig, whose tags say 8192/4 for the
-//     local providers; applyTagDefaults only fills EMPTY strings,
-//     so setting them first is what makes the smaller cloud
-//     defaults win without touching the shared struct.
+// ApplyDefaults pre-sets the GleSYS sizing and then runs the cloud
+// defaults (applyCloudDefaults). Memory and CPUs live on CommonConfig,
+// whose tags say 8192/4 for the local providers; the tag defaults
+// only fill EMPTY strings, so setting them first is what makes the
+// smaller cloud defaults win without touching the shared struct.
 func (c *GlesysConfig) ApplyDefaults() {
-	// Whether the operator actually wrote a context, captured before
-	// any defaulting can fill it in. See the restore below.
-	explicitContext := c.Context != ""
-
 	if c.Provider == "" {
 		c.Provider = ProviderGlesys
-	}
-	if c.Name == "" && c.Context != "" {
-		c.Name = c.Context
 	}
 	if c.Memory == "" {
 		c.Memory = glesysDefaultMemory
@@ -128,44 +107,14 @@ func (c *GlesysConfig) ApplyDefaults() {
 	if c.CPUs == "" {
 		c.CPUs = glesysDefaultCPUs
 	}
-	if c.ServerDisk == "" {
-		c.ServerDisk = glesysDefaultDiskSize
-	}
-	applyTagDefaults(c)
-	c.applyCommonDefaults()
-
-	// CommonConfig defaults Context to "local" for the local
-	// providers. Leaving that in place here would make an omitted
-	// context fail as `context "local" is reserved for local
-	// clusters`, which blames the operator for a value the
-	// defaulting wrote. Restoring empty lets Validate say the thing
-	// that is actually true: a context is required.
-	if !explicitContext {
-		c.Context = ""
-	}
+	applyCloudDefaults(c, &c.CommonConfig)
 }
 
-// Validate checks the discriminator and the GleSYS-specific
-// invariants. The context-shape rules match hetzner's: a cloud
-// cluster must not be able to clobber the local one.
+// Validate checks the cloud rules (validateCloud) and the
+// GleSYS-specific invariants.
 func (c *GlesysConfig) Validate() error {
-	if err := c.validateCommon(ProviderGlesys); err != nil {
+	if err := c.validateCloud(ProviderGlesys); err != nil {
 		return err
-	}
-	if c.Context == "" {
-		return errInvalid("context is required for glesys; pick a unique cluster identifier (>= 4 chars, DNS-label-safe)")
-	}
-	if c.Context == "local" {
-		return errInvalid("context %q is reserved for local clusters; pick a different name", c.Context)
-	}
-	if len(c.Context) < 4 {
-		return errInvalid("context %q is too short; use >= 4 characters", c.Context)
-	}
-	if !glesysContextRE.MatchString(c.Context) {
-		return errInvalid("context %q must match %s (lowercase, DNS-label-safe)", c.Context, glesysContextRE.String())
-	}
-	if c.Name != "" && c.Name != c.Context {
-		return errInvalid("name %q must equal context %q on glesys (the GleSYS hostname is the cluster identifier)", c.Name, c.Context)
 	}
 	// KVM is the only platform that accepts a cloudconfig, and
 	// cloudconfig is how k3s gets installed. Anything else boots a
@@ -185,13 +134,6 @@ func (c *GlesysConfig) Validate() error {
 	}
 	if _, err := DiskSizeGB(c.ServerDisk); err != nil {
 		return errInvalid("serverDisk %q: %v", c.ServerDisk, err)
-	}
-	// pause has no GleSYS primitive, same as hetzner: a server is
-	// running or it is stopped. Reject rather than silently
-	// downgrade to stop, so a config that asked for pause does not
-	// quietly get different semantics.
-	if c.Lifetime.Enabled() && c.Lifetime.OnExpiry == OnExpiryPause {
-		return errInvalid("lifetime.onExpiry %q is not supported on glesys (no pause/resume primitive); use %s or %s", OnExpiryPause, OnExpiryStop, OnExpiryTeardown)
 	}
 	switch c.K3s.Install {
 	case "", "airgap", "script":

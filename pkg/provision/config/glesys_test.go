@@ -53,44 +53,6 @@ func TestGlesys_ExplicitSizingSurvivesDefaults(t *testing.T) {
 	}
 }
 
-// TestGlesys_NameFollowsContext: the GleSYS hostname is the cluster
-// identifier, so the operator writes the context once.
-func TestGlesys_NameFollowsContext(t *testing.T) {
-	c := glesysMinimal()
-	c.ApplyDefaults()
-	if c.Name != c.Context {
-		t.Fatalf("name %q should follow context %q", c.Name, c.Context)
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("defaulted minimal config should validate: %v", err)
-	}
-}
-
-// TestGlesys_ContextGuards keeps a cloud cluster from clobbering the
-// local one, and keeps the hostname DNS-safe.
-func TestGlesys_ContextGuards(t *testing.T) {
-	for _, tc := range []struct{ name, ctx, want string }{
-		{"empty", "", "context is required"},
-		{"local reserved", "local", "reserved for local clusters"},
-		{"too short", "abc", "too short"},
-		{"uppercase", "Hosting-Test", "must match"},
-		{"underscore", "hosting_test", "must match"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := glesysMinimal()
-			c.Context = tc.ctx
-			c.ApplyDefaults()
-			err := c.Validate()
-			if err == nil {
-				t.Fatalf("context %q should be rejected", tc.ctx)
-			}
-			if !contains(err.Error(), tc.want) {
-				t.Fatalf("error should mention %q; got %v", tc.want, err)
-			}
-		})
-	}
-}
-
 // TestGlesys_PlatformMustBeKVM: KVM is the only platform that takes a
 // cloudconfig, and cloudconfig is how k3s gets installed. Failing at
 // config load beats an unexplained SSH timeout ten minutes later.
@@ -125,38 +87,6 @@ func TestGlesys_SizingMustBeNumeric(t *testing.T) {
 				t.Fatalf("memory=%q cpus=%q serverDisk=%q should be rejected", tc.mem, tc.cpus, tc.disk)
 			}
 		})
-	}
-}
-
-// TestGlesys_PauseIsRejected: GleSYS has no pause primitive, so a
-// budget asking for it must fail rather than quietly become stop.
-func TestGlesys_PauseIsRejected(t *testing.T) {
-	c := glesysMinimal()
-	c.ApplyDefaults()
-	c.Lifetime.MaxRun = "2h"
-	c.Lifetime.OnExpiry = OnExpiryPause
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("onExpiry pause should be rejected on glesys")
-	}
-	if !contains(err.Error(), OnExpiryStop) || !contains(err.Error(), OnExpiryTeardown) {
-		t.Fatalf("error should name the supported actions; got %v", err)
-	}
-}
-
-// TestGlesys_LifetimeStopIsAccepted guards the Enabled() subtlety:
-// applyTagDefaults fills onExpiry even when no budget is set, so a
-// disabled lifetime must stay valid.
-func TestGlesys_LifetimeStopIsAccepted(t *testing.T) {
-	c := glesysMinimal()
-	c.ApplyDefaults()
-	if err := c.Validate(); err != nil {
-		t.Fatalf("no budget set should validate: %v", err)
-	}
-	c.Lifetime.MaxRun = "8h"
-	c.Lifetime.OnExpiry = OnExpiryStop
-	if err := c.Validate(); err != nil {
-		t.Fatalf("stop-on-expiry should validate: %v", err)
 	}
 }
 
