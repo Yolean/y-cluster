@@ -16,6 +16,7 @@ package lifetime
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -32,8 +33,8 @@ func reapInvocation(bin, kubeContext string) []string {
 // unitName is the transient systemd unit name for a context's timer.
 // Sanitized to the systemd unit charset; the context is already
 // DNS-label-ish but a kubeconfig context can in principle carry
-// characters systemd rejects, so map anything outside [a-z0-9-] to
-// '-'.
+// characters systemd rejects, so map anything outside [a-zA-Z0-9-]
+// to '-'.
 func unitName(kubeContext string) string {
 	var b strings.Builder
 	b.WriteString("y-cluster-lifetime-")
@@ -60,18 +61,43 @@ func remainingSeconds(remaining time.Duration) int {
 	return s
 }
 
+// reapEnvVars are the variables reap needs to find the cluster the
+// way the arming process did: which kubeconfig holds the context, and
+// where the qemu state sidecars live.
+var reapEnvVars = []string{"KUBECONFIG", "Y_CLUSTER_QEMU_CACHE_DIR"}
+
+// reapEnv returns NAME=value for every reapEnvVars entry set in the
+// arming process.
+func reapEnv(getenv func(string) string) []string {
+	var env []string
+	for _, name := range reapEnvVars {
+		if v := getenv(name); v != "" {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
+}
+
 // systemdRunArgs builds the argv for arming via a transient
 // `systemd-run --user` timer. `--on-active` is relative to now, so a
 // computed remaining window arms the deadline; `--unit` names it so
 // status/disarm can find it.
-func systemdRunArgs(bin, kubeContext string, remaining time.Duration) []string {
+//
+// env is passed explicitly: a transient unit starts from the user
+// manager's environment, not the caller's, so without it reap would
+// look for the context in ~/.kube/config whatever $KUBECONFIG said
+// at provision. at(1) captures the caller's environment by itself.
+func systemdRunArgs(bin, kubeContext string, remaining time.Duration, env []string) []string {
 	args := []string{
 		"--user",
 		"--unit=" + unitName(kubeContext),
 		fmt.Sprintf("--on-active=%ds", remainingSeconds(remaining)),
 		"--timer-property=AccuracySec=1s",
-		"--",
 	}
+	for _, kv := range env {
+		args = append(args, "--setenv="+kv)
+	}
+	args = append(args, "--")
 	return append(args, reapInvocation(bin, kubeContext)...)
 }
 
@@ -89,8 +115,19 @@ func atTimeSpec(remaining time.Duration) string {
 // stable marker so Disarm can find this job among the user's at queue
 // (at has no job naming).
 func atScript(bin, kubeContext string) string {
-	return strings.Join(reapInvocation(bin, kubeContext), " ") +
-		" # " + unitName(kubeContext)
+	argv := reapInvocation(bin, kubeContext)
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = shellQuote(a)
+	}
+	return strings.Join(quoted, " ") + " # " + unitName(kubeContext)
+}
+
+// shellQuote single-quotes s for /bin/sh, which is what at(1) runs
+// the script with. A binary path with a space or a context name with
+// a shell metacharacter would otherwise change the command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Arm schedules the reap for `remaining` from now via systemd-run
@@ -106,7 +143,7 @@ func Arm(bin, kubeContext string, remaining time.Duration, logger *zap.Logger) e
 	_ = Disarm(kubeContext, logger) // best-effort; ignore "nothing to remove"
 
 	if _, err := exec.LookPath("systemd-run"); err == nil {
-		args := systemdRunArgs(bin, kubeContext, remaining)
+		args := systemdRunArgs(bin, kubeContext, remaining, reapEnv(os.Getenv))
 		out, err := exec.Command("systemd-run", args...).CombinedOutput()
 		if err == nil {
 			logger.Info("lifetime timer armed (systemd)",
