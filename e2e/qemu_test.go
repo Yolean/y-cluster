@@ -820,6 +820,24 @@ func TestQemu_DataDisk_ReuseAcrossProvisions(t *testing.T) {
 		t.Errorf("sentinel content lost across teardown + re-provision; got %q", got)
 	}
 
+	// === Stop + start: the data disk must come back attached ===
+	// The fstab entry is nofail, so a start that forgets the disk
+	// boots fine and shows an EMPTY /data/yolean on the boot disk.
+	// The sentinel, not the boot, is the assertion.
+	if err := qemu.Stop(cfg.CacheDir, cfg.Name, logger); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	cluster3, err := qemu.Start(ctx, cfg.CacheDir, cfg.Name, logger)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if out, err := cluster3.SSH(ctx, "cat /data/yolean/sentinel.txt"); err != nil {
+		diag, _ := cluster3.SSH(ctx, "findmnt /data/yolean; lsblk -o NAME,LABEL,MOUNTPOINT")
+		t.Fatalf("read sentinel after stop/start: %s: %v\nmount diagnostics:\n%s", out, err, diag)
+	} else if got := strings.TrimSpace(string(out)); got != "data-disk-reuse-v1" {
+		t.Errorf("sentinel content lost across stop/start; got %q", got)
+	}
+
 	// Final teardown leaves the data disk in place (just like
 	// pass 1's teardown did).
 	if err := qemu.TeardownConfig(cfg, false, logger); err != nil {
