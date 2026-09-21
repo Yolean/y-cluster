@@ -130,7 +130,6 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
 	root.AddCommand(lifetimeCmd())
-	root.AddCommand(serveCmd())
 	root.AddCommand(imagesCmd())
 	root.AddCommand(manifestsCmd())
 	root.AddCommand(detectCmd())

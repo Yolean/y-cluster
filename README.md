@@ -65,12 +65,6 @@ Subcommand groups:
   default) via a host timer, and a GCP appliance is deleted by GCP
   itself (`gcp-flags` emits the `--max-run-duration` flags). See the
   "lifetime" idea below.
-- **serve / serve ensure / serve stop / serve logs** -- a
-  lightweight HTTP server that exposes config assets to the
-  cluster: kustomize-built Secrets named
-  `y-kustomize.{group}.{name}` become `/v1/{group}/{name}/{key}`
-  URLs. Replaces the y-kustomize service in ystack.
-
 Every subcommand has its own `--help` with the flags and
 context. The README is intentionally short -- when something is
 discoverable from `y-cluster <cmd> --help`, that's where it
@@ -99,16 +93,6 @@ across the whole base, so an overlay's checks include the base's.
 The two mechanisms are deliberately separate:
 *ordering across modules* uses CUE; *checking after one apply*
 uses traversal. `y-cluster yconverge --help` has the rule.
-
-**serve: the URL is derived from the Secret name.** A Secret
-called `y-kustomize.kafka.setup-topic-job` with a data key
-`base-for-annotations.yaml` is served at
-`/v1/kafka/setup-topic-job/base-for-annotations.yaml`. This is
-true whether the Secret comes from `kustomize build` of a local
-source (`type: y-kustomize-local`) or a Kubernetes informer
-(`type: y-kustomize-incluster`). The two modes are
-interchangeable; switch by changing `type:` in
-`y-cluster-serve.yaml`.
 
 **qemu: two network modes, and only one of them shows workloads who
 is calling.** `network.mode: user` (default) is qemu user-mode
