@@ -30,7 +30,10 @@
 //     keys is portable across providers
 package config
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // Provider IDs. Single source of truth for both the per-provider
 // `Validate()` checks and the `enum` constraint on
@@ -44,10 +47,53 @@ const (
 	ProviderHetzner   = "hetzner"
 )
 
+// ProviderConfig is one provider's y-cluster-provision.yaml, as
+// LoadProvision returns it. The concrete types differ in their own
+// fields; what every one of them has comes through Common.
+type ProviderConfig interface {
+	// Common returns the fields every provider shares. All provider
+	// config types get it by embedding CommonConfig.
+	Common() *CommonConfig
+	SetDir(dir string)
+	ApplyDefaults()
+	Validate() error
+}
+
+// Common implements ProviderConfig for every type that embeds
+// CommonConfig.
+func (c *CommonConfig) Common() *CommonConfig { return c }
+
+// providerConfigs is where a provider is registered: its name and a
+// constructor for its config type. LoadProvision dispatches through
+// it, and AllProviders and schemagen's list of schemas derive from
+// it, so a provider is either known to all of them or to none.
+var providerConfigs = map[string]func() ProviderConfig{
+	ProviderQEMU:      func() ProviderConfig { return &QEMUConfig{} },
+	ProviderDocker:    func() ProviderConfig { return &DockerConfig{} },
+	ProviderMultipass: func() ProviderConfig { return &MultipassConfig{} },
+	ProviderHetzner:   func() ProviderConfig { return &HetznerConfig{} },
+}
+
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
 // supported values.
-var AllProviders = []string{ProviderDocker, ProviderHetzner, ProviderMultipass, ProviderQEMU}
+var AllProviders = func() []string {
+	names := make([]string, 0, len(providerConfigs))
+	for name := range providerConfigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}()
+
+// NewProviderConfig returns an empty config of the named provider's
+// type, or nil for a name that is not registered.
+func NewProviderConfig(provider string) ProviderConfig {
+	if newConfig, ok := providerConfigs[provider]; ok {
+		return newConfig()
+	}
+	return nil
+}
 
 // CommonConfig is the portable subset of `y-cluster-provision.yaml`.
 // Every provider config embeds it via `yaml:",inline"` so the keys
@@ -112,12 +158,6 @@ const (
 // AllOnExpiry is the canonical OnExpiry value list, used by
 // validation error messages.
 var AllOnExpiry = []string{OnExpiryStop, OnExpiryPause, OnExpiryTeardown}
-
-// LifetimePolicy returns the configured lifetime. Promoted to every
-// provider config via CommonConfig embedding, so a caller holding an
-// `any` from LoadProvision can read the budget without switching on
-// the concrete provider type.
-func (c CommonConfig) LifetimePolicy() LifetimeConfig { return c.Lifetime }
 
 // Enabled reports whether a lifetime budget is configured.
 func (l LifetimeConfig) Enabled() bool {
