@@ -29,8 +29,9 @@ type gatewayProbeOpts struct {
 	// that pass the check. Empty defaults to {200}.
 	ExpectCodes []int
 	// ExpectLocation, if non-empty, is a Go regexp that must match
-	// the Location response header. Pairs with 3xx ExpectCodes;
-	// silently passes against responses with no Location.
+	// the Location response header. Pairs with 3xx ExpectCodes. A
+	// response without a Location is matched as the empty string,
+	// so it fails any pattern that requires content.
 	ExpectLocation string
 	// Resolve, if non-empty, is the dial target IP for the URL's
 	// host:port. Bypasses Gateway address discovery.
@@ -208,6 +209,19 @@ func discoverGatewayAddress(ctx context.Context, contextName, className string) 
 	return pickGatewayAddress(list.Items, className), nil
 }
 
+// deleteProbePod removes a probe pod whose `kubectl run --rm` did not
+// get to clean up after itself. Best effort and on its own short
+// context, since the caller's is typically the one that just expired.
+func deleteProbePod(contextName, podName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "kubectl",
+		"--context="+contextName,
+		"delete", "pod", podName,
+		"--ignore-not-found", "--wait=false",
+	).Run()
+}
+
 // runGatewayProbe is a single probe attempt: discover + dial +
 // parse + validate. The retry-until-timeout shape lives in the
 // caller (CheckRunner.runGateway) so the unit-testable surface
@@ -260,10 +274,15 @@ func runGatewayProbe(ctx context.Context, contextName string, opts gatewayProbeO
 		"curl",
 	}, curlArgs...)
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd.WaitDelay = time.Second
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// --rm is kubectl's doing. When kubectl fails or is killed
+		// at the deadline it never gets there, and with a fresh pod
+		// name per attempt every such attempt would leave a pod.
+		deleteProbePod(contextName, podName)
 		return fmt.Errorf("probe pod %s: %w (stdout: %q stderr: %q)",
 			podName, err, stdout.String(), stderr.String())
 	}

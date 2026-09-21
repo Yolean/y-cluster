@@ -145,18 +145,22 @@ func (r *CheckRunner) runGateway(ctx context.Context, check Check, timeout time.
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		if err := runGatewayProbe(ctx, r.Context, opts); err == nil {
+		// Bounded like an exec attempt: the probe pod's image pull
+		// alone can outlast a short timeout.
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		err := runGatewayProbe(attemptCtx, r.Context, opts)
+		cancel()
+		if err == nil {
 			return nil
-		} else {
-			lastErr = err
 		}
-		if time.Now().After(deadline) {
+		lastErr = err
+		if time.Now().Add(checkRetryInterval).After(deadline) {
 			return fmt.Errorf("gateway check timed out after %s: %w", timeout, lastErr)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(checkRetryInterval):
 		}
 	}
 }
