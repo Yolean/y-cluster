@@ -20,6 +20,7 @@ discovered when omitted: multipass, then qemu, then docker):
 | `docker` | k3s in a container | anywhere a docker daemon runs; what CI uses |
 | `multipass` | k3s in a Multipass VM | macOS and Linux |
 | `hetzner` | k3s on a Hetzner Cloud server | paid; tears itself down in-cluster when `lifetime` expires |
+| `glesys` | k3s on a GleSYS KVM server (hosting, not appliance) | config and schema only so far: a config validates, `provision` says there is no provisioner yet |
 
 Subcommand groups:
 
