@@ -134,49 +134,17 @@ func (c HetznerImageCache) validate() error {
 // config file location like the other providers do.
 func (c *HetznerConfig) SetDir(dir string) { c.Dir = dir }
 
-// hetznerContextRE constrains the context (and therefore the
-// Hetzner server name) to a DNS-label-safe shape. The Hetzner
-// Cloud API rejects names with uppercase or special characters
-// anyway; we enforce >= 4 chars on top of that to reduce the
-// chance of someone naming a cluster `dev` or similar three-letter
-// collision-prone identifier.
 // hetznerLBGroupRE is one or more DNS labels; a dotted $USER works.
 var hetznerLBGroupRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
-var hetznerContextRE = regexp.MustCompile(`^[a-z][a-z0-9-]{2,}[a-z0-9]$`)
-
-// ApplyDefaults satisfies configfile.Defaulter. Tag-driven string
-// defaults run via reflection (covering both common and
-// hetzner-specific fields); int / host-dependent defaults are
-// handled explicitly below.
-//
-// Two non-tag-driven defaults need explanation:
-//
-//   - Name: CommonConfig.Name defaults to "y-cluster" via its
-//     own jsonschema tag. For hetzner the server name IS the
-//     cluster identifier (Validate enforces equality with
-//     Context); we force Name = Context here BEFORE
-//     applyCommonDefaults so the operator never has to specify
-//     both fields.
-//   - LBGroup: $USER fallback for the per-developer LB key.
-//     Host-dependent so it can't be a tag default.
+// ApplyDefaults runs the cloud defaults (applyCloudDefaults), then
+// the one default that depends on the host: LBGroup falls back to
+// $USER, the per-developer load balancer key.
 func (c *HetznerConfig) ApplyDefaults() {
 	if c.Provider == "" {
 		c.Provider = ProviderHetzner
 	}
-	if c.Name == "" && c.Context != "" {
-		c.Name = c.Context
-	}
-	// The common tag default for k3s.install is airgap, which this
-	// provisioner does not implement: it always runs the upstream
-	// install script on the server. Default to what happens, so that
-	// Validate can refuse an airgap the operator actually asked for.
-	hadExplicitInstall := c.K3s.Install != ""
-	applyTagDefaults(c)
-	c.applyCommonDefaults()
-	if !hadExplicitInstall {
-		c.K3s.Install = "script"
-	}
+	applyCloudDefaults(c, &c.CommonConfig)
 	if c.LBGroup == "" {
 		c.LBGroup = os.Getenv("USER")
 	}
@@ -203,43 +171,8 @@ func (c *HetznerImageCache) applyDefaults() {
 // invariants. The context-shape rules are the dev-cluster guards
 // from HETZNER_PROVISIONER.md.
 func (c *HetznerConfig) Validate() error {
-	if err := c.validateCommon(ProviderHetzner); err != nil {
+	if err := c.validateCloud(ProviderHetzner); err != nil {
 		return err
-	}
-	// Context: required, not "local", >= 4 chars, DNS-label-safe.
-	// "local" specifically is the qemu/docker default; reusing it
-	// for a Hetzner cluster would clobber the operator's local
-	// cluster context on every kubeconfig merge.
-	if c.Context == "" {
-		return errInvalid("context is required for hetzner; pick a unique cluster identifier (>= 4 chars, DNS-label-safe)")
-	}
-	if c.Context == "local" {
-		return errInvalid("context %q is reserved for local clusters; pick a different name", c.Context)
-	}
-	if len(c.Context) < 4 {
-		return errInvalid("context %q is too short; use >= 4 characters", c.Context)
-	}
-	if !hetznerContextRE.MatchString(c.Context) {
-		return errInvalid("context %q must match %s (lowercase, DNS-label-safe)", c.Context, hetznerContextRE.String())
-	}
-	// Name is forced to equal Context. The Hetzner server name
-	// IS the cluster identifier in this provisioner -- there's
-	// no separation of concerns, no second name to remember, and
-	// `cluster.Lookup` resolves by `name == context`.
-	if c.Name != "" && c.Name != c.Context {
-		return errInvalid("name %q must equal context %q on hetzner (the Hetzner server name is the cluster identifier)", c.Name, c.Context)
-	}
-	// lifetime: the standard config drives hetzner's expiry
-	// mechanism, an in-cluster reaper Job installed at provision
-	// (the analog of GCP's max-run-duration). stop and teardown
-	// map to hcloud server shutdown / delete; pause has no
-	// Hetzner Cloud primitive, so a set budget with onExpiry
-	// pause is rejected instead of silently downgraded. The
-	// Enabled() guard matters: applyTagDefaults fills onExpiry
-	// (stop) even when no budget is set, and a disabled lifetime
-	// must stay valid.
-	if c.Lifetime.Enabled() && c.Lifetime.OnExpiry == OnExpiryPause {
-		return errInvalid("lifetime.onExpiry %q is not supported on hetzner (Hetzner Cloud has no pause/resume primitive); use %s or %s", OnExpiryPause, OnExpiryStop, OnExpiryTeardown)
 	}
 	if c.K3s.Install != "script" {
 		return errInvalid("k3s.install %q is not supported on hetzner; the server always installs k3s with the upstream script (use imageCache to keep image pulls off the public registries)", c.K3s.Install)
