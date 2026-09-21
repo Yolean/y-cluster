@@ -30,11 +30,23 @@ import (
 // the qemu launch parameters from the sidecar Provision wrote.
 
 func pauseCmd() *cobra.Command {
-	return signalCmd("pause", "Pause the cluster VM (SIGSTOP); resume to unfreeze", qemu.Pause)
+	return signalCmd("pause", "Pause the cluster VM (SIGSTOP); resume to unfreeze",
+		func(cacheDir, name, _ string, logger *zap.Logger) error {
+			return qemu.Pause(cacheDir, name, logger)
+		})
 }
 
 func resumeCmd() *cobra.Command {
-	return signalCmd("resume", "Resume a paused cluster VM (SIGCONT)", qemu.Resume)
+	return signalCmd("resume", "Resume a paused cluster VM (SIGCONT)",
+		func(cacheDir, name, contextName string, logger *zap.Logger) error {
+			if err := qemu.Resume(cacheDir, name, logger); err != nil {
+				return err
+			}
+			// The timer that paused an expired VM was one-shot, and
+			// Resume has given that VM a new deadline.
+			armHostTimerIfLifetime(cacheDir, name, contextName, logger)
+			return nil
+		})
 }
 
 // stopCmd resolves the context to a running cluster and hands it to
@@ -65,11 +77,10 @@ func stopCmd() *cobra.Command {
 	return cmd
 }
 
-// signalCmd is the shared shape for pause / resume / stop. Each
-// looks up the running cluster, dispatches by backend, and calls
-// the qemu lifecycle function. Non-qemu backends return a "not
-// implemented" error.
-func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.Logger) error) *cobra.Command {
+// signalCmd is the shared shape of pause and resume: look up the
+// running cluster and, for qemu, call run. Other backends have no
+// such verb.
+func signalCmd(name, short string, run func(cacheDir, name, contextName string, logger *zap.Logger) error) *cobra.Command {
 	var contextName string
 	cmd := &cobra.Command{
 		Use:   name,
@@ -83,7 +94,7 @@ func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.L
 			}
 			switch lr.Backend {
 			case cluster.BackendQEMU:
-				return run(qemuCacheDir(), lr.ClusterName, logger)
+				return run(qemuCacheDir(), lr.ClusterName, contextName, logger)
 			case cluster.BackendHetzner:
 				// pause / resume have no Hetzner Cloud analog
 				// (no SIGSTOP/SIGCONT against a guest). Surface a
