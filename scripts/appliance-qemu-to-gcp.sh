@@ -177,6 +177,9 @@ CFG_DIR="${CFG_DIR:-$HOME/.cache/y-cluster-appliance-build/$NAME}"
 BUNDLE_DIR="${BUNDLE_DIR:-$REPO_ROOT/dist/appliance/$NAME-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 stage() { printf '\n=== %s ===\n' "$*"; }
+
+# shellcheck source=scripts/_hooks.sh
+. "$REPO_ROOT/scripts/_hooks.sh"
 confirm() {
     local prompt=$1
     if [[ -n "${ASSUME_YES:-}" ]]; then
@@ -218,14 +221,7 @@ prompt_yes_default() {
 # the call site are exported as empty strings (not unset) so
 # a verify script can read them unconditionally.
 current_env() {
-    export Y_CLUSTER_CURRENT_NAME="$NAME"
-    export Y_CLUSTER_CURRENT_KUBECTX="$KUBECTX"
-    export Y_CLUSTER_CURRENT_LOCAL_HTTP_PORT="${APP_HTTP_PORT:-80}"
-    export Y_CLUSTER_CURRENT_LOCAL_HTTPS_PORT="${APP_HTTPS_PORT:-443}"
-    export Y_CLUSTER_CURRENT_LOCAL_API_PORT="${APP_API_PORT:-6443}"
-    export Y_CLUSTER_CURRENT_LOCAL_SSH_PORT="${APP_SSH_PORT:-2222}"
-    export Y_CLUSTER_CURRENT_LOCAL_SSH_KEY="${CACHE_DIR:-}/${NAME}-ssh"
-    export Y_CLUSTER_CURRENT_BUNDLE_DIR="${BUNDLE_DIR:-}"
+    hooks_env_local
     export Y_CLUSTER_CURRENT_REMOTE_VM_NAME="${VM_NAME:-}"
     export Y_CLUSTER_CURRENT_REMOTE_VM_IP="${PUBLIC_IP:-}"
     export Y_CLUSTER_CURRENT_REMOTE_DOMAINS="${TLS_DOMAINS:-}"
@@ -818,13 +814,8 @@ kubectl --context="$KUBECTX" -n y-cluster wait \
 # cluster stays up for inspection (set -e + the
 # "aborted; local cluster left running" semantics of the
 # upcoming PROMPT 1 path are what the operator falls back on).
-if [[ -n "${APPLIANCE_SEED_CMD:-}" ]]; then
-    stage "applying seed (APPLIANCE_SEED_CMD)"
-    current_env
-    # set -o pipefail so a `cmd | tee log` chain in the
-    # caller's string doesn't swallow upstream failures.
-    bash -c "set -o pipefail; $APPLIANCE_SEED_CMD"
-fi
+current_env
+hooks_run "seed (APPLIANCE_SEED_CMD)" "${APPLIANCE_SEED_CMD:-}"
 
 # === Stage 2: hands-on prompt ===
 SSH_KEY="$CACHE_DIR/$NAME-ssh"
@@ -1262,12 +1253,8 @@ fi
 # REMOTE_SCHEME -- enough to compose curl --resolve probes
 # without /etc/hosts. Non-zero exit aborts; the VM and LB
 # stay up for inspection.
-if [[ -n "${APPLIANCE_VERIFY_CMD:-}" ]]; then
-    stage "remote verify (APPLIANCE_VERIFY_CMD)"
-    current_env
-    # Same pipefail discipline as APPLIANCE_SEED_CMD.
-    bash -c "set -o pipefail; $APPLIANCE_VERIFY_CMD"
-fi
+current_env
+hooks_run "remote verify (APPLIANCE_VERIFY_CMD)" "${APPLIANCE_VERIFY_CMD:-}"
 
 if [[ -z "${KEEP_LOCAL:-}" ]]; then
     stage "tearing down local cluster (set KEEP_LOCAL=1 to keep it)"

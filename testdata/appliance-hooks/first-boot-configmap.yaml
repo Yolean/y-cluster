@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: appliance-hook-fixture
+  namespace: default
+data:
+  staged-by: testdata/appliance-hooks/seed.sh

@@ -86,7 +86,10 @@ fi
 ENV_FILE="$H_S3_ENV_FILE"
 if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
-    set -a; . "$ENV_FILE"; set +a
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
 else
     echo "credentials file not found: $ENV_FILE" >&2
     cat >&2 <<EOF
