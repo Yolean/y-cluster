@@ -137,18 +137,20 @@ yolean.se/dns-hint-ip GatewayClass annotations and snapshots the
 reconciled Gateway state for the export bundle, then stops the
 VM itself. Do not run 'y-cluster stop' first.
 
-Offline phase (virt-customize on the stopped qcow2): wipes
-machine-id, SSH host keys, udev persistent net rules, MAC-bound
-netplan, and the cloud-init state cache; stages the data seed
-and any added manifests; registers a firstboot ssh-keygen so the
-imported instance regenerates its own host keys.
+Offline phase (virt-customize on the stopped qcow2): wipes the
+cloud-init state cache, replaces the MAC-bound netplan with one
+that matches any NIC and keeps cloud-init from regenerating it,
+enables time sync; stages the data seed and moves any added
+manifests to where k3s applies them. /etc/machine-id, the SSH host
+keys and authorized_keys are KEPT: removing machine-id breaks DHCP
+on first boot, and the keys are part of the per-customer bundle.
 
 	y-cluster provision
 	y-cluster prepare-export   # stops the VM internally
 
 Idempotent. A prepared appliance is no longer a usable dev
-cluster locally: the next start runs cloud-init re-init and
-regenerates identity. Re-provision for a fresh dev loop.
+cluster locally: the next start runs cloud-init as on a first
+boot. Re-provision for a fresh dev loop.
 
 Requires libguestfs-tools (sudo apt install libguestfs-tools)
 and kubectl.`,
