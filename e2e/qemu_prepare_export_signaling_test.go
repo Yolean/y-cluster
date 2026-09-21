@@ -68,7 +68,7 @@ func TestQemu_PrepareExport_GracefulShutdown(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-graceful"
 	cfg.Context = "y-cluster-e2e-graceful"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2229"

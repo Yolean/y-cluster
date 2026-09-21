@@ -43,7 +43,7 @@ import (
 // suppression for empty-selector-match lines has loosened.
 func TestConvergeMode_OutputForwardsKubectlLines(t *testing.T) {
 	setupCluster(t)
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "k")
 	plainName := "convergeout-plain"

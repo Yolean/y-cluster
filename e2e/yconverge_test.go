@@ -1,6 +1,6 @@
 //go:build e2e
 
-// Package e2e tests yconverge against a real cluster (kwok in Docker).
+// The yconverge tests run against a real apiserver (kwok in Docker).
 //
 // Test bases model a three-tier application:
 //   - e2e-db:       database config and service (foundation)
@@ -47,6 +47,7 @@ func testdataDir(t *testing.T) string {
 func TestMain(m *testing.M) {
 	code := m.Run()
 	cluster.TeardownAll()
+	removeBuiltBinary()
 	os.Exit(code)
 }
 

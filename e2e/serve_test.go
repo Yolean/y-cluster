@@ -1,6 +1,6 @@
 //go:build e2e
 
-// Package e2e tests y-cluster serve against the built binary.
+// The serve tests run y-cluster serve from the built binary.
 //
 // Fixture layout mirrors the ystack y-converge-checks-dag two-base pattern:
 // a single y-cluster-serve.yaml pointing to two sources, each with a
@@ -23,40 +23,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-var (
-	serveBinaryOnce sync.Once
-	serveBinaryPath string
-	serveBinaryErr  error
-)
-
-// buildServeBinary compiles cmd/y-cluster once per test process.
-func buildServeBinary(t *testing.T) string {
-	t.Helper()
-	serveBinaryOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "y-cluster-serve-bin-*")
-		if err != nil {
-			serveBinaryErr = err
-			return
-		}
-		out := filepath.Join(dir, "y-cluster")
-		cmd := exec.Command("go", "build", "-o", out, "./cmd/y-cluster")
-		cmd.Dir = ".."
-		if outb, err := cmd.CombinedOutput(); err != nil {
-			serveBinaryErr = fmt.Errorf("build: %s: %w", outb, err)
-			return
-		}
-		serveBinaryPath = out
-	})
-	if serveBinaryErr != nil {
-		t.Fatal(serveBinaryErr)
-	}
-	return serveBinaryPath
-}
 
 // freePort returns a TCP port that is free right now. Caller races any
 // other process grabbing it, but the window is tiny.
@@ -127,7 +96,7 @@ func runServe(t *testing.T, bin, stateDir string, args ...string) ([]byte, error
 }
 
 func TestServe_EnsureRoundtrip(t *testing.T) {
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 	port := freePort(t)
 	cfgDir := prepareFixture(t, "serve-ykustomize-local", port)
 	stateDir := t.TempDir()
@@ -223,7 +192,7 @@ func TestServe_EnsureRoundtrip(t *testing.T) {
 }
 
 func TestServe_LogsSubcommand(t *testing.T) {
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 	port := freePort(t)
 	cfgDir := prepareFixture(t, "serve-ykustomize-local", port)
 	stateDir := t.TempDir()
@@ -381,7 +350,7 @@ func waitForStatus(t *testing.T, url string, want int, timeout time.Duration, wh
 // see docs/ystack-migration.md on the spec branch.
 func TestServe_InCluster(t *testing.T) {
 	setupCluster(t)
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 	port := freePort(t)
 
 	// Prepare the fixture with kubeconfig + port substituted.
@@ -524,7 +493,7 @@ func TestServe_InCluster(t *testing.T) {
 // transform, dirTrailingSlash=redirect, and openapi snapshot. Uses
 // testdata/serve-static/ as the worked example.
 func TestServe_Static(t *testing.T) {
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 	port := freePort(t)
 	cfgDir := prepareFixture(t, "serve-static", port)
 	stateDir := t.TempDir()

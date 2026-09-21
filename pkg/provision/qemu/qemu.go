@@ -723,11 +723,21 @@ func importFormatFromExt(path string) (string, error) {
 const ubuntuVersion = "noble"
 
 func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
-	imgPath := filepath.Join(c.cfg.CacheDir, fmt.Sprintf("ubuntu-%s-server-cloudimg-amd64.img", ubuntuVersion))
+	return EnsureCloudImage(ctx, c.cfg.CacheDir, c.logger)
+}
+
+// EnsureCloudImage returns the path of the Ubuntu cloud image in
+// cacheDir, downloading it first if it is not there. New VM disks
+// are created with this file as their backing file, so it has to
+// stay in place for as long as a disk made from it is in use; that
+// is why it lives with the disks rather than in the purgeable
+// download cache.
+func EnsureCloudImage(ctx context.Context, cacheDir string, logger *zap.Logger) (string, error) {
+	imgPath := filepath.Join(cacheDir, fmt.Sprintf("ubuntu-%s-server-cloudimg-amd64.img", ubuntuVersion))
 	if _, err := os.Stat(imgPath); err == nil {
 		return imgPath, nil
 	}
-	c.logger.Info("downloading cloud image", zap.String("version", ubuntuVersion))
+	logger.Info("downloading cloud image", zap.String("version", ubuntuVersion))
 	url := fmt.Sprintf("https://cloud-images.ubuntu.com/%s/current/%s-server-cloudimg-amd64.img", ubuntuVersion, ubuntuVersion)
 	if err := cache.Download(ctx, url, imgPath); err != nil {
 		return "", fmt.Errorf("download cloud image: %w", err)

@@ -34,12 +34,11 @@ import (
 // naming whichever provisioner the calling test brought up. Fails
 // the test on any unexpected output or non-zero exit.
 //
-// The binary is taken from buildServeBinary (which builds the
-// whole y-cluster binary, not just serve) so we don't pay the
-// cost of compiling twice in the same `go test` invocation.
+// The binary is taken from buildBinary so we don't pay the cost of
+// compiling twice in the same `go test` invocation.
 func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 	t.Helper()
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	// 1. `y-cluster detect` prints the backend name.
 	out := runYCluster(t, bin, "detect", "--context="+ctxName)
