@@ -125,3 +125,22 @@ func TestRun_TraverseErrorIsFatal(t *testing.T) {
 		t.Fatalf("expected traverse error wrap, got %v", err)
 	}
 }
+
+// An unknown --dry-run value used to fall through to a real apply.
+func TestRun_RejectsUnknownDryRun(t *testing.T) {
+	for _, v := range []string{"client", "true", "sever"} {
+		_, err := Run(context.Background(), Options{Context: "x", KustomizeDir: t.TempDir(), DryRun: v}, nil)
+		if err == nil || !strings.Contains(err.Error(), "refusing to apply") {
+			t.Errorf("--dry-run=%s: want a refusal before anything runs, got %v", v, err)
+		}
+	}
+}
+
+func TestNormalizeDryRun(t *testing.T) {
+	for in, want := range map[string]string{"": "", "none": "", "server": "server"} {
+		got, err := normalizeDryRun(in)
+		if err != nil || got != want {
+			t.Errorf("normalizeDryRun(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}

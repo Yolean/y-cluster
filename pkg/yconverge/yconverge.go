@@ -16,7 +16,7 @@ import (
 type Options struct {
 	Context      string // Kubernetes context name (required)
 	KustomizeDir string // path to kustomize base (required)
-	DryRun       string // "server" or "" (empty = real apply)
+	DryRun       string // "server", or "" / "none" for a real apply
 	ChecksOnly   bool   // skip apply, run checks only
 	PrintDeps    bool   // print dependency order and exit
 	SkipChecks   bool   // skip checks after apply
@@ -89,6 +89,21 @@ type Result struct {
 	Steps []string
 }
 
+// normalizeDryRun maps the --dry-run value to what applyGroups
+// understands: "server" or "" (real apply). Anything else is an
+// error rather than a real apply: `--dry-run=client` or a typo must
+// never mutate the cluster the caller asked not to touch.
+func normalizeDryRun(v string) (string, error) {
+	switch v {
+	case "", "none":
+		return "", nil
+	case "server":
+		return "server", nil
+	default:
+		return "", fmt.Errorf("--dry-run=%s is not supported (want server or none); refusing to apply", v)
+	}
+}
+
 // Run performs a full yconverge: resolve dependencies, apply each step
 // (with kustomize server-side apply), and run checks.
 func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error) {
@@ -98,6 +113,11 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 	if opts.KustomizeDir == "" {
 		return nil, fmt.Errorf("-k is required")
 	}
+	dryRun, err := normalizeDryRun(opts.DryRun)
+	if err != nil {
+		return nil, err
+	}
+	opts.DryRun = dryRun
 
 	absDir, err := filepath.Abs(opts.KustomizeDir)
 	if err != nil {
