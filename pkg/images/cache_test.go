@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
@@ -183,5 +185,102 @@ func TestLayoutExists_Empty(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("empty dir should not look like an OCI layout")
+	}
+}
+
+// A pull that died after layout.Write but before its first manifest
+// leaves oci-layout plus an empty index.json. That must not read as a
+// cache hit, and the next Cache call has to pull over it.
+func TestCache_PullsOverAKilledPull(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := random.Image(1024, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := name.NewTag(u.Host + "/test/killedpull:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatal(err)
+	}
+	imgDigest, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	t.Setenv("Y_CLUSTER_CACHE_DIR", root)
+	layoutDir := filepath.Join(root, "images", imgDigest.String())
+	if _, err := layout.Write(layoutDir, empty.Index); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := layoutExists(layoutDir); err != nil || ok {
+		t.Fatalf("a layout without manifests must not count as cached: ok=%v err=%v", ok, err)
+	}
+
+	if _, err := Cache(context.Background(), ref.String(), "", nil); err != nil {
+		t.Fatalf("Cache: %v", err)
+	}
+	if ok, err := layoutExists(layoutDir); err != nil || !ok {
+		t.Fatalf("layout not usable after re-pull: ok=%v err=%v", ok, err)
+	}
+	lp, err := layout.FromPath(layoutDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lp.Image(imgDigest); err != nil {
+		t.Fatalf("image not readable from the cache: %v", err)
+	}
+}
+
+// Nothing of a failed pull may stay behind, neither under the final
+// name nor as a staging directory.
+func TestCache_FailedPullLeavesNothingBehind(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := random.Image(1024, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imgDigest, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Digest-pinned, so Cache needs no HEAD and fails in the fetch.
+	ref := u.Host + "/test/never-pushed@" + imgDigest.String()
+	srv.Close()
+
+	root := t.TempDir()
+	t.Setenv("Y_CLUSTER_CACHE_DIR", root)
+	if _, err := Cache(context.Background(), ref, "", nil); err == nil {
+		t.Fatal("expected the pull to fail")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "images"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("left behind after a failed pull: %s", e.Name())
+	}
+}
+
+func TestLayoutExists_TruncatedIndex(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{"oci-layout": `{"imageLayoutVersion":"1.0.0"}`, "index.json": `{"schemaVersion":2,"manif`} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := layoutExists(dir); err != nil || ok {
+		t.Fatalf("truncated index.json: ok=%v err=%v, want unusable without error", ok, err)
 	}
 }
