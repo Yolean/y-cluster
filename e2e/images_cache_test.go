@@ -20,15 +20,15 @@ import (
 // TestCache_DigestStabilityMatrix is the digest stability proof.
 // Phases:
 //
-//	1. cold pulls (registry up): tag/cold then digest/cold both
-//	   write OCI layouts, both return digest-pinned refs.
-//	2. warm pulls with registry up: tag/warm still HEADs to
-//	   re-resolve the tag, but the layout is reused (no blob
-//	   download). Cache returns the same digest as the cold pass.
-//	3. warm digest pull with registry stopped: digest/warm-offline
-//	   takes no network at all -- digest is in the input ref, the
-//	   layout is on disk, no HEAD, no GET. The strongest stability
-//	   proof we can make from the client side.
+//  1. cold pulls (registry up): tag/cold then digest/cold both
+//     write OCI layouts, both return digest-pinned refs.
+//  2. warm pulls with registry up: tag/warm still HEADs to
+//     re-resolve the tag, but the layout is reused (no blob
+//     download). Cache returns the same digest as the cold pass.
+//  3. warm digest pull with registry stopped: digest/warm-offline
+//     takes no network at all -- digest is in the input ref, the
+//     layout is on disk, no HEAD, no GET. The strongest stability
+//     proof we can make from the client side.
 func TestCache_DigestStabilityMatrix(t *testing.T) {
 	reg := cluster.LocalRegistry(t)
 

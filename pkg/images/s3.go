@@ -144,13 +144,14 @@ type Index struct {
 // than they know fail loud.
 //
 // Version history:
-//   1: per-image OCI layout in S3; every blob duplicated per
-//      pushed image (no dedup).
-//   2: blobs hoisted to a content-addressed bucket-level prefix
-//      ("blobs/sha256/<hex>"); two images sharing a layer share
-//      the storage. IndexEntry.BlobDigests names the blobs;
-//      IndexEntry.Files keeps only manifests (oci-layout +
-//      index.json).
+//
+//	1: per-image OCI layout in S3; every blob duplicated per
+//	   pushed image (no dedup).
+//	2: blobs hoisted to a content-addressed bucket-level prefix
+//	   ("blobs/sha256/<hex>"); two images sharing a layer share
+//	   the storage. IndexEntry.BlobDigests names the blobs;
+//	   IndexEntry.Files keeps only manifests (oci-layout +
+//	   index.json).
 const IndexVersion = 2
 
 // SharedBlobsPrefix is where v2 push uploads (and v2 pre-load

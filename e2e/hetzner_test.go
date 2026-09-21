@@ -313,14 +313,14 @@ func TestHetzner_RejectUpstream(t *testing.T) {
 // -> node:80 -> envoy-gateway -> HTTPRoute -> backend Pod path
 // end-to-end:
 //
-//   1. Provision a Hetzner cluster (which now installs the
-//      per-cluster default Gateway in y-cluster-gateway).
-//   2. Resolve the LB public IPv4 from the per-cluster
-//      GatewayClass dns-hint-ip annotation (set by Provision).
-//   3. Install the example workload via pkg/example.Install
-//      with a hostname matching the default Gateway's wildcard.
-//   4. curl --resolve <hostname>:443:<lb-ip> https://<hostname>
-//      and assert the static PublicResponse comes back.
+//  1. Provision a Hetzner cluster (which now installs the
+//     per-cluster default Gateway in y-cluster-gateway).
+//  2. Resolve the LB public IPv4 from the per-cluster
+//     GatewayClass dns-hint-ip annotation (set by Provision).
+//  3. Install the example workload via pkg/example.Install
+//     with a hostname matching the default Gateway's wildcard.
+//  4. curl --resolve <hostname>:443:<lb-ip> https://<hostname>
+//     and assert the static PublicResponse comes back.
 //
 // Uses curl --resolve so /etc/hosts stays untouched -- the
 // operator-side workflow we ship can use the same trick to

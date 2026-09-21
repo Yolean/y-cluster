@@ -308,7 +308,6 @@ func TestStop_CorruptPidfile(t *testing.T) {
 	}
 }
 
-
 func TestLogs_Empty(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Logs(context.Background(), &buf, t.TempDir(), false); err != nil {

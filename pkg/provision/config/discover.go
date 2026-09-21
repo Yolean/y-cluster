@@ -17,9 +17,9 @@ import (
 //
 // Heuristic, top to bottom:
 //
-//	1. multipass CLI present + daemon reachable -> multipass
-//	2. Linux + /dev/kvm + qemu-system-x86_64    -> qemu
-//	3. docker CLI present + `docker info` OK    -> docker
+//  1. multipass CLI present + daemon reachable -> multipass
+//  2. Linux + /dev/kvm + qemu-system-x86_64    -> qemu
+//  3. docker CLI present + `docker info` OK    -> docker
 //
 // multipass wins ahead of qemu/docker because:
 //

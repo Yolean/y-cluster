@@ -20,7 +20,7 @@ type sampleValidator struct {
 	failOn string
 }
 
-func (s *sampleValidator) SetDir(d string)   { s.Dir = d }
+func (s *sampleValidator) SetDir(d string) { s.Dir = d }
 func (s *sampleValidator) Validate() error {
 	if s.Name == s.failOn {
 		return errSample("name == failOn")
@@ -116,8 +116,8 @@ type sampleDefaulter struct {
 	defaultsApplied bool
 }
 
-func (s *sampleDefaulter) SetDir(d string)      { s.Dir = d }
-func (s *sampleDefaulter) ApplyDefaults()       { s.defaultsApplied = true }
+func (s *sampleDefaulter) SetDir(d string) { s.Dir = d }
+func (s *sampleDefaulter) ApplyDefaults()  { s.defaultsApplied = true }
 func (s *sampleDefaulter) Validate() error {
 	if !s.defaultsApplied {
 		return errSample("Validate ran before ApplyDefaults")
