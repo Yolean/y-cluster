@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Yolean/y-cluster/pkg/shquote"
 )
 
 // reapInvocation is the argv tail every backend schedules: the
@@ -115,19 +117,10 @@ func atTimeSpec(remaining time.Duration) string {
 // stable marker so Disarm can find this job among the user's at queue
 // (at has no job naming).
 func atScript(bin, kubeContext string) string {
-	argv := reapInvocation(bin, kubeContext)
-	quoted := make([]string, len(argv))
-	for i, a := range argv {
-		quoted[i] = shellQuote(a)
-	}
-	return strings.Join(quoted, " ") + " # " + unitName(kubeContext)
-}
-
-// shellQuote single-quotes s for /bin/sh, which is what at(1) runs
-// the script with. A binary path with a space or a context name with
-// a shell metacharacter would otherwise change the command.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	// at(1) runs the script with /bin/sh: a binary path with a space
+	// or a context name with a shell metacharacter would otherwise
+	// change the command.
+	return shquote.Join(reapInvocation(bin, kubeContext)) + " # " + unitName(kubeContext)
 }
 
 // Arm schedules the reap for `remaining` from now via systemd-run

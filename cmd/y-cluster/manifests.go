@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
+	"github.com/Yolean/y-cluster/pkg/shquote"
 )
 
 // manifestsCmd is the umbrella for build-time manifest staging on the
@@ -98,7 +99,7 @@ const (
 // manifest it could not see, and replace/rm would blame the operator
 // for a name that is staged.
 func readStagedManifest(ctx context.Context, sh nodeShell, target string) ([]byte, bool, error) {
-	q := shellSingleQuote(target)
+	q := shquote.Quote(target)
 	cmd := "if [ -e " + q + " ]; then echo " + stagedPresent + "; cat " + q + "; else echo " + stagedAbsent + "; fi"
 	var stdout, stderr bytes.Buffer
 	if err := sh(ctx, cmd, nil, &stdout, &stderr); err != nil {
@@ -126,7 +127,7 @@ func readStagedManifest(ctx context.Context, sh nodeShell, target string) ([]byt
 // .tmp, which k3s does not apply should one be left behind and moved
 // to the manifests directory by prepare-export.
 func writeStagedManifest(ctx context.Context, sh nodeShell, target string, data []byte) error {
-	dir, tmp, dst := shellSingleQuote(path.Dir(target)), shellSingleQuote(target+".tmp"), shellSingleQuote(target)
+	dir, tmp, dst := shquote.Quote(path.Dir(target)), shquote.Quote(target+".tmp"), shquote.Quote(target)
 	writeCmd := "install -d -m 0755 " + dir + " && " +
 		"{ cat > " + tmp + " && chmod 0644 " + tmp + " && mv -f " + tmp + " " + dst + "; } || " +
 		"{ rc=$?; rm -f " + tmp + "; exit $rc; }"
@@ -142,14 +143,10 @@ func writeStagedManifest(ctx context.Context, sh nodeShell, target string, data 
 // here surfaces as a real error (permission, fs problem).
 func removeStagedManifest(ctx context.Context, sh nodeShell, target string) error {
 	var stderr bytes.Buffer
-	if err := sh(ctx, "rm "+shellSingleQuote(target), nil, nil, &stderr); err != nil {
+	if err := sh(ctx, "rm "+shquote.Quote(target), nil, nil, &stderr); err != nil {
 		return fmt.Errorf("rm %s: %s: %w", target, stderr.String(), err)
 	}
 	return nil
-}
-
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // stageAdd, stageReplace and stageRemove are the rules of the three

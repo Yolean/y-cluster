@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/multipassexec"
+	"github.com/Yolean/y-cluster/pkg/shquote"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -71,7 +71,11 @@ func execOnNode(ctx context.Context, lr *LookupResult, containerArgv []string, v
 // exec`. All run it under sh inside the VM, so args are shell-quoted,
 // and k3s puts ctr/crictl behind `sudo k3s`.
 func buildVMNodeRemote(binary string, args []string) string {
-	return "sudo k3s " + binary + shellQuoteJoin(args)
+	remote := "sudo k3s " + binary
+	if len(args) > 0 {
+		remote += " " + shquote.Join(args)
+	}
+	return remote
 }
 
 // RunShell executes an arbitrary shell command (parsed by `sh -c`)
@@ -85,32 +89,5 @@ func buildVMNodeRemote(binary string, args []string) string {
 // stdin/stdout/stderr are passthrough so callers can pipe arbitrary
 // bytes (manifest YAML on stdin, command output to stdout).
 func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
-	return execOnNode(ctx, lr, []string{"sh", "-c", cmd}, "sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
-}
-
-// singleQuote wraps a string in POSIX single quotes for safe inclusion
-// in a remote shell command. Single quotes inside the string are
-// escaped the standard way: close the quote, add an escaped quote,
-// reopen (the replacement below). Used to pass an entire `sh -c`
-// command line through ssh / multipass-exec without re-parsing.
-func singleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// shellQuoteJoin shell-quotes each arg with single quotes (POSIX-
-// safe) and joins with leading spaces. Empty `args` returns "".
-// Single quotes inside an arg are escaped as in singleQuote:
-// closing the quoted string, escaping a literal quote, reopening.
-func shellQuoteJoin(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, a := range args {
-		b.WriteByte(' ')
-		b.WriteByte('\'')
-		b.WriteString(strings.ReplaceAll(a, "'", `'\''`))
-		b.WriteByte('\'')
-	}
-	return b.String()
+	return execOnNode(ctx, lr, []string{"sh", "-c", cmd}, "sudo sh -c "+shquote.Quote(cmd), stdin, stdout, stderr)
 }
