@@ -42,26 +42,46 @@ type Target struct {
 	KeyPath string // private key file (no passphrase)
 }
 
-// Dial opens an *ssh.Client. Honors ctx via a net.Dialer with
-// the deadline derived from ctx; the client itself doesn't take
-// a context (x/crypto/ssh predates them).
+// handshakeTimeout bounds the ssh handshake when ctx has no earlier
+// deadline. A variable so tests need not wait for it.
+var handshakeTimeout = 10 * time.Second
+
+// Dial opens an *ssh.Client, within ctx for both halves of that: the
+// TCP connect and the ssh handshake.
+//
+// The handshake is the half that needs care. x/crypto/ssh takes no
+// context, and ClientConfig.Timeout only covers the TCP connect of
+// ssh.Dial, so NewClientConn waits for the server's banner for as
+// long as it takes. A listener whose process is frozen or wedged (a
+// paused qemu, a guest that hung during boot) completes the TCP
+// connect from the kernel's backlog and then never sends a byte.
 func Dial(ctx context.Context, t Target) (*ssh.Client, error) {
 	cfg, err := clientConfig(t)
 	if err != nil {
 		return nil, err
 	}
 	d := net.Dialer{Timeout: 10 * time.Second}
-	if dl, ok := ctx.Deadline(); ok {
-		d.Deadline = dl
-	}
 	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(t.Host, t.Port))
 	if err != nil {
 		return nil, err // net.OpError carries connection refused / timeout
 	}
+
+	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	c, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(t.Host, t.Port), cfg)
+	stop()
 	if err != nil {
 		_ = conn.Close()
-		return nil, err // *ssh.ServerAuthError / *ssh.OpenChannelError typed
+		return nil, ctxErr(ctx, err) // *ssh.ServerAuthError / *ssh.OpenChannelError typed
+	}
+	// The deadline was for the handshake; a session runs for as long
+	// as its command does, bounded by ctx through closeOnDone.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = c.Close()
+		return nil, err
 	}
 	return ssh.NewClient(c, chans, reqs), nil
 }
@@ -210,6 +230,5 @@ func clientConfig(t Target) (*ssh.ClientConfig, error) {
 		User:            t.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // dev cluster, see package doc
-		Timeout:         10 * time.Second,
 	}, nil
 }
