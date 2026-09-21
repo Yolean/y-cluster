@@ -140,6 +140,9 @@ func (c *HetznerConfig) SetDir(dir string) { c.Dir = dir }
 // anyway; we enforce >= 4 chars on top of that to reduce the
 // chance of someone naming a cluster `dev` or similar three-letter
 // collision-prone identifier.
+// hetznerLBGroupRE is one or more DNS labels; a dotted $USER works.
+var hetznerLBGroupRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
 var hetznerContextRE = regexp.MustCompile(`^[a-z][a-z0-9-]{2,}[a-z0-9]$`)
 
 // ApplyDefaults satisfies configfile.Defaulter. Tag-driven string
@@ -164,8 +167,16 @@ func (c *HetznerConfig) ApplyDefaults() {
 	if c.Name == "" && c.Context != "" {
 		c.Name = c.Context
 	}
+	// The common tag default for k3s.install is airgap, which this
+	// provisioner does not implement: it always runs the upstream
+	// install script on the server. Default to what happens, so that
+	// Validate can refuse an airgap the operator actually asked for.
+	hadExplicitInstall := c.K3s.Install != ""
 	applyTagDefaults(c)
 	c.applyCommonDefaults()
+	if !hadExplicitInstall {
+		c.K3s.Install = "script"
+	}
 	if c.LBGroup == "" {
 		c.LBGroup = os.Getenv("USER")
 	}
@@ -230,10 +241,16 @@ func (c *HetznerConfig) Validate() error {
 	if c.Lifetime.Enabled() && c.Lifetime.OnExpiry == OnExpiryPause {
 		return errInvalid("lifetime.onExpiry %q is not supported on hetzner (Hetzner Cloud has no pause/resume primitive); use %s or %s", OnExpiryPause, OnExpiryStop, OnExpiryTeardown)
 	}
-	switch c.K3s.Install {
-	case "", "airgap", "script":
-	default:
-		return errInvalid("k3s.install must be one of {airgap, script}, got %q", c.K3s.Install)
+	if c.K3s.Install != "script" {
+		return errInvalid("k3s.install %q is not supported on hetzner; the server always installs k3s with the upstream script (use imageCache to keep image pulls off the public registries)", c.K3s.Install)
+	}
+	// The lb group is a label value, part of the load balancer's name
+	// and a DNS label in every hostname. It defaults to $USER, which
+	// is empty in CI and containers; an empty group also turns off
+	// the "delete the LB with its last server" rule in teardown, so
+	// the load balancer would keep billing.
+	if !hetznerLBGroupRE.MatchString(c.LBGroup) {
+		return errInvalid("lbGroup %q must match %s (it defaults to $USER; set it explicitly where that is empty or not DNS-safe)", c.LBGroup, hetznerLBGroupRE.String())
 	}
 	if err := c.ImageCache.validate(); err != nil {
 		return err
