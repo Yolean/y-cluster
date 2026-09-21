@@ -295,7 +295,7 @@ func TestTeardownConfig_KeepDisk(t *testing.T) {
 // snippet that pins datasource_list to NoCloud + None so a
 // re-imported disk doesn't stall on EC2 IMDS probing.
 func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n", false)
+	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n", false, false)
 	if !strings.Contains(body, "/etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg") {
 		t.Errorf("user-data must drop pin file under /etc/cloud/cloud.cfg.d/:\n%s", body)
 	}
@@ -311,7 +311,7 @@ func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
 // missing labeled volume (nofail keeps boot moving, but the
 // noise in `journalctl -u systemd-fsck@*` is undesirable).
 func TestRenderCloudInitUserData_NoMountWhenDataDiskDisabled(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", false)
+	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", false, false)
 	if strings.Contains(body, "LABEL=y-cluster-data") {
 		t.Errorf("user-data must not stamp a LABEL mount when DataDisk is disabled:\n%s", body)
 	}
@@ -325,7 +325,7 @@ func TestRenderCloudInitUserData_NoMountWhenDataDiskDisabled(t *testing.T) {
 // (/data/yolean) + the LABEL the qemu provisioner stamps on the
 // data disk + nofail so a removed disk doesn't deadlock boot.
 func TestRenderCloudInitUserData_MountWhenDataDiskEnabled(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", true)
+	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", true, false)
 	if !strings.Contains(body, "mounts:") {
 		t.Errorf("user-data must include a mounts block when DataDisk is enabled:\n%s", body)
 	}
@@ -345,7 +345,7 @@ func TestRenderCloudInitUserData_MountWhenDataDiskEnabled(t *testing.T) {
 // user-data so the pin addition didn't accidentally drop the
 // hostname / user / sshkey wiring the qemu provisioner relies on.
 func TestRenderCloudInitUserData_KeepsCoreShape(t *testing.T) {
-	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n", false)
+	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n", false, false)
 	for _, want := range []string{
 		"hostname: my-cluster",
 		"name: ystack",

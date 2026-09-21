@@ -137,8 +137,17 @@ func TestQemu_TapMode(t *testing.T) {
 	if _, err := qemu.Start(ctx, cfg.CacheDir, cfg.Name, logger); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if out, err := kubectl("get", "nodes", "-o", "name"); err != nil {
-		t.Errorf("kubectl get nodes after stop/start: %s: %v", out, err)
+	// Start returns once the guest answers ssh; the apiserver needs
+	// a little longer and reports ServiceUnavailable meanwhile.
+	var nodesOut []byte
+	var nodesErr error
+	for deadline := time.Now().Add(3 * time.Minute); time.Now().Before(deadline); time.Sleep(5 * time.Second) {
+		if nodesOut, nodesErr = kubectl("get", "nodes", "-o", "name"); nodesErr == nil {
+			break
+		}
+	}
+	if nodesErr != nil {
+		t.Errorf("kubectl get nodes after stop/start: %s: %v", nodesOut, nodesErr)
 	}
 
 	// 4. Teardown never touches the operator's device.
