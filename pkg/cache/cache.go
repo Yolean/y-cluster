@@ -121,3 +121,32 @@ func EnvoyGatewayVersion(flagOverride, version string) (string, error) {
 	}
 	return filepath.Join(root, version), nil
 }
+
+// Subtree is one purgeable directory under the cache root.
+type Subtree struct {
+	Name string
+	Path string
+}
+
+// Subtrees lists every subtree this binary writes to. `cache info`
+// and `cache purge --all` iterate it, so a subtree added here is
+// reported and purged without touching either command; a subtree
+// missing here is invisible to both.
+func Subtrees(flagOverride string) ([]Subtree, error) {
+	var out []Subtree
+	for _, s := range []struct {
+		name string
+		path func(string) (string, error)
+	}{
+		{"images", Images},
+		{"k3s", K3s},
+		{"envoygateway", EnvoyGateway},
+	} {
+		p, err := s.path(flagOverride)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Subtree{Name: s.name, Path: p})
+	}
+	return out, nil
+}

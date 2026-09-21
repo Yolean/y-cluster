@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/Yolean/y-cluster/pkg/cache"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +135,52 @@ func TestCachePurge_All_Idempotent(t *testing.T) {
 	}
 	if !strings.Contains(out2.String(), "skip "+filepath.Join(dir, "images")) {
 		t.Fatalf("second run should skip images: %q", out2.String())
+	}
+}
+
+// --all and info promise "every subtree the running binary knows
+// about". envoygateway was a subtree neither of them knew.
+func TestCache_AllCoversEverySubtree(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("Y_CLUSTER_CACHE_DIR", dir)
+	subtrees, err := cache.Subtrees("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subtrees) < 3 {
+		t.Fatalf("expected images, k3s and envoygateway at least, got %v", subtrees)
+	}
+	for _, st := range subtrees {
+		if err := os.MkdirAll(st.Path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(st.Path, "blob"), []byte("12345"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	info := rootCmd()
+	var out strings.Builder
+	info.SetOut(&out)
+	info.SetArgs([]string{"cache", "info"})
+	if err := info.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range subtrees {
+		if !strings.Contains(out.String(), st.Name+":") {
+			t.Errorf("cache info does not report %s:\n%s", st.Name, out.String())
+		}
+	}
+
+	purge := rootCmd()
+	purge.SetOut(&strings.Builder{})
+	purge.SetArgs([]string{"cache", "purge", "--all"})
+	if err := purge.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range subtrees {
+		if _, err := os.Stat(st.Path); !os.IsNotExist(err) {
+			t.Errorf("purge --all left %s behind (err=%v)", st.Path, err)
+		}
 	}
 }

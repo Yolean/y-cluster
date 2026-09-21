@@ -51,11 +51,16 @@ on it.`,
 				fmt.Fprintln(out, root)
 				return nil
 			}
-			imgs, _ := cache.Images(cacheDir)
-			k3s, _ := cache.K3s(cacheDir)
+			subtrees, err := cache.Subtrees(cacheDir)
+			if err != nil {
+				return err
+			}
 			fmt.Fprintf(out, "root:   %s\n", root)
-			fmt.Fprintf(out, "images: %s\n", humanBytes(dirSize(imgs)))
-			fmt.Fprintf(out, "k3s:    %s\n", humanBytes(dirSize(k3s)))
+			for _, st := range subtrees {
+				// Padded to the width scripts already parse
+				// ("images: ", "k3s:    "); longer names get one space.
+				fmt.Fprintf(out, "%-7s %s\n", st.Name+":", humanBytes(dirSize(st.Path)))
+			}
 			return nil
 		},
 	}
@@ -66,44 +71,36 @@ on it.`,
 
 func cachePurgeCmd() *cobra.Command {
 	var cacheDir string
-	var images, k3s, all bool
+	var images, k3s, envoyGateway, all bool
 
 	cmd := &cobra.Command{
 		Use:   "purge",
-		Short: "Delete cached artefacts. Requires --images, --k3s, or --all.",
+		Short: "Delete cached artefacts. Requires --images, --k3s, --envoygateway, or --all.",
 		Long: `Removes cache subtrees from disk. The flags must be explicit so
 adding a new subtree later doesn't silently expand "purge" to it:
 
-  --images   delete <root>/images/
-  --k3s      delete <root>/k3s/
-  --all      delete every subtree the running binary knows about
+  --images         delete <root>/images/
+  --k3s            delete <root>/k3s/
+  --envoygateway   delete <root>/envoygateway/
+  --all            delete every subtree the running binary knows about
 
 Bare 'cache purge' (no flag) exits non-zero with a usage error.
 Combine flags to delete several subtrees in one invocation.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !images && !k3s && !all {
-				return fmt.Errorf("specify --images, --k3s, or --all")
+			selected := map[string]bool{"images": images, "k3s": k3s, "envoygateway": envoyGateway}
+			if !images && !k3s && !envoyGateway && !all {
+				return fmt.Errorf("specify --images, --k3s, --envoygateway, or --all")
 			}
-			if all {
-				images = true
-				k3s = true
+			subtrees, err := cache.Subtrees(cacheDir)
+			if err != nil {
+				return err
 			}
 			out := cmd.OutOrStdout()
-			if images {
-				p, err := cache.Images(cacheDir)
-				if err != nil {
-					return err
+			for _, st := range subtrees {
+				if !all && !selected[st.Name] {
+					continue
 				}
-				if err := purgeDir(out, p); err != nil {
-					return err
-				}
-			}
-			if k3s {
-				p, err := cache.K3s(cacheDir)
-				if err != nil {
-					return err
-				}
-				if err := purgeDir(out, p); err != nil {
+				if err := purgeDir(out, st.Path); err != nil {
 					return err
 				}
 			}
@@ -113,6 +110,7 @@ Combine flags to delete several subtrees in one invocation.`,
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "", "override cache root (also: $Y_CLUSTER_CACHE_DIR)")
 	cmd.Flags().BoolVar(&images, "images", false, "delete the images subtree")
 	cmd.Flags().BoolVar(&k3s, "k3s", false, "delete the k3s subtree")
+	cmd.Flags().BoolVar(&envoyGateway, "envoygateway", false, "delete the envoygateway subtree")
 	cmd.Flags().BoolVar(&all, "all", false, "delete every known subtree")
 	return cmd
 }
