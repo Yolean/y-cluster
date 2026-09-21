@@ -15,8 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 // Embedded assets that travel with the appliance disk and run
@@ -257,15 +255,3 @@ func virtCustomizeArgsForSeed(s *SeedAssets) []string {
 		"--run-command", "systemctl enable y-cluster-data-seed.service",
 	}
 }
-
-// applianceNameFromConfig is a small adapter so PrepareExport doesn't
-// hard-code the field. Keeps the dataSeedMeta struct decoupled from
-// Config's own evolution.
-func applianceNameFromConfig(cfg Config) string {
-	return cfg.Name
-}
-
-// silenceUnused references the logger import so a future build that
-// drops the seed feature's only Warn doesn't fail with "imported and
-// not used". Tiny cost, makes the import survive intermediate edits.
-var _ = zap.NewNop

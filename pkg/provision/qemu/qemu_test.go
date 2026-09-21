@@ -149,12 +149,6 @@ func TestIsRunning_StalePidFile(t *testing.T) {
 	}
 }
 
-func TestImportVMDK_MissingVMDK(t *testing.T) {
-	if err := ImportVMDK("/nonexistent/disk.vmdk", "/tmp/out.qcow2"); err == nil {
-		t.Fatal("expected error for missing VMDK")
-	}
-}
-
 // TestImport_MissingInput guards both extensions: a non-existent
 // file should fail fast before any qemu-img invocation.
 func TestImport_MissingInput(t *testing.T) {

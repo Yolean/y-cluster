@@ -162,7 +162,7 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	// failure stops here: an appliance whose seed is missing or
 	// partial boots at the customer's with an empty data volume and
 	// nothing to say why.
-	seed, err := BuildSeedAssets(ctx, diskPath, applianceNameFromConfig(cfg))
+	seed, err := BuildSeedAssets(ctx, diskPath, cfg.Name)
 	switch {
 	case errors.Is(err, ErrNoDataDir):
 		logger.Warn("guest has no /data/yolean; appliance will ship without first-boot seed", zap.Error(err))

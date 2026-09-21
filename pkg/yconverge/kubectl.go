@@ -143,21 +143,10 @@ func preflightSelectorMatches(ctx context.Context, opts Options) (int, error) {
 // reader sees `kubectl apply --server-side ...` rather than the
 // whole string.
 func argSummary(args []string) string {
-	keep := args
-	if len(keep) > 3 {
-		keep = keep[:3]
+	if len(args) > 3 {
+		args = args[:3]
 	}
-	out := ""
-	for i, a := range keep {
-		if i > 0 {
-			out += " "
-		}
-		out += a
-	}
-	if len(args) > len(keep) {
-		out += " ..."
-	}
-	return out
+	return strings.Join(args, " ")
 }
 
 // kubectlApply renders the kustomize tree at opts.KustomizeDir and

@@ -242,7 +242,7 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		}
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err
 	}

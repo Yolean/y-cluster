@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,7 +68,7 @@ func CheckPrerequisites() error {
 		return fmt.Errorf("docker daemon unreachable: %w", err)
 	}
 	if data, err := readFirstLine("/proc/sys/fs/inotify/max_user_instances"); err == nil {
-		if n, err := atoi(data); err == nil && n < 256 {
+		if n, err := strconv.Atoi(strings.TrimSpace(data)); err == nil && n < 256 {
 			return fmt.Errorf(
 				"fs.inotify.max_user_instances is %d; docker needs at least 256. "+
 					"Run: sudo sysctl fs.inotify.max_user_instances=512", n,
@@ -88,17 +89,6 @@ func readFirstLine(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0]), nil
-}
-
-func atoi(s string) (int, error) {
-	var n int
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("not a number: %q", s)
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, nil
 }
 
 // Provision starts a docker container, waits for the
@@ -393,7 +383,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 		PortBindings: bindings,
 	}
 	if cfg.Memory != "" {
-		mb, err := atoi(cfg.Memory)
+		mb, err := strconv.Atoi(cfg.Memory)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse memory %q: %w", cfg.Memory, err)
 		}
@@ -402,7 +392,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 	if cfg.CPUs != "" {
 		// Accept whole-CPU values; --cpus 1.5 isn't required for our
 		// use-case and would need float parsing.
-		n, err := atoi(cfg.CPUs)
+		n, err := strconv.Atoi(cfg.CPUs)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse cpus %q: %w", cfg.CPUs, err)
 		}
@@ -468,7 +458,7 @@ func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) 
 		return err
 	}
 	if kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger); err == nil {
-		kubecfg.CleanupTeardown()
+		kubecfg.CleanupStale()
 	}
 	return nil
 }

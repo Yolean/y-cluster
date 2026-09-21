@@ -219,7 +219,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		HostBindAddress: cfg.BindAddress,
 		PortBinder:      provision.PortBinderSelf,
 		ContextName:     cfg.Context,
-		ContextCluster:  clusterName(cfg.Name),
+		ContextCluster:  cfg.Name,
 		KubeconfigPath:  cfg.Kubeconfig,
 	}
 	if err := pf.Run(); err != nil {
@@ -232,7 +232,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 
 	// Initialize kubeconfig manager early — validates KUBECONFIG env
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -489,9 +489,9 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	}
 
 	// Without a kubeconfig path there is no context to remove.
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err == nil {
-		kubecfg.CleanupTeardown()
+		kubecfg.CleanupStale()
 	}
 
 	// Handle per-VM artefacts. keepDisk preserves everything (for
@@ -747,12 +747,6 @@ func Import(inputPath, diskPath string) error {
 	return nil
 }
 
-// ImportVMDK is the deprecated alias for Import retained for any
-// out-of-tree caller pinned to the old name. Prefer Import.
-func ImportVMDK(vmdkPath, diskPath string) error {
-	return Import(vmdkPath, diskPath)
-}
-
 // importFormatFromExt maps a file extension to the qemu-img `-f`
 // argument. Centralised so the supported-set is in one place and a
 // new format becomes a one-line table update.
@@ -771,12 +765,6 @@ func importFormatFromExt(path string) (string, error) {
 // --- internal helpers ---
 
 const ubuntuVersion = "noble"
-
-// clusterName derives the kubeconfig cluster entry name from the VM name.
-// e.g. "ystack-qemu" → "ystack-qemu"
-func clusterName(vmName string) string {
-	return vmName
-}
 
 func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
 	imgPath := filepath.Join(c.cfg.CacheDir, fmt.Sprintf("ubuntu-%s-server-cloudimg-amd64.img", ubuntuVersion))
