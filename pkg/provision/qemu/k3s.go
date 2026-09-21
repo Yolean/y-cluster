@@ -1,7 +1,6 @@
 package qemu
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -175,26 +174,14 @@ func (c *Cluster) waitForK3sReady(ctx context.Context) error {
 	}
 }
 
-// extractKubeconfig reads the k3s-generated kubeconfig from the VM
-// and rewrites the embedded server URL so the host's kubectl can
-// reach it through the QEMU port forward.
-//
-// k3s writes `server: https://127.0.0.1:6443` (the loopback inside
-// the VM). From the host, the API server is reachable at
-// 127.0.0.1:<host-mapped-port> -- we look that up via
-// Config.hostAPIPort and substitute. TLS still works because k3s
-// puts 127.0.0.1 in the cert SANs by default.
+// extractKubeconfig reads the k3s-generated kubeconfig from the VM,
+// rewritten so the host's kubectl reaches the apiserver.
 func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
 	out, err := c.SSH(ctx, "sudo cat /etc/rancher/k3s/k3s.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
 	}
-	hostPort := c.cfg.hostAPIPort()
-	if hostPort == "" {
-		return nil, fmt.Errorf("portForwards has no guest:6443 entry; cannot reach k3s API")
-	}
-	rewritten := bytes.ReplaceAll(out, []byte("127.0.0.1:6443"), []byte("127.0.0.1:"+hostPort))
-	return rewritten, nil
+	return rewriteKubeconfigServer(out, c.cfg.endpoints())
 }
 
 // urlEncodeK3sVersion percent-encodes the `+` separator in build
@@ -206,7 +193,7 @@ func urlEncodeK3sVersion(v string) string {
 
 // shellQuote wraps an argument in single quotes for safe inclusion
 // in a remote shell command. Embedded single quotes are escaped
-// using the standard `'\''` trick. Used for the values we pass via
+// using the standard `'\”` trick. Used for the values we pass via
 // SSH: version strings (-rc3-k3s1) and INSTALL_K3S_EXEC arguments.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

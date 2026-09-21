@@ -102,35 +102,6 @@ func preflightHostPorts(c Config) []string {
 	return ports
 }
 
-// hostAPIPort scans the configured port forwards and returns the
-// host-side port that maps to guest 6443. Empty string means no
-// such forward is configured -- in which case Provision can't
-// reach the k3s API from the host and aborts.
-func (c Config) hostAPIPort() string {
-	for _, pf := range c.PortForwards {
-		if pf.Guest == "6443" {
-			return pf.Host
-		}
-	}
-	return ""
-}
-
-// hostRoutableIP returns the host-side IP at which the host reaches
-// the cluster's HTTP ingress. Same derivation as
-// config.CommonConfig.HostRoutableIP -- duplicated here because the
-// runtime Config already carries a translated PortForwards slice
-// and would otherwise need a back-reference to the on-disk config.
-// Empty string means no host-side override; the call site uses it
-// as the DNSHintIP option, which an empty value omits.
-func (c Config) hostRoutableIP() string {
-	for _, pf := range c.PortForwards {
-		if pf.Guest == "80" {
-			return "127.0.0.1"
-		}
-	}
-	return ""
-}
-
 // FromConfig translates the on-disk QEMUConfig (already
 // defaults-applied and validated by configfile.Load) into the
 // runtime Config consumed by Provision/Teardown.
@@ -410,7 +381,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 
 	// Install k3s. Method (script vs airgap) and version come from
 	// the user's QEMUConfig.K3s (defaulted by the config package).
-	if cfg.hostAPIPort() == "" {
+	if cfg.endpoints().APIPort == "" {
 		return nil, fmt.Errorf("portForwards must include a guest:6443 entry to reach k3s from the host")
 	}
 	if err := c.installK3s(ctx); err != nil {
@@ -455,7 +426,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:          cfg.Context,
 			GatewayClassName:     cfg.Gateway.ClassName,
-			DNSHintIP:            cfg.hostRoutableIP(),
+			DNSHintIP:            cfg.endpoints().IngressIP,
 			Logger:               logger,
 			ControllerCPURequest: cfg.Gateway.Resources.Controller.CPU,
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
@@ -682,14 +653,17 @@ func waitForExit(pid int, timeout time.Duration) bool {
 	return !pidAlive(pid)
 }
 
+// target is the guest's ssh endpoint.
+func (c *Cluster) target() sshexec.Target { return c.cfg.endpoints().sshTarget(c.sshKey) }
+
 // SSH runs a command on the VM via SSH.
 func (c *Cluster) SSH(ctx context.Context, command string) ([]byte, error) {
-	return sshExec(ctx, c.sshKey, c.cfg.SSHPort, command)
+	return sshexec.Exec(ctx, c.target(), command, nil)
 }
 
 // SCP copies a local file to the VM.
 func (c *Cluster) SCP(ctx context.Context, localPath, remotePath string) error {
-	return scpTo(ctx, c.sshKey, c.cfg.SSHPort, localPath, remotePath)
+	return sshexec.SCP(ctx, c.target(), localPath, remotePath)
 }
 
 // Context returns the kubectl context name the provisioner wrote
@@ -701,7 +675,7 @@ func (c *Cluster) Context() string { return c.cfg.Context }
 // tarballs into `ctr image import` on the node). Implements
 // provision.Cluster.
 func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader) ([]byte, error) {
-	return sshExecStdin(ctx, c.sshKey, c.cfg.SSHPort, command, stdin)
+	return sshexec.Exec(ctx, c.target(), command, stdin)
 }
 
 // writeRegistries renders the configured registries.yaml and
@@ -957,28 +931,7 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 		zap.String("ssh-port", c.cfg.SSHPort),
 	)
 	consolePath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-console.log")
-	args := []string{
-		"-name", c.cfg.Name,
-		"-machine", "accel=kvm",
-		"-cpu", "host",
-		"-smp", c.cfg.CPUs,
-		"-m", c.cfg.Memory,
-		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", diskPath),
-	}
-	if seedPath != "" {
-		args = append(args, "-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", seedPath))
-	}
-	for _, d := range c.extraDisks {
-		args = append(args, "-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", d))
-	}
-	args = append(args,
-		"-netdev", c.buildNetdev(),
-		"-device", "virtio-net-pci,netdev=net0",
-		"-serial", "file:"+consolePath,
-		"-display", "none",
-		"-daemonize",
-		"-pidfile", c.pidFile,
-	)
+	args := vmArgs(c.cfg, vmDisks{Boot: diskPath, Seed: seedPath, Extra: c.extraDisks}, consolePath, c.pidFile)
 	cmd := exec.CommandContext(ctx, "qemu-system-x86_64", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("start VM: %s: %w", out, err)
@@ -1008,7 +961,7 @@ func (c *Cluster) waitForSSH(ctx context.Context) error {
 	deadline := start.Add(sshWaitTimeout)
 	nextHeartbeat := start.Add(sshWaitHeartbeat)
 	for {
-		if _, err := sshExec(ctx, c.sshKey, c.cfg.SSHPort, "true"); err == nil {
+		if _, err := c.SSH(ctx, "true"); err == nil {
 			return nil
 		}
 		now := time.Now()
@@ -1026,40 +979,5 @@ func (c *Cluster) waitForSSH(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
-	}
-}
-
-func (c *Cluster) buildNetdev() string {
-	netdev := fmt.Sprintf("user,id=net0,hostfwd=tcp::%s-:22", c.cfg.SSHPort)
-	for _, pf := range c.cfg.PortForwards {
-		netdev += fmt.Sprintf(",hostfwd=tcp::%s-:%s", pf.Host, pf.Guest)
-	}
-	return netdev
-}
-
-func sshExec(ctx context.Context, keyPath, port, command string) ([]byte, error) {
-	return sshexec.Exec(ctx, sshTarget(keyPath, port), command, nil)
-}
-
-// sshExecStdin is the same as sshExec but pipes stdin into the
-// remote process. Callers that don't need stdin pass nil; callers
-// that do (image load streaming a tar archive) supply an io.Reader.
-func sshExecStdin(ctx context.Context, keyPath, port, command string, stdin io.Reader) ([]byte, error) {
-	return sshexec.Exec(ctx, sshTarget(keyPath, port), command, stdin)
-}
-
-func scpTo(ctx context.Context, keyPath, port, localPath, remotePath string) error {
-	return sshexec.SCP(ctx, sshTarget(keyPath, port), localPath, remotePath)
-}
-
-// sshTarget builds the sshexec.Target the qemu provisioner uses.
-// User and host are fixed by the cloud-init template (`ystack`)
-// and the host-side port forward (`127.0.0.1:<sshPort>`).
-func sshTarget(keyPath, port string) sshexec.Target {
-	return sshexec.Target{
-		Host:    "127.0.0.1",
-		Port:    port,
-		User:    "ystack",
-		KeyPath: keyPath,
 	}
 }
