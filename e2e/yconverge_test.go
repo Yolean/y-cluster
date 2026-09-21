@@ -194,6 +194,10 @@ func TestCustomization_BackendQaResolvesDbDependency(t *testing.T) {
 	if dbIdx < 0 {
 		t.Fatalf("db dependency not resolved from qa overlay: %v", result.Steps)
 	}
+	// The base is part of the overlay, not a step before it.
+	if len(result.Steps) != 2 {
+		t.Fatalf("want the db dependency and the overlay, got %v", result.Steps)
+	}
 }
 
 // --- Idempotency ---
