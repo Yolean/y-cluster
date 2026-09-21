@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/yaml"
+
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 )
 
@@ -223,5 +225,33 @@ func TestPrepareInguestScript_ReplacesStaticNetplan(t *testing.T) {
 	}
 	if strings.Contains(renderNetworkConfig(*tapConfig(t).Tap), "set-name") {
 		t.Error("the tap NIC must keep its kernel name: the exported netplan matches e* interfaces")
+	}
+}
+
+// Found by the first tap e2e run: after stop/start the guest had lost
+// its address. A restart boots without the seed, cloud-init falls
+// back to DataSourceNone and re-renders the network as DHCP, which
+// nothing answers on a tap device.
+func TestCloudInitUserData_StaticNetworkSurvivesRestart(t *testing.T) {
+	tap := renderCloudInitUserData("vm", "ssh-ed25519 KEY t@h\n", false, true)
+	for _, want := range []string{
+		"/etc/cloud/cloud.cfg.d/99-y-cluster-keep-network-config.cfg",
+		"network: {config: disabled}",
+	} {
+		if !strings.Contains(tap, want) {
+			t.Errorf("tap user-data lacks %q:\n%s", want, tap)
+		}
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal([]byte(tap), &parsed); err != nil {
+		t.Fatalf("tap user-data is not valid YAML: %v\n%s", err, tap)
+	}
+	if files, _ := parsed["write_files"].([]any); len(files) != 2 {
+		t.Errorf("want 2 write_files entries, got %v", parsed["write_files"])
+	}
+
+	user := renderCloudInitUserData("vm", "ssh-ed25519 KEY t@h\n", false, false)
+	if strings.Contains(user, "keep-network-config") {
+		t.Errorf("user mode relies on the DHCP fallback and must stay as it was:\n%s", user)
 	}
 }

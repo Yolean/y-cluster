@@ -855,7 +855,7 @@ func (c *Cluster) ensureSSHKey() error {
 // on hosts that don't provide them. The "no SSH banner" failure
 // mode on Hetzner was cloud-init blocking sshd's network ordering;
 // this pin prevents the recurrence.
-func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel bool) string {
+func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel, staticNetwork bool) string {
 	// Mount block. When the operator has configured a DataDisk
 	// for this VM, the labeled qcow2 is attached as an extra
 	// virtio drive and the kernel needs a fstab entry to mount
@@ -867,6 +867,23 @@ func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel bool) st
 	if mountDataLabel {
 		mounts = `mounts:
   - [ "LABEL=` + DataDiskLabel + `", "/data/yolean", "ext4", "defaults,nofail", "0", "2" ]
+`
+	}
+	// A start after the first boot runs without the seed image, so
+	// cloud-init finds no datasource, treats the VM as a new instance
+	// and re-renders the network config as its fallback: DHCP on the
+	// first NIC. Under user-mode networking slirp answers that and
+	// nothing changes. On a tap device nothing answers, and the static
+	// address from the seed's network-config would be gone after the
+	// first stop/start. With network config disabled from the first
+	// boot's config stage on, the netplan rendered in its earlier
+	// local stage stays as it is.
+	keepNetwork := ""
+	if staticNetwork {
+		keepNetwork = `  - path: /etc/cloud/cloud.cfg.d/99-y-cluster-keep-network-config.cfg
+    permissions: '0644'
+    content: |
+      network: {config: disabled}
 `
 	}
 	return fmt.Sprintf(`#cloud-config
@@ -887,7 +904,7 @@ package_update: false
       # that don't provide them. NoCloud covers the qemu seed; None lets
       # cloud-init proceed when no NoCloud source is present.
       datasource_list: [NoCloud, None]
-`, hostname, strings.TrimSpace(sshPubKey), mounts)
+%s`, hostname, strings.TrimSpace(sshPubKey), mounts, keepNetwork)
 }
 
 func (c *Cluster) createCloudInitSeed() (string, error) {
@@ -896,7 +913,7 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 		return "", fmt.Errorf("read SSH public key: %w", err)
 	}
 
-	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "")
+	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "", c.cfg.Tap != nil)
 
 	// Name-prefix the cloud-init source so two concurrent provisions
 	// in the same cacheDir don't race on the file. Per-VM artifacts
