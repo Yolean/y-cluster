@@ -143,6 +143,74 @@ func TestProvisionTeardown(t *testing.T) {
 	}
 }
 
+// Teardown is given a context name and nothing else, so it removes
+// the kubeconfig entries of that name too. The other provisioners do;
+// a context left behind points at an address Hetzner hands to the
+// next customer.
+func TestTeardown_RemovesTheKubeContext(t *testing.T) {
+	newFakeCloud(t)
+	newFakeNode(t)
+	kubeconfigPath := testEnv(t)
+
+	if _, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop()); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if err := Teardown(context.Background(), "qa-one", zap.NewNop()); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if kc := kubeContexts(t, kubeconfigPath); strings.Contains(kc, "qa-one") {
+		t.Errorf("kubeconfig still mentions the context after teardown:\n%s", kc)
+	}
+}
+
+// The sidecar is a cache: losing it (another machine, a cleaned home
+// directory) must not decide whether the load balancer keeps billing.
+// What teardown needs to know is on the resources themselves, as the
+// labels Provision put there.
+func TestTeardown_WithoutTheSidecar(t *testing.T) {
+	cloud := newFakeCloud(t)
+	newFakeNode(t)
+	testEnv(t)
+
+	if _, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop()); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if err := deleteState(CacheDir(), "qa-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Teardown(context.Background(), "qa-one", zap.NewNop()); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got := cloud.inventory(); len(got) != 0 {
+		t.Errorf("project after teardown without a sidecar still holds %v", got)
+	}
+}
+
+// The same, after someone has also deleted the server by hand in the
+// Hetzner console: the certificate still says which lb-group it was
+// for.
+func TestTeardown_WithoutTheSidecarOrTheServer(t *testing.T) {
+	cloud := newFakeCloud(t)
+	newFakeNode(t)
+	testEnv(t)
+
+	c, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop())
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if err := deleteState(CacheDir(), "qa-one"); err != nil {
+		t.Fatal(err)
+	}
+	delete(cloud.servers, c.State().ServerID)
+
+	if err := Teardown(context.Background(), "qa-one", zap.NewNop()); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got := cloud.inventory(); len(got) != 0 {
+		t.Errorf("project still holds %v", got)
+	}
+}
+
 // Two contexts of one lb-group share the load balancer. The first
 // teardown takes its own certificate off the LB and leaves the rest;
 // the second takes the LB with it.

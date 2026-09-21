@@ -153,7 +153,7 @@ func ensureLoadBalancer(ctx context.Context, hc *hcloud.Client, cfg lbConfig, fi
 		},
 		Labels: map[string]string{
 			"managed-by": "y-cluster",
-			"lb-group":   cfg.LBGroup,
+			labelLBGroup: cfg.LBGroup,
 		},
 	})
 	if err != nil {
@@ -204,7 +204,7 @@ func uploadCertificate(ctx context.Context, hc *hcloud.Client, contextName, lbGr
 		PrivateKey:  string(keyPEM),
 		Labels: map[string]string{
 			"managed-by": "y-cluster",
-			"lb-group":   lbGroup,
+			labelLBGroup: lbGroup,
 			"context":    contextName,
 		},
 	})
@@ -338,52 +338,21 @@ type lbConfig struct {
 	Location string
 }
 
-// deleteLBIfEmpty deletes the LB iff no servers managed by us with
-// the given lb-group remain. Called from Teardown after the server
-// delete completes; the label_selector target makes the just-
-// deleted server fall out of the LB target list automatically, so
-// we only need to count remaining matched servers.
-//
-// Idempotent: missing LB = nothing to do.
-func deleteLBIfEmpty(ctx context.Context, hc *hcloud.Client, lbGroup string, lbID int64, logger *zap.Logger) error {
-	if lbGroup == "" {
-		return nil
-	}
-	servers, err := hc.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
-		ListOpts: hcloud.ListOpts{LabelSelector: labelSelectorForGroup(lbGroup)},
-	})
-	if err != nil {
-		return fmt.Errorf("list lb-group %q servers: %w", lbGroup, err)
-	}
-	if len(servers) > 0 {
-		logger.Info("LB retains members; not deleting",
-			zap.String("lbGroup", lbGroup),
-			zap.Int("remainingServers", len(servers)))
-		return nil
-	}
-	// Last server gone; delete the LB.
-	var lb *hcloud.LoadBalancer
+// findLoadBalancer returns the lb-group's load balancer, by the id a
+// state sidecar remembered or else by its name, or nil.
+func findLoadBalancer(ctx context.Context, hc *hcloud.Client, lbID int64, lbGroup string) (*hcloud.LoadBalancer, error) {
 	if lbID != 0 {
-		lb, _, err = hc.LoadBalancer.GetByID(ctx, lbID)
+		lb, _, err := hc.LoadBalancer.GetByID(ctx, lbID)
 		if err != nil {
-			return fmt.Errorf("describe LB id=%d: %w", lbID, err)
+			return nil, fmt.Errorf("describe LB id=%d: %w", lbID, err)
+		}
+		if lb != nil {
+			return lb, nil
 		}
 	}
-	if lb == nil {
-		// Fall back to name lookup -- the operator may have
-		// torn down state out of band but not the LB.
-		lb, _, err = hc.LoadBalancer.GetByName(ctx, lbName(lbGroup))
-		if err != nil {
-			return fmt.Errorf("describe LB by name: %w", err)
-		}
+	lb, _, err := hc.LoadBalancer.GetByName(ctx, lbName(lbGroup))
+	if err != nil {
+		return nil, fmt.Errorf("describe LB %q: %w", lbName(lbGroup), err)
 	}
-	if lb == nil {
-		return nil
-	}
-	logger.Info("deleting Hetzner LB (last lb-group member gone)",
-		zap.Int64("id", lb.ID), zap.String("name", lb.Name))
-	if _, err := hc.LoadBalancer.Delete(ctx, lb); err != nil {
-		return fmt.Errorf("delete LB: %w", err)
-	}
-	return nil
+	return lb, nil
 }

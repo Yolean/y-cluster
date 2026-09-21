@@ -33,6 +33,7 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
@@ -50,6 +51,11 @@ const HCloudTokenEnv = "HCLOUD_TOKEN"
 // can list-and-cull without colliding with manual / other-tool
 // resources in the same project.
 const labelManagedBy = "managed-by=y-cluster"
+
+// labelLBGroup is the label key that says which lb-group's load
+// balancer a server or certificate belongs to. The LB targets servers
+// by it, and Teardown reads it back when there is no state sidecar.
+const labelLBGroup = "lb-group"
 
 // Cluster is the running-state handle Provision returns. Keeps the
 // fields cluster.Lookup needs to wire ctr / crictl / RunShell over
@@ -184,7 +190,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		Labels: map[string]string{
 			"managed-by": "y-cluster",
 			"context":    cfg.Context,
-			"lb-group":   cfg.LBGroup,
+			labelLBGroup: cfg.LBGroup,
 		},
 	})
 	if err != nil {
@@ -397,9 +403,11 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 	return c, nil
 }
 
-// Teardown deletes the Hetzner server and its uploaded SSH key
-// resource, removes the state sidecar, and shreds the local
-// keypair. Idempotent: missing resources are not errors.
+// Teardown removes everything Provision made for contextName: the
+// server, its certificate (taken off the lb-group's load balancer
+// first if that survives), the load balancer if this was its last
+// server, the ssh key, the kubeconfig entries, the local keypair and
+// the state sidecar. Idempotent: missing resources are not errors.
 func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -408,14 +416,19 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 	if err != nil {
 		return err
 	}
-	cacheDir := CacheDir()
+	return teardown(ctx, hc, CacheDir(), contextName, logger)
+}
 
-	// Server delete: prefer the state sidecar's server ID, fall
-	// back to a name-based lookup so a missing sidecar (e.g. the
-	// operator deleted it manually) doesn't strand the server.
-	st, _ := loadState(cacheDir, contextName) // ignore missing
+// teardown is Teardown with the client in hand, which is how a failed
+// Provision undoes itself.
+func teardown(ctx context.Context, hc *hcloud.Client, cacheDir, contextName string, logger *zap.Logger) error {
+	// The sidecar is a cache of ids. Everything it holds can be found
+	// again by name or label, so a missing one (another machine, a
+	// cleaned home directory) does not strand anything.
+	st, _ := loadState(cacheDir, contextName)
 
 	var srv *hcloud.Server
+	var err error
 	if st.ServerID != 0 {
 		srv, _, err = hc.Server.GetByID(ctx, st.ServerID)
 		if err != nil {
@@ -428,58 +441,7 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 			return fmt.Errorf("describe server name=%q: %w", contextName, err)
 		}
 	}
-	if srv != nil {
-		logger.Info("deleting Hetzner server",
-			zap.Int64("id", srv.ID), zap.String("name", srv.Name))
-		_, _, err := hc.Server.DeleteWithResult(ctx, srv)
-		if err != nil {
-			return fmt.Errorf("delete server: %w", err)
-		}
-	} else {
-		logger.Info("no server to delete", zap.String("context", contextName))
-	}
 
-	// Order from here is delicate -- Hetzner refuses to delete a
-	// Certificate that's still referenced by an LB service. So:
-	//
-	//   1. If LB will be deleted (we were the last lb-group member),
-	//      the LB delete itself releases all cert references; we
-	//      just delete our Certificate afterwards.
-	//   2. If LB stays alive (other servers remain), detach our
-	//      cert from the 443 service first, THEN delete it.
-	//
-	// deleteLBIfEmpty handles (1); the path below covers (2).
-	if st.CertificateID != 0 && st.LBID != 0 {
-		if lbForDetach, _, err := hc.LoadBalancer.GetByID(ctx, st.LBID); err == nil && lbForDetach != nil {
-			// Only detach if the LB is going to survive this
-			// teardown -- otherwise the upcoming delete makes
-			// the UpdateService call wasted work (and noisy if
-			// the LB delete races us).
-			servers, lerr := hc.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
-				ListOpts: hcloud.ListOpts{LabelSelector: labelSelectorForGroup(st.LBGroup)},
-			})
-			if lerr != nil {
-				return fmt.Errorf("list lb-group %q servers: %w", st.LBGroup, lerr)
-			}
-			if len(servers) > 0 {
-				if err := detachCertificateFromLB(ctx, hc, lbForDetach, st.CertificateID, logger); err != nil {
-					return fmt.Errorf("detach cert from LB: %w", err)
-				}
-			}
-		}
-	}
-
-	// LB delete IFF this server was the last lb-group member. The
-	// label_selector target on the LB drops the just-deleted
-	// server from rotation automatically, so we just need to
-	// count remaining managed-by=y-cluster,lb-group=<grp> servers.
-	if err := deleteLBIfEmpty(ctx, hc, st.LBGroup, st.LBID, logger); err != nil {
-		return fmt.Errorf("teardown LB: %w", err)
-	}
-
-	// Certificate delete: now safe whether we deleted the LB or
-	// just detached. ID-then-name fallback so a stranded sidecar
-	// doesn't strand the cert.
 	var hcCert *hcloud.Certificate
 	if st.CertificateID != 0 {
 		hcCert, _, err = hc.Certificate.GetByID(ctx, st.CertificateID)
@@ -493,6 +455,64 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 			return fmt.Errorf("describe certificate name=%q: %w", contextName, err)
 		}
 	}
+
+	// Which load balancer this context shares is on the labels
+	// Provision gave the server and the certificate.
+	lbGroup := st.LBGroup
+	if lbGroup == "" && srv != nil {
+		lbGroup = srv.Labels[labelLBGroup]
+	}
+	if lbGroup == "" && hcCert != nil {
+		lbGroup = hcCert.Labels[labelLBGroup]
+	}
+
+	if srv != nil {
+		logger.Info("deleting Hetzner server",
+			zap.Int64("id", srv.ID), zap.String("name", srv.Name))
+		if _, _, err := hc.Server.DeleteWithResult(ctx, srv); err != nil {
+			return fmt.Errorf("delete server: %w", err)
+		}
+	} else {
+		logger.Info("no server to delete", zap.String("context", contextName))
+	}
+
+	// Order from here is delicate -- Hetzner refuses to delete a
+	// Certificate that's still referenced by an LB service. So:
+	//
+	//   1. If the LB is deleted (we were the last lb-group member),
+	//      that releases all cert references; we delete our
+	//      Certificate afterwards.
+	//   2. If the LB stays (other servers remain), our cert comes
+	//      off its 443 service first, THEN is deleted.
+	if lbGroup != "" {
+		lb, err := findLoadBalancer(ctx, hc, st.LBID, lbGroup)
+		if err != nil {
+			return err
+		}
+		if lb != nil {
+			servers, err := hc.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+				ListOpts: hcloud.ListOpts{LabelSelector: labelSelectorForGroup(lbGroup)},
+			})
+			if err != nil {
+				return fmt.Errorf("list lb-group %q servers: %w", lbGroup, err)
+			}
+			switch {
+			case len(servers) == 0:
+				logger.Info("deleting Hetzner LB (last lb-group member gone)",
+					zap.Int64("id", lb.ID), zap.String("name", lb.Name))
+				if _, err := hc.LoadBalancer.Delete(ctx, lb); err != nil {
+					return fmt.Errorf("delete LB: %w", err)
+				}
+			case hcCert != nil:
+				logger.Info("LB retains members; not deleting",
+					zap.String("lbGroup", lbGroup), zap.Int("remainingServers", len(servers)))
+				if err := detachCertificateFromLB(ctx, hc, lb, hcCert.ID, logger); err != nil {
+					return fmt.Errorf("detach cert from LB: %w", err)
+				}
+			}
+		}
+	}
+
 	if hcCert != nil {
 		logger.Info("deleting Hetzner Certificate",
 			zap.Int64("id", hcCert.ID), zap.String("name", hcCert.Name))
@@ -501,7 +521,6 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 		}
 	}
 
-	// SSH key delete.
 	keyName := contextName
 	if st.SSHKeyName != "" {
 		keyName = st.SSHKeyName
@@ -517,7 +536,14 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 		}
 	}
 
-	// Local keypair + state sidecar.
+	// The context names an address Hetzner hands to its next
+	// customer.
+	if mgr, err := kubeconfig.FromEnv(contextName, contextName, logger); err != nil {
+		logger.Warn("kubeconfig manager", zap.Error(err))
+	} else {
+		mgr.CleanupStale()
+	}
+
 	keyPath := filepath.Join(cacheDir, contextName+"-ssh")
 	for _, p := range []string{keyPath, keyPath + ".pub"} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
@@ -527,7 +553,6 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 	if err := deleteState(cacheDir, contextName); err != nil {
 		logger.Warn("remove state sidecar", zap.Error(err))
 	}
-
 	return nil
 }
 
@@ -711,6 +736,6 @@ func waitForActions(ctx context.Context, hc *hcloud.Client, actions []*hcloud.Ac
 func labelSelectorForGroup(lbGroup string) string {
 	return strings.Join([]string{
 		labelManagedBy,
-		"lb-group=" + lbGroup,
+		labelLBGroup + "=" + lbGroup,
 	}, ",")
 }
