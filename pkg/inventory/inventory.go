@@ -100,6 +100,11 @@ func Save(rec Record) error {
 // teardown of a cluster provisioned by an older binary, or a
 // re-run teardown, must not error here.
 func Remove(context string) error {
+	// Same guard as Save: the name becomes a file name, and this
+	// function deletes.
+	if context == "" || strings.ContainsAny(context, "/\\") {
+		return fmt.Errorf("inventory: unusable context name %q", context)
+	}
 	dir, err := Dir()
 	if err != nil {
 		return err
