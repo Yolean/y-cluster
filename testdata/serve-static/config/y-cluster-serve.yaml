@@ -1,8 +1,0 @@
-# yaml-language-server: $schema=../../../pkg/serve/schema/y-cluster-serve.schema.json
-port: __PORT__
-type: static
-static:
-  dir: ../files
-  root: /assets
-  yamlToJson: true
-  dirTrailingSlash: redirect
