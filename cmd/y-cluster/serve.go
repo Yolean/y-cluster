@@ -10,7 +10,7 @@ import (
 )
 
 // serveCmd wires the `y-cluster serve` subcommands. The CLI is a thin
-// adapter — every action delegates to pkg/serve.
+// adapter -- every action delegates to pkg/serve.
 func serveCmd() *cobra.Command {
 	var (
 		configDirs []string

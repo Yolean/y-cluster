@@ -19,7 +19,7 @@
 // schemagen also runs a collision check: it walks each provider
 // struct's *own* (non-embedded) yaml field names and fails if the
 // same name appears in more than one provider. CommonConfig fields
-// are exempt — they're shared by design. The check stops a future
+// are exempt -- they're shared by design. The check stops a future
 // per-provider field from accidentally shadowing or colliding with
 // a name that should have been promoted to common.
 //
@@ -243,7 +243,7 @@ func setSchemaID(data []byte, schemaID string) ([]byte, error) {
 // they're shared by design and surface in every provider via
 // `yaml:",inline"`.
 func checkCollisions(providers []providerTarget) error {
-	seen := map[string]string{} // yaml name → first provider that declared it
+	seen := map[string]string{} // yaml name -> first provider that declared it
 	for _, p := range providers {
 		for _, name := range ownYAMLNames(reflect.TypeOf(p.sample).Elem()) {
 			if prev, ok := seen[name]; ok {
@@ -382,14 +382,14 @@ func reflectSchema(sample any, pin pinFile) ([]byte, error) {
 	// invopop wrote from the struct tag (`"default": "__K3S_TAG__"`).
 	// `__K3S_TAG__` is the GitHub-release form of the version (with
 	// `+k3sN` build-metadata separator). The container image is no
-	// longer a config field — the docker provisioner derives it
-	// from the version at runtime — so no `__K3S_IMAGE__`
+	// longer a config field -- the docker provisioner derives it
+	// from the version at runtime -- so no `__K3S_IMAGE__`
 	// substitution here.
 	data = bytes.ReplaceAll(data, []byte(`"__K3S_TAG__"`), []byte(jsonString(pin.Version)))
 
 	// Inject the provider enum into the embedded CommonConfig's
-	// schema. invopop has no idea what values are legal — that
-	// list lives in config.AllProviders — so we add the enum here
+	// schema. invopop has no idea what values are legal -- that
+	// list lives in config.AllProviders -- so we add the enum here
 	// instead of hand-writing it in a struct tag we'd then have to
 	// keep in sync.
 	data, err = injectProviderEnum(data, config.AllProviders)
@@ -404,7 +404,7 @@ func reflectSchema(sample any, pin pinFile) ([]byte, error) {
 // constraint to every `provider` property whose surrounding object
 // also declares `"type": "string"`. The reflector emits the
 // property without an enum because the tag deliberately omits
-// `enum=...` literals — schemagen owns the value list via
+// `enum=...` literals -- schemagen owns the value list via
 // config.AllProviders so the source of truth is one place.
 func injectProviderEnum(data []byte, providers []string) ([]byte, error) {
 	var doc map[string]any

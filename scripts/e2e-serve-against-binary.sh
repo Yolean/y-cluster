@@ -3,7 +3,7 @@
 #
 # Expects $Y_CLUSTER_BIN to point at a y-cluster executable. Creates a
 # temp workspace with a two-base y-kustomize-local fixture, runs
-#   serve ensure → GET → serve stop
+#   serve ensure -> GET -> serve stop
 # and exits non-zero on any assertion failure.
 #
 # Intended to run in .github/workflows/e2e-release.yaml on ubuntu-latest

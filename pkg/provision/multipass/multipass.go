@@ -2,7 +2,7 @@
 // Multipass-managed Ubuntu VM. Multipass uses the system's native
 // hypervisor (Hyperkit / QEMU+HVF on macOS, QEMU+KVM on Linux) and
 // integrates with the host network stack so the VM gets its own
-// host-routable IP — no port forwarding, no host loopback tunnels.
+// host-routable IP -- no port forwarding, no host loopback tunnels.
 //
 // macOS is the primary target: the qemu provisioner needs /dev/kvm
 // (Linux only) and the docker provisioner trades the real-Linux-kernel

@@ -107,7 +107,8 @@ func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader
 
 // singleQuote wraps a string in POSIX single quotes for safe inclusion
 // in a remote shell command. Single quotes inside the string are
-// escaped via the standard '\” trick. Used to pass an entire `sh -c`
+// escaped the standard way: close the quote, add an escaped quote,
+// reopen (the replacement below). Used to pass an entire `sh -c`
 // command line through ssh / multipass-exec without re-parsing.
 func singleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -115,9 +116,8 @@ func singleQuote(s string) string {
 
 // shellQuoteJoin shell-quotes each arg with single quotes (POSIX-
 // safe) and joins with leading spaces. Empty `args` returns "".
-// Single quotes inside an arg become `'\”` per the standard
-// trick — closing the quoted string, escaping a literal quote,
-// reopening.
+// Single quotes inside an arg are escaped as in singleQuote:
+// closing the quoted string, escaping a literal quote, reopening.
 func shellQuoteJoin(args []string) string {
 	if len(args) == 0 {
 		return ""

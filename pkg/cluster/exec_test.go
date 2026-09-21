@@ -28,8 +28,8 @@ func TestBuildQemuRemote_NoArgs(t *testing.T) {
 // TestSingleQuote covers the helper RunShell uses to wrap an
 // entire `sh -c <cmd>` string for ssh / multipass-exec -- the
 // caller's command must survive a second round of shell parsing
-// without losing semantics. Embedded single quotes go through
-// the standard `'\”` trick.
+// without losing semantics. Embedded single quotes are closed,
+// escaped and reopened.
 func TestSingleQuote(t *testing.T) {
 	cases := []struct {
 		in   string

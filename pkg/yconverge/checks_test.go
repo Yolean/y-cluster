@@ -63,7 +63,7 @@ func TestCheckRunner_ExecFailure(t *testing.T) {
 }
 
 func TestCheckRunner_ExecRetries(t *testing.T) {
-	// Create a file that the command checks — first calls fail, last succeeds
+	// Create a file that the command checks -- first calls fail, last succeeds
 	dir := t.TempDir()
 	runner := &CheckRunner{
 		Context:   "test",

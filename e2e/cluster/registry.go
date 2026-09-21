@@ -26,7 +26,7 @@ type Registry struct {
 	// `<HostPort>/<repo>:<tag>` as the image reference.
 	HostPort string
 
-	// Endpoint is "127.0.0.1:<port>" — the address callers feed
+	// Endpoint is "127.0.0.1:<port>" -- the address callers feed
 	// to crane.Push or any go-containerregistry remote.* call.
 	Endpoint string
 }
@@ -39,7 +39,7 @@ var (
 
 // LocalRegistry returns the process-wide local registry,
 // bringing it up on the first call. Skips the test if Docker
-// isn't available — same precondition the kwok harness has.
+// isn't available -- same precondition the kwok harness has.
 //
 // CI runners with the registry already pulled get a sub-second
 // start; on a cold cache the first call is the registry pull.
@@ -114,7 +114,7 @@ func waitForRegistry(ctx context.Context, endpoint string, timeout time.Duration
 		conn, err := net.DialTimeout("tcp", endpoint, 1*time.Second)
 		if err == nil {
 			_ = conn.Close()
-			// TCP up — the v2 server is ready by the time
+			// TCP up -- the v2 server is ready by the time
 			// `registry:2` accepts connections; no need to roundtrip
 			// HTTP for this.
 			return nil
@@ -142,6 +142,6 @@ func (r *Registry) stop() error {
 
 // Stop is the exported form of stop, for tests that assert
 // behaviour in absence of a registry. The harness restarts the
-// container at TestMain time only — there's no automatic
+// container at TestMain time only -- there's no automatic
 // re-start.
 func (r *Registry) Stop() error { return r.stop() }

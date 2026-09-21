@@ -25,7 +25,7 @@ import (
 // from any PodSpec the stream contains. Both
 // `containers[*].image` and `initContainers[*].image` count,
 // across Pod / Deployment / StatefulSet / DaemonSet /
-// ReplicaSet / Job / CronJob — i.e. the kinds whose spec
+// ReplicaSet / Job / CronJob -- i.e. the kinds whose spec
 // ultimately wraps a corev1.PodSpec.
 //
 // Empty / missing image fields are skipped (kubectl would
@@ -78,8 +78,8 @@ func splitYAMLDocs(b []byte) [][]byte {
 }
 
 // extractImages adds every image reference under doc's PodSpec
-// (if any) to set. A document without a recognised PodSpec —
-// ConfigMap, Service, Secret, etc. — contributes nothing.
+// (if any) to set. A document without a recognised PodSpec --
+// ConfigMap, Service, Secret, etc. -- contributes nothing.
 func extractImages(doc map[string]any, set map[string]struct{}) {
 	spec := findPodSpec(doc)
 	if spec == nil {

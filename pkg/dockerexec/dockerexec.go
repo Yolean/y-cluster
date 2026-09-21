@@ -6,10 +6,10 @@
 // docker". Same daemon socket as the docker CLI, just with
 // machine-readable errors:
 //
-//	cerrdefs.IsNotFound        → container missing
-//	cerrdefs.IsConflict        → name in use
-//	cerrdefs.IsPermissionDenied → socket perms / rootless misconfig
-//	net.OpError                → daemon down (no such file/socket)
+//	cerrdefs.IsNotFound        -> container missing
+//	cerrdefs.IsConflict        -> name in use
+//	cerrdefs.IsPermissionDenied -> socket perms / rootless misconfig
+//	net.OpError                -> daemon down (no such file/socket)
 //
 // We share the wrapper between the docker provisioner (which
 // runs/removes the container) and pkg/cluster (which exec's
@@ -125,7 +125,7 @@ func Logs(ctx context.Context, cli *client.Client, name string, tail string) ([]
 }
 
 // Exec runs cmd inside the container with stdin/stdout/stderr
-// passthrough — the same shape exec.Cmd has, so callers that
+// passthrough -- the same shape exec.Cmd has, so callers that
 // previously shelled out to `docker exec` switch with minimal
 // friction. Returns the exec's exit code via *ExitError when
 // non-zero so callers can categorise.

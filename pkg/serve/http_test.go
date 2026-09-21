@@ -11,7 +11,7 @@ import (
 func TestDetectContentType_YAML(t *testing.T) {
 	for _, ext := range []string{"foo.yaml", "bar.yml", "x.YAML"} {
 		if DetectContentType(ext) != yamlMIME {
-			t.Fatalf("%s → %s, want %s", ext, DetectContentType(ext), yamlMIME)
+			t.Fatalf("%s -> %s, want %s", ext, DetectContentType(ext), yamlMIME)
 		}
 	}
 }

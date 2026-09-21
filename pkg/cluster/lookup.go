@@ -4,9 +4,9 @@
 //
 // It replaces ystack's bash trio:
 //
-//	y-cluster-local-detect  → Lookup
-//	y-cluster-local-ctr     → RunCtr
-//	y-cluster-local-crictl  → RunCrictl
+//	y-cluster-local-detect  -> Lookup
+//	y-cluster-local-ctr     -> RunCtr
+//	y-cluster-local-crictl  -> RunCrictl
 //
 // Discovery is probe-based rather than name-convention-based:
 // instead of requiring the kubeconfig cluster to be named

@@ -116,7 +116,7 @@ Combine flags to delete several subtrees in one invocation.`,
 }
 
 // purgeDir removes path. A non-existent path is treated as a
-// no-op so `purge` is idempotent — we don't want re-runs to
+// no-op so `purge` is idempotent -- we don't want re-runs to
 // error just because the first one already cleaned up.
 func purgeDir(w io.Writer, path string) error {
 	if _, err := os.Stat(path); err != nil {

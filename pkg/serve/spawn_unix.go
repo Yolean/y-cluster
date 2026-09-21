@@ -13,7 +13,7 @@ import (
 // spawnBackground re-execs the current binary in daemon mode, detaches
 // it (Setsid), redirects stdout/stderr to paths.Log, closes stdin, and
 // returns the child pid. The caller is responsible for not waiting on
-// the child — we detach via cmd.Process.Release().
+// the child -- we detach via cmd.Process.Release().
 func spawnBackground(execPath string, args []string, paths StatePaths) (int, error) {
 	logf, err := os.OpenFile(paths.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {

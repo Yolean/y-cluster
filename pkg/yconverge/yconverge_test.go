@@ -54,7 +54,7 @@ step: checks: []
 
 func TestRun_NoCueModule(t *testing.T) {
 	root := t.TempDir()
-	// No cue.mod — should still work (single step, no dep resolution)
+	// No cue.mod -- should still work (single step, no dep resolution)
 	writeFile(t, filepath.Join(root, "base/kustomization.yaml"), "")
 
 	logger, _ := zap.NewDevelopment()

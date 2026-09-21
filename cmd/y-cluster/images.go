@@ -17,8 +17,8 @@ import (
 	"github.com/Yolean/y-cluster/pkg/images"
 )
 
-// imagesCmd is the `y-cluster images` subcommand group: list →
-// cache → load. List extracts refs from a YAML stream; cache
+// imagesCmd is the `y-cluster images` subcommand group: list ->
+// cache -> load. List extracts refs from a YAML stream; cache
 // pulls one ref into the shared OCI cache; load imports a local
 // OCI archive into the cluster's containerd.
 func imagesCmd() *cobra.Command {
@@ -49,7 +49,7 @@ YAML mode (positional argument):
   -        read stdin
   Prints every image reference found in any PodSpec
   (Deployment, StatefulSet, DaemonSet, Job, CronJob, ReplicaSet,
-  Pod). Output is sorted, deduplicated, one ref per line —
+  Pod). Output is sorted, deduplicated, one ref per line -- 
   suitable for piping to xargs or a downstream tool.
   Pipe a kustomize build through it:
     kubectl kustomize ./base | y-cluster images list -
@@ -93,7 +93,7 @@ error, 2 on usage.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&contextName, "context", "", "kubeconfig context — query the cluster's containerd (mutex with positional input)")
+	cmd.Flags().StringVar(&contextName, "context", "", "kubeconfig context -- query the cluster's containerd (mutex with positional input)")
 	cmd.Flags().StringVar(&format, "format", "table", "cluster mode output format: table|json")
 	cmd.Flags().StringVar(&sortKey, "sort", "size", "cluster mode sort key: size (desc) | name (asc)")
 	return cmd
@@ -402,9 +402,9 @@ func loadFromRef(ctx context.Context, lr *cluster.LookupResult, ref, cacheDir st
 // openInput resolves the positional input arg to an io.Reader
 // plus a deferred-close callback. Three modes by prefix detection:
 //
-//   - "-"                       → stdin (no close)
-//   - "http://" / "https://"    → HTTP GET, stream the response body
-//   - anything else             → file open
+//   - "-"                       -> stdin (no close)
+//   - "http://" / "https://"    -> HTTP GET, stream the response body
+//   - anything else             -> file open
 //
 // We expose the close callback (rather than just an io.ReadCloser)
 // because stdin must not be Close()d -- the test runner reuses it.
