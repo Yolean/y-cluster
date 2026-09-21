@@ -82,6 +82,9 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return fmt.Errorf("kubectl not found in PATH; install kubectl (prepare-export now snapshots reconciled Gateway state, which needs kubectl)")
 	}
+	if _, err := exec.LookPath("zstd"); err != nil {
+		return fmt.Errorf("zstd not found in PATH; install with: sudo apt install zstd (prepare-export compresses the /data/yolean seed with it)")
+	}
 
 	cfg, err := loadState(cacheDir, name)
 	if err != nil {
@@ -153,20 +156,20 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 	}
 	defer os.Remove(scriptPath)
 
-	// Build the seed assets. virt-tar-out is part of the same
-	// libguestfs-tools package as virt-customize, so its presence
-	// is implied. If the guest has no /data/yolean dir at all
-	// (e.g., a build cluster that never ran a workload using the
-	// bundled local-path), we WARN and skip the seed step. The
-	// systemd unit's ConditionPathExists fires at customer boot
-	// and the unit no-ops -- no spurious failures.
-	var seed *SeedAssets
-	seed, err = BuildSeedAssets(ctx, diskPath, applianceNameFromConfig(cfg))
-	if err != nil {
-		logger.Warn("seed assets not built; appliance will ship without first-boot seed",
-			zap.Error(err))
+	// Build the seed assets. A guest without /data/yolean (a build
+	// cluster that never ran a workload on the bundled local-path)
+	// ships without a seed and without the seed unit. Any other
+	// failure stops here: an appliance whose seed is missing or
+	// partial boots at the customer's with an empty data volume and
+	// nothing to say why.
+	seed, err := BuildSeedAssets(ctx, diskPath, applianceNameFromConfig(cfg))
+	switch {
+	case errors.Is(err, ErrNoDataDir):
+		logger.Warn("guest has no /data/yolean; appliance will ship without first-boot seed", zap.Error(err))
 		seed = nil
-	} else {
+	case err != nil:
+		return fmt.Errorf("build data seed (the VM is stopped; fix the cause, `y-cluster start` and run prepare-export again): %w", err)
+	default:
 		logger.Info("data-seed staged",
 			zap.String("seed", seed.SeedTarPath),
 			zap.String("meta", seed.SeedMetaPath))
