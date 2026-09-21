@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -73,6 +74,46 @@ func e2eQEMURuntime() qemu.Config {
 	return qemu.FromConfig(c)
 }
 
+var (
+	sharedCloudImageOnce sync.Once
+	sharedCloudImagePath string
+	sharedCloudImageErr  error
+)
+
+// e2eQEMUCacheDir returns a fresh per-test cache dir that already
+// holds the Ubuntu cloud image, as a symlink to one copy shared by
+// every test and every run. A fresh cache dir per test is what keeps
+// the tests apart, and without this each of them downloads the same
+// ~600MB again.
+//
+// The shared copy is under <user cache dir>/y-cluster-e2e and is
+// never refreshed; delete it to pick up a newer image.
+func e2eQEMUCacheDir(t *testing.T) string {
+	t.Helper()
+	sharedCloudImageOnce.Do(func() {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			sharedCloudImageErr = err
+			return
+		}
+		shared := filepath.Join(base, "y-cluster-e2e")
+		if err := os.MkdirAll(shared, 0o755); err != nil {
+			sharedCloudImageErr = err
+			return
+		}
+		logger, _ := zap.NewDevelopment()
+		sharedCloudImagePath, sharedCloudImageErr = qemu.EnsureCloudImage(context.Background(), shared, logger)
+	})
+	if sharedCloudImageErr != nil {
+		t.Fatalf("shared cloud image: %v", sharedCloudImageErr)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(sharedCloudImagePath, filepath.Join(dir, filepath.Base(sharedCloudImagePath))); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // e2eUniqueForwards builds a port-forward list that won't collide
 // with another e2e test running on the same machine. Two forwards:
 //
@@ -101,7 +142,7 @@ func TestQemu_ProvisionTeardown(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-qemu"
 	cfg.Context = "y-cluster-e2e-qemu"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2223" // avoid conflict with real cluster on 2222
@@ -199,7 +240,7 @@ func TestQemu_TeardownKeepDisk(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-keepdisk"
 	cfg.Context = "y-cluster-e2e-keepdisk"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2225"
@@ -236,7 +277,7 @@ func TestQemu_ExportImport(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-export"
 	cfg.Context = "y-cluster-e2e-export"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2224"
@@ -335,7 +376,7 @@ func TestQemu_ExportImport_Qcow2(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-export-qcow2"
 	cfg.Context = "y-cluster-e2e-export-qcow2"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2229"
@@ -438,7 +479,7 @@ func TestQemu_StopStart(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-stopstart"
 	cfg.Context = "y-cluster-e2e-stopstart"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2226"
@@ -537,7 +578,7 @@ func TestQemu_Seed_GateAndBypass(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-seed-gate"
 	cfg.Context = "y-cluster-e2e-seed-gate"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2227"
@@ -722,7 +763,7 @@ func TestQemu_DataDisk_ReuseAcrossProvisions(t *testing.T) {
 	// to point at; in the production shape an operator would
 	// put this under their home dir or a customer-specific
 	// path, NOT under the cluster cache.
-	cacheDir := t.TempDir()
+	cacheDir := e2eQEMUCacheDir(t)
 	dataDiskDir := t.TempDir()
 	dataDiskPath := filepath.Join(dataDiskDir, "y-cluster-data.qcow2")
 
@@ -883,7 +924,7 @@ func TestQemu_Seed_VolumeAttached(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-seed-volume"
 	cfg.Context = "y-cluster-e2e-seed-volume"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2228"

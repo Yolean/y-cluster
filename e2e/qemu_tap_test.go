@@ -69,7 +69,7 @@ func TestQemu_TapMode(t *testing.T) {
 		t.Fatalf("config: %v", err)
 	}
 	cfg := qemu.FromConfig(c)
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Kubeconfig = kubeconfigPath
 	guestIP, gateway := c.Network.GuestIP(), c.Network.Gateway
 

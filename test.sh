@@ -72,13 +72,19 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 tags="e2e,docker"
+timeout=20m
 if [ -e /dev/kvm ] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
   tags+=",kvm"
+  # Every qemu test provisions a VM: the set runs for about an hour
+  # and writes several GB of disk images per test under TMPDIR. /tmp
+  # is a RAM-backed tmpfs on most distros; /var/tmp is on disk.
+  timeout=120m
+  export TMPDIR="${TMPDIR:-/var/tmp}"
 fi
 
 echo
 echo "==> e2e (-tags=$tags)"
-go test -tags "$tags" -count=1 -timeout=20m ./e2e/
+go test -tags "$tags" -count=1 -timeout="$timeout" ./e2e/
 
 if [[ "$tags" == *kvm* ]]; then
   echo

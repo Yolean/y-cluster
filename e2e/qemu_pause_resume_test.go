@@ -71,7 +71,7 @@ func TestQemu_PauseResume(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-pause"
 	cfg.Context = "y-cluster-e2e-pause"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "2048"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2237"

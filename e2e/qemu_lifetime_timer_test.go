@@ -36,11 +36,11 @@ func TestQemu_LifetimeTimerReaps(t *testing.T) {
 	if os.Getenv("KUBECONFIG") == "" {
 		t.Skip("KUBECONFIG must be set")
 	}
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	const name = "y-cluster-e2e-reap"
 	const maxRun = 4 * time.Minute
-	cacheDir := t.TempDir()
+	cacheDir := e2eQEMUCacheDir(t)
 	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", cacheDir)
 	t.Setenv("Y_CLUSTER_INVENTORY_DIR", t.TempDir())
 	cfgDir := t.TempDir()
