@@ -12,41 +12,35 @@ const (
 )
 
 // GlesysSSHUser is the unprivileged user the cloudconfig creates and
-// the y-cluster CLI authenticates as.
-//
-// Fixed rather than configurable, following qemu (which pins the same
-// name in its cloud-init template) rather than hetzner (which exposes
-// a sshUser field). Two reasons: this provisioner creates the user
-// itself, so nothing outside the cloudconfig constrains the name; and
-// hetzner already claims the sshUser yaml key, so exposing it here
-// would need either a second spelling for one concept or a move to
-// CommonConfig - which would hand docker and qemu a field they would
-// silently ignore. Promoting it later, together with wiring qemu to
-// read it, is the clean version of that change.
+// the y-cluster CLI authenticates as. A constant, as in qemu's
+// cloud-init template, and not a field: the provisioner creates the
+// user itself, so nothing outside the cloudconfig constrains the
+// name, and the `sshUser` yaml key belongs to hetzner (schemagen
+// refuses one key on two providers).
 const GlesysSSHUser = "ystack"
 
 // GlesysConfig is the on-disk shape of `y-cluster-provision.yaml`
-// when `provider: glesys`. CommonConfig carries portable fields --
-// including Memory and CPUs, which this provisioner reads rather
-// than redeclaring; the fields below are GleSYS-specific.
+// when `provider: glesys`. The provider is registered as
+// config.ConfigOnly: this type, its validation and its schema exist,
+// a provisioner does not yet. CommonConfig carries the portable
+// fields, Memory and CPUs among them; the fields below are
+// GleSYS-specific.
 //
 // # Hosting, not appliance
 //
-// This provisioner targets HOSTING only: the stack is installed in
-// place on a VM that GleSYS provisions, and every image is pulled
-// by the k3s setup and by the cluster itself. There is deliberately
-// no image cache, no OCI preload, no upstream-pull lockdown and no
-// export/import - the appliance machinery the hetzner provisioner
-// grew (imageCache, preload, rejectUpstream, prepare-export) has no
-// counterpart here. A GleSYS cluster that cannot reach a registry
-// is broken, not degraded.
+// The stack is installed in place on a server GleSYS provisions, and
+// every image is pulled by the k3s setup and by the cluster itself.
+// There is no image cache, no OCI preload, no upstream-pull lockdown
+// and no export/import (hetzner's imageCache, preload, rejectUpstream
+// and qemu's prepare-export have no counterpart), and Validate
+// refuses a config that asks for them. A GleSYS cluster that cannot
+// reach a registry is broken, not degraded.
 //
 // # Ingress
 //
 // A GleSYS KVM server carries a public IPv4 of its own, so ingress
 // is the node address plus k3s ServiceLB. There is no shared load
-// balancer and no per-context FQDN, which is the other reason this
-// provisioner is smaller than hetzner's.
+// balancer and no per-context FQDN.
 type GlesysConfig struct {
 	CommonConfig `yaml:",inline" json:",inline"`
 
@@ -76,12 +70,10 @@ type GlesysConfig struct {
 	// and buildkit's cache. Billed per GB per month, so it is the
 	// cheap dimension to be generous with.
 	//
-	// Named ServerDisk rather than the natural DiskSize because
-	// qemu already claims that yaml key and schemagen's collision
-	// check forces disambiguation - the same reason hetzner has
-	// OSImage where multipass has Image. Moving it to CommonConfig
-	// was the other option the check offers, but docker and
-	// multipass have no disk to size, so it is not portable.
+	// ServerDisk and not DiskSize: qemu owns the `diskSize` yaml
+	// key, and schemagen refuses one key on two providers. It is
+	// not on CommonConfig because docker and multipass have no disk
+	// to size.
 	ServerDisk string `yaml:"serverDisk,omitempty" json:"serverDisk,omitempty" jsonschema:"default=30G,description=Server disk as a [num][KMGT] string. Holds k3s state, pulled images, registry blobs and the buildkit cache."`
 
 	// Dir is filled at load time from the absolute path of the
