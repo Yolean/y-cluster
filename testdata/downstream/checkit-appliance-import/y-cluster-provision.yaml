@@ -1,0 +1,19 @@
+# Config used by the second phase of
+# cluster-local/e2e/appliance-disk-reuse-test.sh. The first phase
+# builds + exports an appliance bundle using ../appliance-test/.
+# This config receives that bundle's disk (via `y-cluster import`)
+# alongside the SAME labeled data disk the build phase wrote to,
+# emulating a customer importing a new appliance image into a
+# hosting environment that already has /data/yolean populated from
+# a previous appliance generation.
+name: appliance-import
+context: import-test
+memory: "8192"
+cpus: "2"
+
+# Same path as ../appliance-test/y-cluster-provision.yaml's
+# dataDisk -- both relative paths resolve to cluster-local/e2e/
+# appliance-test-data.qcow2 because dataDisk paths resolve against
+# the config-file dir. The build cycle creates this file with fresh
+# data; the import cycle attaches it as-is, no second creation.
+dataDisk: ../appliance-test-data.qcow2

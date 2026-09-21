@@ -1,0 +1,13 @@
+name: appliance-test
+context: local
+memory: "8192"
+cpus: "2"
+
+# Labeled-volume data disk that survives `y-cluster teardown`. The
+# build cycle writes Velero backups + MinIO buckets here (via the
+# local-path-provisioner default path /data/yolean); the disk-reuse
+# e2e (cluster-local/e2e/appliance-disk-reuse-test.sh) re-uses the
+# same file for the import phase so the imported appliance starts
+# with yesterday's persistent state already in place.
+dataDisk: ../appliance-test-data.qcow2
+dataDiskSize: 20G
