@@ -135,15 +135,13 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("mkdir cache: %w", err)
 	}
 
-	// Refuse to clobber an existing server with the same name.
-	// Hetzner's CreateServer would actually error out itself, but
-	// our error message names the cleanup recipe.
-	existing, _, err := hc.Server.GetByName(ctx, cfg.Context)
-	if err != nil {
-		return nil, fmt.Errorf("probe existing server %q: %w", cfg.Context, err)
-	}
-	if existing != nil {
-		return nil, fmt.Errorf("server %q already exists in this project (id=%d); run `y-cluster teardown -c <dir>` first or pick a different context", cfg.Context, existing.ID)
+	// The server, the ssh key and the certificate are all named after
+	// the context. A name that is taken means an earlier run was not
+	// cleaned up, and the time to say so is before anything is
+	// created: the certificate is only needed after the server has
+	// been bought and k3s installed on it.
+	if err := refuseTakenNames(ctx, hc, cfg.Context); err != nil {
+		return nil, err
 	}
 
 	// SSH key: rotate per-provision (matches qemu's per-VM key
@@ -160,6 +158,11 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("read public key: %w", err)
 	}
 
+	// The ssh key is the first resource, and creating it is what
+	// claims the context's name in this project: names are unique, so
+	// of two operators racing for one context only one gets past this
+	// call. Until it succeeds nothing in the project is this run's,
+	// and a failure here removes nothing.
 	logger.Info("uploading SSH key to Hetzner", zap.String("name", cfg.Context))
 	hcKey, _, err := hc.SSHKey.Create(ctx, hcloud.SSHKeyCreateOpts{
 		Name:      cfg.Context,
@@ -167,12 +170,73 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		Labels:    map[string]string{"managed-by": "y-cluster"},
 	})
 	if err != nil {
+		for _, p := range []string{keyPath, keyPath + ".pub"} {
+			_ = os.Remove(p)
+		}
 		return nil, fmt.Errorf("upload ssh key: %w", err)
 	}
 
+	// From here on a failure undoes the run. A failed Provision
+	// returns no handle to clean up with, a server bills by the hour,
+	// and the reaper that would end it is installed almost last.
+	c, err := provision(ctx, hc, cfg, cacheDir, hcKey, string(pubKey), logger)
+	if err != nil {
+		return nil, rollBack(ctx, hc, cacheDir, cfg.Context, err, logger)
+	}
+	logger.Info("cluster ready", zap.String("context", c.cfg.Context))
+	return c, nil
+}
+
+// rollBack removes what a failed provision made and returns the error
+// to report. It runs under its own deadline rather than the caller's
+// context: an operator's Ctrl-C is one of the failures to clean up
+// after.
+func rollBack(ctx context.Context, hc *hcloud.Client, cacheDir, contextName string, cause error, logger *zap.Logger) error {
+	logger.Warn("provision failed; removing what it created", zap.String("context", contextName), zap.Error(cause))
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollBackTimeout)
+	defer cancel()
+	if err := teardown(cleanupCtx, hc, cacheDir, contextName, logger); err != nil {
+		return fmt.Errorf("%w; AND THE CLEANUP FAILED, resources may still be billing: %v; run `y-cluster teardown` for context %q and check the Hetzner console", cause, err, contextName)
+	}
+	return fmt.Errorf("%w (everything this run created has been removed)", cause)
+}
+
+// rollBackTimeout bounds rollBack. A handful of API calls.
+const rollBackTimeout = 2 * time.Minute
+
+// refuseTakenNames fails if the project already has a server, ssh key
+// or certificate named after the context.
+func refuseTakenNames(ctx context.Context, hc *hcloud.Client, contextName string) error {
+	srv, _, err := hc.Server.GetByName(ctx, contextName)
+	if err != nil {
+		return fmt.Errorf("probe existing server %q: %w", contextName, err)
+	}
+	if srv != nil {
+		return fmt.Errorf("server %q already exists in this project (id=%d); run `y-cluster teardown -c <dir>` first or pick a different context", contextName, srv.ID)
+	}
+	key, _, err := hc.SSHKey.GetByName(ctx, contextName)
+	if err != nil {
+		return fmt.Errorf("probe existing ssh key %q: %w", contextName, err)
+	}
+	if key != nil {
+		return fmt.Errorf("ssh key %q already exists in this project (id=%d) without a server: a leftover; run `y-cluster teardown -c <dir>` first or pick a different context", contextName, key.ID)
+	}
+	cert, _, err := hc.Certificate.GetByName(ctx, contextName)
+	if err != nil {
+		return fmt.Errorf("probe existing certificate %q: %w", contextName, err)
+	}
+	if cert != nil {
+		return fmt.Errorf("certificate %q already exists in this project (id=%d) without a server: a leftover; run `y-cluster teardown -c <dir>` first or pick a different context", contextName, cert.ID)
+	}
+	return nil
+}
+
+// provision is Provision once the context's name is claimed. Any
+// error it returns makes Provision roll the run back.
+func provision(ctx context.Context, hc *hcloud.Client, cfg config.HetznerConfig, cacheDir string, hcKey *hcloud.SSHKey, pubKey string, logger *zap.Logger) (*Cluster, error) {
 	// Cloud-init payload: just the user + datasource pin. k3s is
 	// installed over SSH after boot, which keeps user_data small.
-	userData := renderCloudInitUserData(cfg.Context, cfg.SSHUser, string(pubKey))
+	userData := renderCloudInitUserData(cfg.Context, cfg.SSHUser, pubKey)
 
 	logger.Info("creating Hetzner server",
 		zap.String("name", cfg.Context),
@@ -194,9 +258,6 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		},
 	})
 	if err != nil {
-		// Best-effort: clean up the uploaded key so we don't
-		// leak the resource on a partial failure.
-		_, _ = hc.SSHKey.Delete(ctx, hcKey)
 		return nil, fmt.Errorf("create server: %w", err)
 	}
 
@@ -397,8 +458,6 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 			return nil, fmt.Errorf("apply rejectUpstream: %w", err)
 		}
 	}
-
-	logger.Info("cluster ready", zap.String("context", c.cfg.Context))
 
 	return c, nil
 }

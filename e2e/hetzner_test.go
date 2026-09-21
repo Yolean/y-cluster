@@ -64,20 +64,19 @@ func TestHetzner_ProvisionTeardown(t *testing.T) {
 		t.Fatalf("config invalid: %v", err)
 	}
 
+	// Registered before Provision: a failed Provision removes what it
+	// created, and if that cleanup fails too this is the second
+	// chance. Teardown finds everything by the context's name, so it
+	// is safe to run whatever state Provision got to.
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Errorf("teardown: %v (check the Hetzner console for context %s)", err, ctxName)
+		}
+	})
 	cluster, err := hetzner.Provision(ctx, cfg, logger)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-
-	// Cleanup as t.Cleanup so the test always tears down even on
-	// downstream assertion failures. Re-running the test on a
-	// project with a stranded server requires a manual
-	// `hcloud server delete <ctxName>`.
-	t.Cleanup(func() {
-		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
-			t.Logf("teardown: %v", err)
-		}
-	})
 
 	// SSH works via the public IPv4. `hostname` should match the
 	// context; cloud-init pinned it via preserve_hostname:false +
@@ -150,15 +149,16 @@ func TestHetzner_PreloadFromS3(t *testing.T) {
 		t.Fatalf("config invalid: %v", err)
 	}
 
+	// Before Provision, for the reason given in TestHetzner_ProvisionTeardown.
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Errorf("teardown: %v (check the Hetzner console for context %s)", err, ctxName)
+		}
+	})
 	cluster, err := hetzner.Provision(ctx, cfg, logger)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
-			t.Logf("teardown: %v", err)
-		}
-	})
 
 	// The pre-load step lands every index entry into the k8s.io
 	// namespace via `ctr image import`. We expect at least one
@@ -224,15 +224,16 @@ func TestHetzner_RejectUpstream(t *testing.T) {
 		t.Fatalf("config invalid: %v", err)
 	}
 
+	// Before Provision, for the reason given in TestHetzner_ProvisionTeardown.
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Errorf("teardown: %v (check the Hetzner console for context %s)", err, ctxName)
+		}
+	})
 	cluster, err := hetzner.Provision(ctx, cfg, logger)
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
-			t.Logf("teardown: %v", err)
-		}
-	})
 
 	// (1) registries.yaml is present (k3s source-of-truth, used
 	// to regenerate certs.d on a future k3s restart).
@@ -353,14 +354,15 @@ func TestHetzner_GatewayExample(t *testing.T) {
 		t.Fatalf("config invalid: %v", err)
 	}
 
+	// Before Provision, for the reason given in TestHetzner_ProvisionTeardown.
+	t.Cleanup(func() {
+		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
+			t.Errorf("teardown: %v (check the Hetzner console for context %s)", err, ctxName)
+		}
+	})
 	if _, err := hetzner.Provision(ctx, cfg, logger); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := hetzner.Teardown(context.Background(), ctxName, logger); err != nil {
-			t.Logf("teardown: %v", err)
-		}
-	})
 
 	// Read the LB public IP off the GatewayClass annotation
 	// Provision stamped on it -- the same lookup `y-cluster

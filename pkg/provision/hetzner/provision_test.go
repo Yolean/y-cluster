@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hetznercloud/hcloud-go/v2/hcloud/schema"
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
@@ -248,5 +249,136 @@ func TestTeardown_SharedLoadBalancer(t *testing.T) {
 	}
 	if got := cloud.inventory(); len(got) != 0 {
 		t.Errorf("project after the last teardown still holds %v", got)
+	}
+}
+
+// Every step of Provision after the first resource exists can fail,
+// and a failed Provision returns no handle to clean up with. What it
+// made has to be gone again: a server bills by the hour, and the
+// reaper that would end it is installed almost last.
+func TestProvision_FailureLeavesNothingBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sabotage func(cloud *fakeCloud, node *fakeNode)
+		want     string
+	}{
+		{"the server's create action fails", func(c *fakeCloud, _ *fakeNode) {
+			c.failedActions["POST /servers"] = "no capacity in this location"
+		}, "no capacity"},
+		{"sshd never answers", func(_ *fakeCloud, n *fakeNode) { n.failOn = "true" }, "SSH"},
+		{"the k3s install fails", func(_ *fakeCloud, n *fakeNode) { n.failOn = "get.k3s.io" }, "k3s"},
+		{"the certificate upload is refused", func(c *fakeCloud, _ *fakeNode) {
+			c.failures["POST /certificates"] = "certificate limit reached"
+		}, "certificate limit"},
+		{"the load balancer is refused", func(c *fakeCloud, _ *fakeNode) {
+			c.failures["POST /load_balancers"] = "load balancer limit reached"
+		}, "load balancer limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cloud := newFakeCloud(t)
+			node := newFakeNode(t)
+			kubeconfigPath := testEnv(t)
+			prev := sshWaitTimeout
+			sshWaitTimeout = 0
+			t.Cleanup(func() { sshWaitTimeout = prev })
+			tc.sabotage(cloud, node)
+
+			_, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want the original failure (%q) reported, got %v", tc.want, err)
+			}
+			if got := cloud.inventory(); len(got) != 0 {
+				t.Errorf("a failed provision left %v in the project", got)
+			}
+			if HasState("qa-one") {
+				t.Error("a failed provision left a state sidecar")
+			}
+			if kc := kubeContexts(t, kubeconfigPath); strings.Contains(kc, "qa-one") {
+				t.Errorf("a failed provision left a kube context:\n%s", kc)
+			}
+		})
+	}
+}
+
+// Rolling back one context must not touch its lb-group neighbours.
+func TestProvision_FailureLeavesNeighboursAlone(t *testing.T) {
+	cloud := newFakeCloud(t)
+	newFakeNode(t)
+	testEnv(t)
+
+	neighbour, err := Provision(context.Background(), testConfig(t, "qa-neighbour"), zap.NewNop())
+	if err != nil {
+		t.Fatalf("Provision qa-neighbour: %v", err)
+	}
+	before := cloud.inventory()
+
+	// qa-one gets as far as having its certificate on the shared LB.
+	cloud.failures["POST /load_balancers/"] = "update_service refused"
+	if _, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop()); err == nil {
+		t.Fatal("Provision should have failed at the certificate attach")
+	}
+	delete(cloud.failures, "POST /load_balancers/")
+
+	if got := cloud.inventory(); !reflect.DeepEqual(got, before) {
+		t.Errorf("project = %v, want the neighbour's %v", got, before)
+	}
+	if got := cloud.lbCertificates("y-cluster-team"); !reflect.DeepEqual(got, []int64{neighbour.State().CertificateID}) {
+		t.Errorf("LB certificates = %v, want only the neighbour's", got)
+	}
+}
+
+// Creating the ssh key is what claims the context's name. If that
+// call fails, nothing in the project belongs to this run, whatever is
+// named after the context by then belongs to whoever won the race,
+// and the failed run deletes nothing.
+func TestProvision_LosingTheNameDeletesNothing(t *testing.T) {
+	cloud := newFakeCloud(t)
+	newFakeNode(t)
+	testEnv(t)
+	cloud.failures["POST /ssh_keys"] = "SSH key name is already used"
+
+	if _, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop()); err == nil {
+		t.Fatal("Provision should have failed at the ssh key")
+	}
+	for _, req := range cloud.requests {
+		if strings.HasPrefix(req, "DELETE ") {
+			t.Errorf("a run that created nothing sent %s", req)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(CacheDir(), "qa-one-ssh")); !os.IsNotExist(err) {
+		t.Errorf("local keypair left behind: %v", err)
+	}
+}
+
+// Names from an earlier run that was not cleaned up are found before
+// anything is created, not after the server has been bought and k3s
+// installed on it.
+func TestProvision_StaleNamesAreRefusedUpFront(t *testing.T) {
+	for _, kind := range []string{"ssh_key", "certificate"} {
+		t.Run(kind, func(t *testing.T) {
+			cloud := newFakeCloud(t)
+			newFakeNode(t)
+			testEnv(t)
+			switch kind {
+			case "ssh_key":
+				cloud.keys[1] = &schema.SSHKey{ID: 1, Name: "qa-one"}
+			case "certificate":
+				cloud.certs[1] = &schema.Certificate{ID: 1, Name: "qa-one"}
+			}
+			before := cloud.inventory()
+
+			_, err := Provision(context.Background(), testConfig(t, "qa-one"), zap.NewNop())
+			if err == nil || !strings.Contains(err.Error(), "already exists") {
+				t.Fatalf("want an already-exists refusal, got %v", err)
+			}
+			if got := cloud.inventory(); !reflect.DeepEqual(got, before) {
+				t.Errorf("project = %v, want it untouched: %v", got, before)
+			}
+			for _, req := range cloud.requests {
+				if strings.HasPrefix(req, "POST ") || strings.HasPrefix(req, "DELETE ") {
+					t.Errorf("a refused provision sent %s", req)
+				}
+			}
+		})
 	}
 }

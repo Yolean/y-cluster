@@ -184,18 +184,9 @@ func ensureLoadBalancer(ctx context.Context, hc *hcloud.Client, cfg lbConfig, fi
 // "uploaded" (we generate the bytes locally) tagged with our
 // management labels. The Certificate name is the context, so a
 // future operator looking at the Hetzner UI sees the 1:1 mapping
-// to server / SSH key / state sidecar.
-//
-// Refuses when a same-named Certificate already exists: that
-// would be a leftover from a stranded teardown, and silently
-// reusing it would hide stale state. The operator is told to
-// delete by name.
+// to server / SSH key / state sidecar. Provision has checked that
+// the name is free before it created anything (refuseTakenNames).
 func uploadCertificate(ctx context.Context, hc *hcloud.Client, contextName, lbGroup string, certPEM, keyPEM []byte, logger *zap.Logger) (*hcloud.Certificate, error) {
-	if existing, _, err := hc.Certificate.GetByName(ctx, contextName); err != nil {
-		return nil, fmt.Errorf("probe existing certificate %q: %w", contextName, err)
-	} else if existing != nil {
-		return nil, fmt.Errorf("certificate %q already exists in this project (id=%d); delete via `hcloud certificate delete %s` first or pick a different context", contextName, existing.ID, contextName)
-	}
 	logger.Info("uploading TLS certificate to Hetzner", zap.String("name", contextName))
 	cert, _, err := hc.Certificate.Create(ctx, hcloud.CertificateCreateOpts{
 		Name:        contextName,
