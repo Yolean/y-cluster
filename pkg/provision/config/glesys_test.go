@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // glesysMinimal is the least an operator can write: a provider and a
 // context. Everything else has to come from ApplyDefaults, so these
@@ -33,8 +36,14 @@ func TestGlesys_DefaultsAreTheSmallMachine(t *testing.T) {
 	if c.Platform != "KVM" {
 		t.Errorf("platform: got %q, want KVM", c.Platform)
 	}
-	if c.DataCenter == "" || c.Template == "" {
-		t.Errorf("dataCenter/template should default, got %q/%q", c.DataCenter, c.Template)
+	// Where the server runs and what it boots are not details: a
+	// default that drifts moves new clusters to another country or
+	// another OS release without anyone having asked.
+	if c.DataCenter != "Stockholm" {
+		t.Errorf("dataCenter: got %q, want Stockholm", c.DataCenter)
+	}
+	if c.Template != "ubuntu-24-04" {
+		t.Errorf("template: got %q, want ubuntu-24-04", c.Template)
 	}
 }
 
@@ -64,7 +73,7 @@ func TestGlesys_PlatformMustBeKVM(t *testing.T) {
 	if err == nil {
 		t.Fatal("non-KVM platform should be rejected")
 	}
-	if !contains(err.Error(), "cloudconfig") {
+	if !strings.Contains(err.Error(), "cloudconfig") {
 		t.Fatalf("error should explain why KVM is required; got %v", err)
 	}
 }
@@ -125,17 +134,4 @@ func TestDiskSizeGB(t *testing.T) {
 			t.Errorf("DiskSizeGB(%q) = %d, want %d", tc.in, got, tc.want)
 		}
 	}
-}
-
-func contains(haystack, needle string) bool {
-	return len(needle) > 0 && len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
-}
-
-func indexOf(h, n string) int {
-	for i := 0; i+len(n) <= len(h); i++ {
-		if h[i:i+len(n)] == n {
-			return i
-		}
-	}
-	return -1
 }
