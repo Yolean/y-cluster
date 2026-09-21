@@ -24,18 +24,18 @@ const k3sReadyTimeout = 5 * time.Minute
 // operator's host:
 //
 //   - --tls-san=<public-ipv4>         lets kubectl accept the
-//                                     certificate when the operator
-//                                     dials the public IP.
+//     certificate when the operator
+//     dials the public IP.
 //   - --node-external-ip=<public-ipv4> pins the node's reported
-//                                     external IP to the Hetzner
-//                                     public IPv4 so cluster-side
-//                                     consumers (envoy gateway,
-//                                     services with externalIP)
-//                                     advertise the right address.
+//     external IP to the Hetzner
+//     public IPv4 so cluster-side
+//     consumers (envoy gateway,
+//     services with externalIP)
+//     advertise the right address.
 //   - --disable=traefik               y-cluster ships envoy-gateway
-//                                     instead.
+//     instead.
 //   - --disable=local-storage         y-cluster ships its own
-//                                     local-path provisioner.
+//     local-path provisioner.
 //
 // Phase 1 uses script-mode (curl | sh). Airgap mode -- mirroring
 // pkg/provision/qemu's installK3sAirgap, which downloads the k3s

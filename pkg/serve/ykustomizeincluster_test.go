@@ -568,4 +568,3 @@ func TestK8sClient_ListSecrets(t *testing.T) {
 		t.Fatalf("label selector not URL-encoded: %q", seenPath)
 	}
 }
-

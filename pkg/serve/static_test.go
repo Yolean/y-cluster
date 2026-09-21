@@ -390,4 +390,3 @@ func TestNormalizeRoot(t *testing.T) {
 		}
 	}
 }
-

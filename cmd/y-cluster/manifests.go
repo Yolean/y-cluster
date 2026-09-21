@@ -17,8 +17,8 @@ import (
 // cluster's appliance disk. Three verbs (strict in both directions):
 //
 //   - add     : name must NOT be staged (or, if staged with
-//               byte-identical content, succeeds silently as a
-//               re-run idempotency convenience)
+//     byte-identical content, succeeds silently as a
+//     re-run idempotency convenience)
 //   - replace : name MUST be staged, overwrites
 //   - rm      : name MUST be staged, removes
 //
@@ -257,9 +257,9 @@ func manifestsRmCmd() *cobra.Command {
 cluster node.
 
 Strict: the name MUST already be staged. Bails loud when the
-named manifest doesn't exist -- there's no `+"`--force`"+` /
+named manifest doesn't exist -- there's no ` + "`--force`" + ` /
 "don't care" mode. Use this when iterating on the staged
-manifest's content alongside `+"`add`"+`, or to drop a manifest
+manifest's content alongside ` + "`add`" + `, or to drop a manifest
 that's no longer wanted before prepare-export captures it.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {

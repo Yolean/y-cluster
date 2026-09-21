@@ -18,11 +18,11 @@ import (
 //
 // Routing per backend:
 //   - docker:           exec via the Docker daemon API (stdcopy demux);
-//                       dockerexec.ExitError on non-zero exec exit.
+//     dockerexec.ExitError on non-zero exec exit.
 //   - qemu / hetzner:   `sudo k3s ctr <args>` over an x/crypto/ssh session;
-//                       *ssh.ExitError on non-zero remote exit.
+//     *ssh.ExitError on non-zero remote exit.
 //   - multipass:        `multipass exec <name> -- sudo k3s ctr <args>`;
-//                       exit status comes from the local multipass CLI.
+//     exit status comes from the local multipass CLI.
 //
 // `ctr` rather than `k3s ctr` for docker because the rancher/k3s
 // container image puts ctr on PATH directly. qemu and multipass
@@ -114,7 +114,7 @@ func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader
 
 // singleQuote wraps a string in POSIX single quotes for safe inclusion
 // in a remote shell command. Single quotes inside the string are
-// escaped via the standard '\'' trick. Used to pass an entire `sh -c`
+// escaped via the standard '\” trick. Used to pass an entire `sh -c`
 // command line through ssh / multipass-exec without re-parsing.
 func singleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -122,7 +122,7 @@ func singleQuote(s string) string {
 
 // shellQuoteJoin shell-quotes each arg with single quotes (POSIX-
 // safe) and joins with leading spaces. Empty `args` returns "".
-// Single quotes inside an arg become `'\''` per the standard
+// Single quotes inside an arg become `'\”` per the standard
 // trick — closing the quoted string, escaping a literal quote,
 // reopening.
 func shellQuoteJoin(args []string) string {

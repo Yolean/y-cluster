@@ -130,9 +130,9 @@ func TestWalk_DedupeAcrossOverlayAndBase(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
 		"shared/kustomization.yaml": "",
-		"a/kustomization.yaml":     "resources:\n- ../shared\n",
-		"b/kustomization.yaml":     "resources:\n- ../shared\n",
-		"top/kustomization.yaml":   "resources:\n- ../a\n- ../b\n",
+		"a/kustomization.yaml":      "resources:\n- ../shared\n",
+		"b/kustomization.yaml":      "resources:\n- ../shared\n",
+		"top/kustomization.yaml":    "resources:\n- ../a\n- ../b\n",
 	})
 	result, err := Walk(filepath.Join(root, "top"), nil)
 	if err != nil {

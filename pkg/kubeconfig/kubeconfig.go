@@ -111,4 +111,3 @@ func (m *Manager) Import(rawKubeconfig []byte) error {
 func (m *Manager) CleanupTeardown() {
 	m.CleanupStale()
 }
-

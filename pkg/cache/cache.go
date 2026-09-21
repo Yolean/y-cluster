@@ -7,10 +7,10 @@
 //
 // Resolution order on every command that needs the cache root:
 //
-//	1. --cache-dir=<path>      (per-command flag override)
-//	2. $Y_CLUSTER_CACHE_DIR    (env override)
-//	3. $XDG_CACHE_HOME/y-cluster
-//	4. $HOME/.cache/y-cluster  (POSIX fallback when XDG is unset)
+//  1. --cache-dir=<path>      (per-command flag override)
+//  2. $Y_CLUSTER_CACHE_DIR    (env override)
+//  3. $XDG_CACHE_HOME/y-cluster
+//  4. $HOME/.cache/y-cluster  (POSIX fallback when XDG is unset)
 //
 // All four candidates collapse to the same root; the subtrees
 // (Images, K3s, EnvoyGateway) are conventional names beneath it

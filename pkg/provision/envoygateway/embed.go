@@ -144,4 +144,3 @@ func ControllerResourcesPatch(cpuRequest, memRequest string) []byte {
             memory: %s
 `, cpuRequest, memRequest))
 }
-

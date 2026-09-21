@@ -91,11 +91,11 @@ func TestS3ConfigFromEnv(t *testing.T) {
 // in there.
 func TestSafeRefSegment(t *testing.T) {
 	cases := map[string]string{
-		"nginx:1.27":                       "nginx--1.27",
-		"library/nginx:1.27":               "library_nginx--1.27",
-		"registry.k8s.io/pause:3.10":       "registry.k8s.io_pause--3.10",
-		"hetznercloud/cli:v1.64.1":         "hetznercloud_cli--v1.64.1",
-		"localhost:5000/foo:bar":           "localhost--5000_foo--bar",
+		"nginx:1.27":                 "nginx--1.27",
+		"library/nginx:1.27":         "library_nginx--1.27",
+		"registry.k8s.io/pause:3.10": "registry.k8s.io_pause--3.10",
+		"hetznercloud/cli:v1.64.1":   "hetznercloud_cli--v1.64.1",
+		"localhost:5000/foo:bar":     "localhost--5000_foo--bar",
 	}
 	for in, want := range cases {
 		if got := safeRefSegment(in); got != want {

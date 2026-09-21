@@ -216,7 +216,6 @@ func BuildSummary(s *State) *Summary {
 	return out
 }
 
-
 // listenerProgrammed pulls the Programmed=True signal from the
 // matching ListenerStatus row. Default false when the controller
 // hasn't reported on this listener yet.

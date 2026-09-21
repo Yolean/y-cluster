@@ -28,9 +28,9 @@ func TestExpand_Basics(t *testing.T) {
 		{"${EMPTY}", ""},
 		{"${MISSING:-fallback}", "fallback"},
 		{"${MISSING:-}", ""},
-		{"${FOO:-overridden}", "value"},   // present beats default
-		{"${EMPTY:-fallback}", ""},        // empty-but-set beats default; matches POSIX :- semantics for set
-		{"$$ literal $$", "$ literal $"},  // $$ escape
+		{"${FOO:-overridden}", "value"},  // present beats default
+		{"${EMPTY:-fallback}", ""},       // empty-but-set beats default; matches POSIX :- semantics for set
+		{"$$ literal $$", "$ literal $"}, // $$ escape
 		{"$$ {NOT_A_VAR}", "$ {NOT_A_VAR}"},
 	}
 	for _, tc := range cases {

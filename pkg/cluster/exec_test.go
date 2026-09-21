@@ -29,7 +29,7 @@ func TestBuildQemuRemote_NoArgs(t *testing.T) {
 // entire `sh -c <cmd>` string for ssh / multipass-exec -- the
 // caller's command must survive a second round of shell parsing
 // without losing semantics. Embedded single quotes go through
-// the standard `'\''` trick.
+// the standard `'\”` trick.
 func TestSingleQuote(t *testing.T) {
 	cases := []struct {
 		in   string

@@ -851,11 +851,11 @@ func TestQemu_DataDisk_ReuseAcrossProvisions(t *testing.T) {
 // TestQemu_Seed_VolumeAttached exercises the production-shape happy
 // path that TestQemu_Seed_GateAndBypass deliberately doesn't:
 //
-//   * State 1 -- a labeled `y-cluster-data` ext4 volume is attached
+//   - State 1 -- a labeled `y-cluster-data` ext4 volume is attached
 //     at boot, the pre-baked LABEL fstab entry mounts it, the seed
 //     unit sees a mountpoint with only lost+found, extracts the
 //     seed tarball, writes the marker, k3s starts via Requires=.
-//   * State 5 -- the same disk on the next boot has a marker; the
+//   - State 5 -- the same disk on the next boot has a marker; the
 //     seed unit hits the marker-respect no-op path; k3s starts
 //     without re-extract.
 //

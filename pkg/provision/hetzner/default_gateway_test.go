@@ -8,14 +8,14 @@ import (
 // TestDefaultGatewayHostnamePattern pins the FQDN shape the
 // listener binds to. Three properties matter:
 //
-//   1. Leading wildcard so any sub-host attaches to this Gateway
-//      (otherwise every new HTTPRoute would force a Gateway edit).
-//   2. <context>.<lbGroup>.<fqdnDomain> ordering -- mirrors the
-//      LB cert SANs (the cert generator uses the same shape) so
-//      hostname matching at LB and Gateway align.
-//   3. RFC 6761 reserved .local.test default for fqdnDomain --
-//      a missed /etc/hosts (or curl --resolve) never accidentally
-//      routes to a real domain.
+//  1. Leading wildcard so any sub-host attaches to this Gateway
+//     (otherwise every new HTTPRoute would force a Gateway edit).
+//  2. <context>.<lbGroup>.<fqdnDomain> ordering -- mirrors the
+//     LB cert SANs (the cert generator uses the same shape) so
+//     hostname matching at LB and Gateway align.
+//  3. RFC 6761 reserved .local.test default for fqdnDomain --
+//     a missed /etc/hosts (or curl --resolve) never accidentally
+//     routes to a real domain.
 func TestDefaultGatewayHostnamePattern(t *testing.T) {
 	got := defaultGatewayHostnamePattern("alice-dev", "alice", "local.test")
 	if got != "*.alice-dev.alice.local.test" {
@@ -35,9 +35,9 @@ func TestDefaultGatewayHostnamePattern(t *testing.T) {
 func TestDefaultGatewayManifest_Shape(t *testing.T) {
 	got := string(defaultGatewayManifest("alice-dev", "alice", "local.test", "y-cluster"))
 	for _, want := range []string{
-		"name: y-cluster-gateway",   // Namespace
-		"managed-by: y-cluster",     // labels
-		"name: default",             // Gateway
+		"name: y-cluster-gateway", // Namespace
+		"managed-by: y-cluster",   // labels
+		"name: default",           // Gateway
 		"gatewayClassName: y-cluster",
 		"protocol: HTTP",
 		"port: 80",

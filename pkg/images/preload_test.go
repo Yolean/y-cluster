@@ -8,10 +8,10 @@ import (
 // TestBuildPreloadScript_ShapeAndSafety pins the four properties
 // of the per-image bash script the cluster node runs:
 //
-//   1. set -euo pipefail (a failed curl aborts the whole import)
-//   2. mktemp under /tmp/y-cluster-preload.* (matches the trap)
-//   3. one curl per file, in lexicographic order (reproducible)
-//   4. ends in `tar | sudo k3s ctr -n k8s.io image import -`
+//  1. set -euo pipefail (a failed curl aborts the whole import)
+//  2. mktemp under /tmp/y-cluster-preload.* (matches the trap)
+//  3. one curl per file, in lexicographic order (reproducible)
+//  4. ends in `tar | sudo k3s ctr -n k8s.io image import -`
 //
 // File-order reproducibility matters for diffing across runs; the
 // test pins it explicitly.

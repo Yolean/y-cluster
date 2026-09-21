@@ -552,7 +552,6 @@ func forwardHostPorts(forwards []config.PortForward) []string {
 	return ports
 }
 
-
 func importCmd() *cobra.Command {
 	var configDir string
 	cmd := &cobra.Command{
