@@ -154,7 +154,7 @@
       "properties": {
         "install": {
           "default": "airgap",
-          "description": "Install strategy. airgap pre-loads images on the node; script downloads via get.k3s.io. qemu only.",
+          "description": "Install strategy. airgap copies the k3s binary and images from the host cache to the node; script lets the node download via get.k3s.io. Default airgap on qemu and script on multipass; hetzner accepts script only; docker runs the k3s image and ignores this.",
           "enum": [
             "airgap",
             "script"

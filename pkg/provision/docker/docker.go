@@ -28,6 +28,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
+	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 )
@@ -173,20 +174,10 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		// we can set Cmd in the same struct.
 		Config: &container.Config{
 			Image: image,
-			// --disable=traefik because y-cluster bundles Envoy
-			// Gateway as the ingress controller; two of them
-			// would fight over host:80/:443.
-			// --disable=local-storage because y-cluster ships
-			// its own local-path-provisioner via
-			// pkg/provision/localstorage with the appliance-
-			// shape defaults (path /data/yolean, PVC
-			// namespace_name pattern, Retain reclaim).
-			Cmd: []string{
-				"server",
-				"--tls-san=127.0.0.1",
-				"--disable=traefik",
-				"--disable=local-storage",
-			},
+			// 127.0.0.1 is where the host reaches the published
+			// apiserver port; k3s lists it among its serving
+			// cert SANs already, the flag makes that explicit.
+			Cmd: append([]string{"server", "--tls-san=127.0.0.1"}, k3s.DisableFlags...),
 			// ExposedPorts must list every guest port carried by
 			// HostConfig.PortBindings. The Docker CLI auto-fills
 			// this when you `-p`; the moby SDK does not. Engine
@@ -557,11 +548,13 @@ func (c *Cluster) pollHostAPIServerReadyz(ctx context.Context, timeout, interval
 // the embedded server URL to the host-mapped API port so the host's
 // kubectl can reach it.
 func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
-	out, err := c.NodeExec(ctx, "cat /etc/rancher/k3s/k3s.yaml", nil)
+	// Not k3s.ReadKubeconfig: the rancher/k3s image runs as root
+	// and has no sudo.
+	out, err := c.NodeExec(ctx, "cat "+k3s.KubeconfigPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
 	}
-	return bytes.ReplaceAll(out, []byte("127.0.0.1:6443"), []byte("127.0.0.1:"+c.cfg.HostAPIPort())), nil
+	return k3s.RewriteKubeconfigServer(out, "127.0.0.1:"+c.cfg.HostAPIPort())
 }
 
 // ContainerName returns the docker container name. Test helpers use

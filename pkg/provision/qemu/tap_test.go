@@ -69,12 +69,12 @@ func TestTap_Endpoints(t *testing.T) {
 
 func TestTap_KubeconfigAndTLSSAN(t *testing.T) {
 	e := tapConfig(t).endpoints()
-	got, err := rewriteKubeconfigServer([]byte(k3sKubeconfig), e)
+	got, err := e.apiAddress()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "server: https://10.88.0.2:6443\n") {
-		t.Fatalf("server not rewritten:\n%s", got)
+	if got != "10.88.0.2:6443" {
+		t.Fatalf("kubeconfig would name %s", got)
 	}
 	if flags := k3sServerFlags(e); !strings.HasSuffix(flags, " --tls-san=10.88.0.2") {
 		t.Fatalf("k3s flags: %s", flags)
