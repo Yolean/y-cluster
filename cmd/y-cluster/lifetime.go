@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
+	"github.com/Yolean/y-cluster/pkg/inventory"
 	"github.com/Yolean/y-cluster/pkg/lifetime"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
@@ -169,15 +170,12 @@ hand or from an external cron.`,
 			if err != nil {
 				return lifetimeStateErr(name, err)
 			}
-			if !ls.Enabled() {
-				logger.Info("no lifetime configured; nothing to reap", zap.String("cluster", name))
+			action, reason := decideReap(ls)
+			switch action {
+			case reapNothing:
+				logger.Info(reason+"; nothing to reap", zap.String("cluster", name))
 				return nil
-			}
-			if ls.ExpiresAt.IsZero() {
-				logger.Info("lifetime not armed; nothing to reap", zap.String("cluster", name))
-				return nil
-			}
-			if !ls.Expired() {
+			case reapRearm:
 				rem := ls.Remaining()
 				if bin, err := os.Executable(); err == nil {
 					if err := lifetime.Arm(bin, contextName, rem, logger); err != nil {
@@ -191,12 +189,20 @@ hand or from an external cron.`,
 
 			logger.Info("lifetime expired; reaping",
 				zap.String("cluster", name), zap.String("onExpiry", ls.OnExpiry))
-			switch ls.OnExpiry {
-			case config.OnExpiryPause:
+			switch action {
+			case reapPause:
 				err = qemu.Pause(cacheDir, name, logger)
-			case config.OnExpiryTeardown:
+			case reapTeardown:
 				err = qemu.TeardownByName(cacheDir, name, false, logger)
-			default: // stop is the default and the empty-value behaviour
+				if err == nil {
+					// The cluster is gone; so must be its entry among
+					// the teardown candidates `teardown` lists.
+					if rmErr := inventory.Remove(contextName); rmErr != nil {
+						logger.Warn("inventory record removal failed",
+							zap.String("context", contextName), zap.Error(rmErr))
+					}
+				}
+			default:
 				err = qemu.Stop(cacheDir, name, logger)
 			}
 			if err != nil {
@@ -210,6 +216,44 @@ hand or from an external cron.`,
 	}
 	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
 	return cmd
+}
+
+// reapAction is what `lifetime reap` does for a given lifetime state.
+type reapAction string
+
+const (
+	reapNothing  reapAction = "nothing"
+	reapRearm    reapAction = "rearm"
+	reapStop     reapAction = "stop"
+	reapPause    reapAction = "pause"
+	reapTeardown reapAction = "teardown"
+)
+
+// decideReap is the whole of reap's judgement; the command only
+// carries it out. reap is fired by a host timer that may be stale
+// (the deadline was extended after it was set) or early, and is safe
+// to run by hand or from cron, so the persisted deadline decides and
+// nothing else: no budget or no armed deadline means nothing to do, a
+// deadline still ahead means re-arm for what remains, and only a
+// deadline that has passed runs the configured action. An unset
+// onExpiry is stop.
+func decideReap(ls qemu.LifetimeState) (action reapAction, reason string) {
+	switch {
+	case !ls.Enabled():
+		return reapNothing, "no lifetime configured"
+	case ls.ExpiresAt.IsZero():
+		return reapNothing, "lifetime not armed"
+	case !ls.Expired():
+		return reapRearm, "not yet expired"
+	}
+	switch ls.OnExpiry {
+	case config.OnExpiryPause:
+		return reapPause, "expired"
+	case config.OnExpiryTeardown:
+		return reapTeardown, "expired"
+	default:
+		return reapStop, "expired"
+	}
 }
 
 func lifetimeExtendCmd() *cobra.Command {
