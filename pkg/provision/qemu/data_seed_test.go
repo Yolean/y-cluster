@@ -1,6 +1,7 @@
 package qemu
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -364,6 +365,31 @@ func TestWriteSeedMeta_RoundTrip(t *testing.T) {
 	} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("meta missing %q:\n%s", want, data)
+		}
+	}
+}
+
+// Only a guest without /data/yolean may ship without a seed. The
+// stderr text is what libguestfs 1.5x prints for that case.
+func TestTarOutError(t *testing.T) {
+	exit1 := errors.New("exit status 1")
+
+	missing := tarOutError("*stdin*:0: libguestfs: error: tar_out: stat: /data/yolean: No such file or directory\n", exit1)
+	if !errors.Is(missing, ErrNoDataDir) {
+		t.Errorf("missing source dir must classify as ErrNoDataDir: %v", missing)
+	}
+
+	for name, stderr := range map[string]string{
+		"supermin":      "libguestfs: error: /usr/bin/supermin exited with error status 1.\n",
+		"other path":    "libguestfs: error: tar_out: stat: /data: No such file or directory\n",
+		"no diagnostic": "",
+	} {
+		got := tarOutError(stderr, exit1)
+		if errors.Is(got, ErrNoDataDir) {
+			t.Errorf("%s: must not be treated as \"nothing to seed\": %v", name, got)
+		}
+		if !errors.Is(got, exit1) {
+			t.Errorf("%s: cause lost: %v", name, got)
 		}
 	}
 }
