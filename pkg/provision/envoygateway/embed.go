@@ -75,6 +75,16 @@ const EnvoyProxyName = "y-cluster"
 // .container.resources.requests. Limits are left for EG's
 // defaults (and the cluster's LimitRange, if any).
 //
+// externalTrafficPolicy Local is what lets a workload see the real
+// client address. k3s ServiceLB (klipper-lb) publishes the node IP
+// as the Service's load balancer address, and kube-proxy's rule for
+// that address runs before the klipper hostPort rule; with Local it
+// hands the connection to the envoy pod without SNAT. With Cluster,
+// or before ServiceLB has published the address, the connection
+// goes through the klipper pod, whose own MASQUERADE rule replaces
+// the client address with the pod's. It is also EG's default, but
+// too much depends on it to leave it implicit.
+//
 // The CR lives in envoy-gateway-system because that's the only
 // namespace EG looks at for parametersRef of GatewayClass.
 //
@@ -92,6 +102,8 @@ spec:
   provider:
     type: Kubernetes
     kubernetes:
+      envoyService:
+        externalTrafficPolicy: Local
       envoyDeployment:
         container:
           resources:
