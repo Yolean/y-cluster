@@ -76,7 +76,7 @@ func Exec(ctx context.Context, t Target, cmd string, stdin io.Reader) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = cli.Close() }()
+	defer closeOnDone(ctx, cli)()
 	sess, err := cli.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("new session: %w", err)
@@ -85,7 +85,31 @@ func Exec(ctx context.Context, t Target, cmd string, stdin io.Reader) ([]byte, e
 	if stdin != nil {
 		sess.Stdin = stdin
 	}
-	return sess.CombinedOutput(cmd)
+	out, err := sess.CombinedOutput(cmd)
+	return out, ctxErr(ctx, err)
+}
+
+// closeOnDone ties the connection to ctx for as long as the returned
+// func has not run. The ssh session API takes no context, so a remote
+// command that hangs (an installer waiting on the network, a guest
+// that froze) would otherwise hold the caller past every timeout it
+// set. Closing the client is what makes the blocked call return.
+func closeOnDone(ctx context.Context, cli *ssh.Client) func() {
+	stop := context.AfterFunc(ctx, func() { _ = cli.Close() })
+	return func() {
+		stop()
+		_ = cli.Close()
+	}
+}
+
+// ctxErr reports the context's error when that is why err happened:
+// after closeOnDone fires, the ssh library only knows that its
+// connection went away.
+func ctxErr(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return fmt.Errorf("%w (%v)", ctx.Err(), err)
+	}
+	return err
 }
 
 // ExecStream runs cmd with stdin/stdout/stderr wired to the
@@ -97,7 +121,7 @@ func ExecStream(ctx context.Context, t Target, cmd string, stdin io.Reader, stdo
 	if err != nil {
 		return err
 	}
-	defer func() { _ = cli.Close() }()
+	defer closeOnDone(ctx, cli)()
 	sess, err := cli.NewSession()
 	if err != nil {
 		return fmt.Errorf("new session: %w", err)
@@ -106,7 +130,7 @@ func ExecStream(ctx context.Context, t Target, cmd string, stdin io.Reader, stdo
 	sess.Stdin = stdin
 	sess.Stdout = stdout
 	sess.Stderr = stderr
-	return sess.Run(cmd)
+	return ctxErr(ctx, sess.Run(cmd))
 }
 
 // SCP uploads localPath to remotePath via SFTP. We use SFTP
@@ -118,7 +142,7 @@ func SCP(ctx context.Context, t Target, localPath, remotePath string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = cli.Close() }()
+	defer closeOnDone(ctx, cli)()
 	fc, err := sftp.NewClient(cli)
 	if err != nil {
 		return fmt.Errorf("sftp open: %w", err)
@@ -133,9 +157,14 @@ func SCP(ctx context.Context, t Target, localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("create %s: %w", remotePath, err)
 	}
-	defer func() { _ = dst.Close() }()
 	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("write %s: %w", remotePath, err)
+		_ = dst.Close()
+		return ctxErr(ctx, fmt.Errorf("write %s: %w", remotePath, err))
+	}
+	// Close is where the server acknowledges the last writes; a
+	// failure here is a failed upload.
+	if err := dst.Close(); err != nil {
+		return ctxErr(ctx, fmt.Errorf("close %s: %w", remotePath, err))
 	}
 	return nil
 }
