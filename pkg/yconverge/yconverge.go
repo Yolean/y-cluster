@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"go.uber.org/zap"
 
@@ -166,7 +167,7 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				}
 			}
 		}
-		if !contains(steps, absDir) {
+		if !slices.Contains(steps, absDir) {
 			steps = append(steps, absDir)
 		}
 	} else {

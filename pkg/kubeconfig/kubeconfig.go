@@ -112,12 +112,3 @@ func (m *Manager) Import(rawKubeconfig []byte) error {
 		return nil
 	})
 }
-
-// CleanupTeardown removes the context. The previous version
-// also worked around clientcmd writing `null` for empty list
-// fields (kubie chokes on that); the schema-based Save here
-// always emits initialised-empty slices as `[]`, so the
-// post-write fix is no longer needed.
-func (m *Manager) CleanupTeardown() {
-	m.CleanupStale()
-}

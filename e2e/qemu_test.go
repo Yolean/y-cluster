@@ -281,7 +281,7 @@ func TestQemu_ExportImport(t *testing.T) {
 	os.Remove(cluster.DiskPath())
 
 	// Import from VMDK
-	if err := qemu.ImportVMDK(vmdkPath, cluster.DiskPath()); err != nil {
+	if err := qemu.Import(vmdkPath, cluster.DiskPath()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cluster.DiskPath()); err != nil {

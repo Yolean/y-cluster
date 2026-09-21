@@ -279,7 +279,7 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 
 	kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger)
 	if err == nil {
-		kubecfg.CleanupTeardown()
+		kubecfg.CleanupStale()
 	}
 	return nil
 }

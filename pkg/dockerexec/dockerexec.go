@@ -18,6 +18,7 @@
 package dockerexec
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -207,13 +208,13 @@ func (e *ExitError) Error() string {
 }
 
 func demux(rc io.Reader) ([]byte, error) {
-	var stdout, stderr writableBuffer
+	var stdout, stderr bytes.Buffer
 	if err := demuxTo(rc, &stdout, &stderr); err != nil {
 		return nil, err
 	}
 	// Mirror the previous CombinedOutput semantics: stdout +
 	// stderr concatenated.
-	out := append(stdout.b, stderr.b...)
+	out := append(stdout.Bytes(), stderr.Bytes()...)
 	return out, nil
 }
 
@@ -226,14 +227,4 @@ func demuxTo(rc io.Reader, stdout, stderr io.Writer) error {
 	}
 	_, err := stdcopy.StdCopy(stdout, stderr, rc)
 	return err
-}
-
-// writableBuffer is a tiny io.Writer-bytes.Buffer hybrid used by
-// demux to avoid pulling bytes.Buffer into the docs of the
-// public API — kept private so callers can't hold onto it.
-type writableBuffer struct{ b []byte }
-
-func (w *writableBuffer) Write(p []byte) (int, error) {
-	w.b = append(w.b, p...)
-	return len(p), nil
 }

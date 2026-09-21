@@ -61,17 +61,10 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 	}
 }
 
-// buildQemuRemote shapes the single-string command sshexec.ExecStream
-// passes as the remote command. On a k3s VM, ctr/crictl live under
-// `k3s` so we always wrap in `sudo k3s <binary>`. Args are
-// shell-quoted because ssh executes the string under /bin/sh.
-func buildQemuRemote(binary string, args []string) string {
-	return buildVMNodeRemote(binary, args)
-}
-
-// buildVMNodeRemote is the shared shape used by qemu (over SSH) and
-// multipass (over `multipass exec`). Both run sh inside the VM and
-// k3s puts ctr/crictl behind `sudo k3s`.
+// buildVMNodeRemote shapes the single command string for the VM
+// backends: qemu and hetzner over ssh, multipass over `multipass
+// exec`. All run it under sh inside the VM, so args are shell-quoted,
+// and k3s puts ctr/crictl behind `sudo k3s`.
 func buildVMNodeRemote(binary string, args []string) string {
 	return "sudo k3s " + binary + shellQuoteJoin(args)
 }

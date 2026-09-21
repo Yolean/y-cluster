@@ -10,7 +10,7 @@ import (
 // connection refused, exit codes) belong to pkg/sshexec and its
 // integration tests.
 func TestBuildQemuRemote_ShellQuotes(t *testing.T) {
-	got := buildQemuRemote("crictl", []string{"images", "--label", "app=isn't"})
+	got := buildVMNodeRemote("crictl", []string{"images", "--label", "app=isn't"})
 	want := `sudo k3s crictl 'images' '--label' 'app=isn'\''t'`
 	if got != want {
 		t.Fatalf("remote cmd:\n got: %q\nwant: %q", got, want)
@@ -18,7 +18,7 @@ func TestBuildQemuRemote_ShellQuotes(t *testing.T) {
 }
 
 func TestBuildQemuRemote_NoArgs(t *testing.T) {
-	got := buildQemuRemote("ctr", nil)
+	got := buildVMNodeRemote("ctr", nil)
 	want := "sudo k3s ctr"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
