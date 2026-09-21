@@ -52,13 +52,17 @@ type Config struct {
 	CPUs         string
 	SSHPort      string
 	PortForwards []PortForward
-	Context      string
-	CacheDir     string
-	Kubeconfig   string
-	K3s          K3s
-	Registries   config.Registries
-	Gateway      config.GatewayConfig
-	Storage      config.StorageConfig
+	// BindAddress is the IPv4 address the ssh and port forwards
+	// listen on. Empty only for state written before the option
+	// existed, when qemu bound the wildcard.
+	BindAddress string
+	Context     string
+	CacheDir    string
+	Kubeconfig  string
+	K3s         K3s
+	Registries  config.Registries
+	Gateway     config.GatewayConfig
+	Storage     config.StorageConfig
 
 	// DataDisk is the operator-owned external qcow2 attached as a
 	// labeled `y-cluster-data` volume at /data/yolean. Empty means
@@ -144,6 +148,7 @@ func FromConfig(c *config.QEMUConfig) Config {
 		CPUs:         c.CPUs,
 		SSHPort:      c.SSHPort,
 		PortForwards: pfs,
+		BindAddress:  c.Network.BindAddress,
 		Context:      c.Context,
 		CacheDir:     cacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),
@@ -214,11 +219,12 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// silently clobber). Fail with the full list of conflicts so
 	// the user fixes them in one config edit, not three.
 	pf := provision.Preflight{
-		HostPorts:      preflightHostPorts(cfg),
-		PortBinder:     provision.PortBinderSelf,
-		ContextName:    cfg.Context,
-		ContextCluster: clusterName(cfg.Name),
-		KubeconfigPath: cfg.Kubeconfig,
+		HostPorts:       preflightHostPorts(cfg),
+		HostBindAddress: cfg.BindAddress,
+		PortBinder:      provision.PortBinderSelf,
+		ContextName:     cfg.Context,
+		ContextCluster:  clusterName(cfg.Name),
+		KubeconfigPath:  cfg.Kubeconfig,
 	}
 	if err := pf.Run(); err != nil {
 		return nil, err

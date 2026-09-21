@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 // nobody is listening on passes the check.
 func TestPreflight_PortFree(t *testing.T) {
 	port := pickFreePort(t)
-	if err := checkHostPort(port, PortBinderDaemon); err != nil {
+	if err := checkHostPort("", port, PortBinderDaemon); err != nil {
 		t.Fatalf("free port %s: %v", port, err)
 	}
 }
@@ -29,7 +30,7 @@ func TestPreflight_PortInUse(t *testing.T) {
 	}
 	defer func() { _ = l.Close() }()
 	port := portFromAddr(l.Addr().String())
-	err = checkHostPort(port, PortBinderDaemon)
+	err = checkHostPort("", port, PortBinderDaemon)
 	if err == nil {
 		t.Fatalf("port %s should report in-use", port)
 	}
@@ -68,7 +69,7 @@ func TestPreflight_WildcardListenerInUse(t *testing.T) {
 					"this platform would have caught the conflict either way", err)
 			}
 
-			err = checkHostPort(port, PortBinderDaemon)
+			err = checkHostPort("", port, PortBinderDaemon)
 			if err == nil {
 				t.Fatalf("wildcard listener on port %s should report in-use", port)
 			}
@@ -114,7 +115,7 @@ func TestPreflight_PortInUse_AttributedToInventory(t *testing.T) {
 // TestPreflight_PortEmpty: an empty Host (provider auto-assigns)
 // must not error -- there's nothing to check.
 func TestPreflight_PortEmpty(t *testing.T) {
-	if err := checkHostPort("", PortBinderDaemon); err != nil {
+	if err := checkHostPort("", "", PortBinderDaemon); err != nil {
 		t.Fatalf("empty port should pass: %v", err)
 	}
 }
@@ -126,7 +127,7 @@ func TestPreflight_PortEmpty(t *testing.T) {
 // dockerd would publish it happily, so the check must pass.
 func TestPreflight_PrivilegedPortDaemonBinder(t *testing.T) {
 	port := unbindablePortOrSkip(t)
-	if err := checkHostPort(port, PortBinderDaemon); err != nil {
+	if err := checkHostPort("", port, PortBinderDaemon); err != nil {
 		t.Fatalf("free privileged port %s under a daemon binder: %v", port, err)
 	}
 }
@@ -137,7 +138,7 @@ func TestPreflight_PrivilegedPortDaemonBinder(t *testing.T) {
 // cluster that doesn't exist.
 func TestPreflight_PrivilegedPortSelfBinder(t *testing.T) {
 	port := unbindablePortOrSkip(t)
-	err := checkHostPort(port, PortBinderSelf)
+	err := checkHostPort("", port, PortBinderSelf)
 	if err == nil {
 		t.Fatalf("privileged port %s under a self binder should error", port)
 	}
@@ -324,4 +325,75 @@ func writeKubeconfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// listenOn holds addr:<free port> for the duration of the test and
+// returns the port. tcp4 so a wildcard listener has the IPv4-only
+// shape docker's proxy has.
+func listenOn(t *testing.T, addr string) string {
+	t.Helper()
+	l, err := net.Listen("tcp4", net.JoinHostPort(addr, "0"))
+	if err != nil {
+		t.Skipf("cannot listen on %s here: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	_, port, err := net.SplitHostPort(l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// TestPreflight_BindAddressMatrix: the probe answers for the address
+// the provider will bind. A wildcard listener conflicts with every
+// bind address; a listener on an unrelated address conflicts with the
+// wildcard only.
+func TestPreflight_BindAddressMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bind      string
+		listener  string // "" = nothing listening
+		wantInUse bool
+		linuxOnly string // reason, when the case relies on Linux bind semantics
+	}{
+		{name: "wildcard bind, port free", bind: "0.0.0.0"},
+		{name: "wildcard bind, loopback listener", bind: "0.0.0.0", listener: "127.0.0.1", wantInUse: true},
+		{name: "wildcard bind, wildcard listener", bind: "0.0.0.0", listener: "0.0.0.0", wantInUse: true},
+		{name: "empty bind is the wildcard", bind: "", listener: "0.0.0.0", wantInUse: true},
+		{name: "loopback bind, port free", bind: "127.0.0.1"},
+		{name: "loopback bind, loopback listener", bind: "127.0.0.1", listener: "127.0.0.1", wantInUse: true},
+		{name: "loopback bind, wildcard listener", bind: "127.0.0.1", listener: "0.0.0.0", wantInUse: true},
+		{name: "loopback bind, listener on an unrelated address", bind: "127.0.0.1", listener: "127.0.0.2",
+			linuxOnly: "only Linux routes all of 127/8 to lo"},
+		{name: "wildcard bind, listener on an unrelated address", bind: "0.0.0.0", listener: "127.0.0.2", wantInUse: true,
+			linuxOnly: "only Linux routes all of 127/8 to lo, and collides a wildcard bind with it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.linuxOnly != "" && runtime.GOOS != "linux" {
+				t.Skip(tc.linuxOnly)
+			}
+			port := pickFreePort(t)
+			if tc.listener != "" {
+				port = listenOn(t, tc.listener)
+			}
+			err := checkHostPort(tc.bind, port, PortBinderSelf)
+			var inUse portInUseError
+			if got := errors.As(err, &inUse); got != tc.wantInUse {
+				t.Fatalf("in use = %v (err: %v), want %v", got, err, tc.wantInUse)
+			}
+			if !tc.wantInUse && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// An address the host does not own can never be bound; the error has
+// to point at the bind address rather than at another cluster.
+func TestPreflight_BindAddressNotOnHost(t *testing.T) {
+	// TEST-NET-1 (RFC 5737) is never assigned to an interface.
+	err := checkHostPort("192.0.2.1", pickFreePort(t), PortBinderSelf)
+	if err == nil || !strings.Contains(err.Error(), "not an address of this host") {
+		t.Fatalf("want a bind-address error, got %v", err)
+	}
 }

@@ -85,7 +85,7 @@ func nodeBinaryCmd(name string, run nodeRunFn) *cobra.Command {
 		Short: "Run " + name + " on the local cluster's node",
 		Long: `Routes <args> to the cluster node's ` + name + `:
   docker    backend: docker exec -i <container> ` + name + ` <args>
-  qemu      backend: ssh ystack@127.0.0.1 sudo k3s ` + name + ` <args>
+  qemu      backend: ssh ystack@<network.bindAddress> sudo k3s ` + name + ` <args>
   multipass backend: multipass exec <vm> -- sudo k3s ` + name + ` <args>
 
 stdin / stdout / stderr are passthrough — pipes work end to end.

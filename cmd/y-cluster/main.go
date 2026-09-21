@@ -368,8 +368,7 @@ message naming what was checked.`,
 				armHostTimerIfLifetime(rt.CacheDir, rt.Name, rt.Context, logger)
 				recordProvisioned(loaded, configDir, logger)
 				logger.Info("cluster ready",
-					zap.String("ssh", fmt.Sprintf("ssh -p %s -i %s ystack@localhost",
-						rt.SSHPort, filepath.Join(rt.CacheDir, rt.Name+"-ssh"))),
+					zap.String("ssh", rt.SSHCommand()),
 				)
 				return nil
 			case *config.DockerConfig:
