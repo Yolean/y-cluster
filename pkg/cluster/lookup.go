@@ -110,14 +110,12 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		return nil, fmt.Errorf("kubeconfig context %q not found (or has no cluster set)", contextName)
 	}
 
-	running, err := dockerContainerRunning(ctx, clusterName)
-	if err != nil {
-		// Daemon down, permission denied, etc. Propagate rather
-		// than silently falling through to qemu — that fall-
-		// through hid real misconfiguration when this was a
-		// shell-out.
-		return nil, fmt.Errorf("probe docker for %q: %w", clusterName, err)
-	}
+	// A docker daemon that cannot be asked (down, no permission, not
+	// installed) must not hide a cluster another backend runs: qemu,
+	// multipass and hetzner hosts need no docker at all. The probe
+	// error is kept and reported if no backend claims the cluster,
+	// since the cluster may then well be a docker one.
+	running, dockerErr := dockerContainerRunning(ctx, clusterName)
 	if running {
 		return &LookupResult{
 			Backend:       BackendDocker,
@@ -173,6 +171,9 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		}, nil
 	}
 
+	if dockerErr != nil {
+		return nil, fmt.Errorf("%w (cluster=%q, context=%q); docker could not be probed: %v", ErrNotFound, clusterName, contextName, dockerErr)
+	}
 	return nil, fmt.Errorf("%w (cluster=%q, context=%q)", ErrNotFound, clusterName, contextName)
 }
 

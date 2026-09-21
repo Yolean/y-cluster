@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +90,53 @@ func TestLookup_NoBackendMatchesIsErrNotFound(t *testing.T) {
 	_, err := Lookup(context.Background(), kc, "local")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+// unreachableDocker points the docker client at a socket that does not
+// exist, which is what a host without a docker daemon looks like.
+func unreachableDocker(t *testing.T) {
+	t.Helper()
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(t.TempDir(), "no-docker.sock"))
+}
+
+// A qemu host needs no docker daemon; stop, ctr and images load must
+// still find the cluster.
+func TestLookup_FindsQemuWhenDockerIsUnreachable(t *testing.T) {
+	requireKubectl(t)
+	unreachableDocker(t)
+	name := "y-cluster-test-nodocker"
+	dir := t.TempDir()
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, name+".pid"),
+		[]byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kc := writeKubeconfig(t, "local", name)
+
+	got, err := Lookup(context.Background(), kc, "local")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if got.Backend != BackendQEMU {
+		t.Fatalf("backend %q, want qemu", got.Backend)
+	}
+}
+
+// With no backend claiming the cluster, the docker probe failure is
+// the likeliest explanation and has to be in the error.
+func TestLookup_ReportsDockerProbeFailureWhenNothingMatches(t *testing.T) {
+	requireKubectl(t)
+	unreachableDocker(t)
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", t.TempDir())
+	kc := writeKubeconfig(t, "local", "y-cluster-test-no-such-thing-1234567890")
+
+	_, err := Lookup(context.Background(), kc, "local")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "docker could not be probed") {
+		t.Fatalf("error should carry the docker probe failure: %v", err)
 	}
 }
 
