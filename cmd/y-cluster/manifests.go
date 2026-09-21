@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"strings"
 
@@ -67,35 +68,70 @@ func stagedManifestPath(name string) string {
 	return "/var/lib/y-cluster/manifests-staging/" + name + ".yaml"
 }
 
+// nodeShell runs a shell command as root on the cluster node. The
+// manifests verbs go through it rather than cluster.RunShell directly
+// so their add/replace/rm rules can be tested against a real shell
+// and file system without a cluster.
+type nodeShell func(ctx context.Context, cmd string, stdin io.Reader, stdout, stderr io.Writer) error
+
+func nodeShellFor(lr *cluster.LookupResult) nodeShell {
+	return func(ctx context.Context, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+		return cluster.RunShell(ctx, lr, cmd, stdin, stdout, stderr)
+	}
+}
+
+// Markers the read command prints before the content, so that
+// "absent" is something the node said rather than something inferred
+// from a failed command.
+const (
+	stagedPresent = "y-cluster-manifest:present"
+	stagedAbsent  = "y-cluster-manifest:absent"
+)
+
 // readStagedManifest reads the bytes of a staged manifest off the
 // cluster node.
 //
 // Returns (content, true, nil) when the file is present;
-// (nil, false, nil) when it doesn't exist; (nil, false, err) on any
-// other failure (I/O, ssh, ctr-exec, etc.). The two-shell-call
-// shape costs a round-trip but keeps the "missing" case
-// distinguishable from "present but empty," which the idempotency
-// + replace/rm flows care about.
-func readStagedManifest(ctx context.Context, lr *cluster.LookupResult, target string) ([]byte, bool, error) {
-	if err := cluster.RunShell(ctx, lr, "test -e "+target, nil, nil, nil); err != nil {
-		return nil, false, nil
-	}
+// (nil, false, nil) when the node reports it absent; (nil, false,
+// err) on any failure to ask (ssh, docker exec, I/O). A transport
+// failure must never read as "absent": add would then overwrite a
+// manifest it could not see, and replace/rm would blame the operator
+// for a name that is staged.
+func readStagedManifest(ctx context.Context, sh nodeShell, target string) ([]byte, bool, error) {
+	q := shellSingleQuote(target)
+	cmd := "if [ -e " + q + " ]; then echo " + stagedPresent + "; cat " + q + "; else echo " + stagedAbsent + "; fi"
 	var stdout, stderr bytes.Buffer
-	if err := cluster.RunShell(ctx, lr, "cat "+target, nil, &stdout, &stderr); err != nil {
-		return nil, false, fmt.Errorf("read %s: %s: %w", target, stderr.String(), err)
+	if err := sh(ctx, cmd, nil, &stdout, &stderr); err != nil {
+		return nil, false, fmt.Errorf("read %s: %s: %w", target, strings.TrimSpace(stderr.String()), err)
 	}
-	return stdout.Bytes(), true, nil
+	marker, content, _ := bytes.Cut(stdout.Bytes(), []byte("\n"))
+	switch string(marker) {
+	case stagedPresent:
+		return content, true, nil
+	case stagedAbsent:
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("read %s: unexpected answer from the node: %q", target, marker)
+	}
 }
 
-// writeStagedManifest installs the file atomically with mode 0644
-// and creates the staging directory under mode 0755 if missing.
-// install(1) (not `cat > file`) is used so the file lands with a
-// known mode and a deterministic atomicity boundary.
-func writeStagedManifest(ctx context.Context, lr *cluster.LookupResult, target string, data []byte) error {
-	writeCmd := "install -d -m 0755 /var/lib/y-cluster/manifests-staging && " +
-		"install -m 0644 /dev/stdin " + target
+// writeStagedManifest puts the file in place atomically with mode
+// 0644 and creates the staging directory under mode 0755 if missing.
+//
+// Written to a sibling temp file and renamed, with nothing fancier
+// than cat, chmod and mv. `install -m 0644 /dev/stdin <target>` reads
+// nicer but depends on how install treats a pipe as its source:
+// uutils coreutils 0.2 (Ubuntu 25.10) fails it whenever the target
+// already exists, which is every `replace`. The temp name ends in
+// .tmp, which k3s does not apply should one be left behind and moved
+// to the manifests directory by prepare-export.
+func writeStagedManifest(ctx context.Context, sh nodeShell, target string, data []byte) error {
+	dir, tmp, dst := shellSingleQuote(path.Dir(target)), shellSingleQuote(target+".tmp"), shellSingleQuote(target)
+	writeCmd := "install -d -m 0755 " + dir + " && " +
+		"{ cat > " + tmp + " && chmod 0644 " + tmp + " && mv -f " + tmp + " " + dst + "; } || " +
+		"{ rc=$?; rm -f " + tmp + "; exit $rc; }"
 	var stderr bytes.Buffer
-	if err := cluster.RunShell(ctx, lr, writeCmd, bytes.NewReader(data), nil, &stderr); err != nil {
+	if err := sh(ctx, writeCmd, bytes.NewReader(data), nil, &stderr); err != nil {
 		return fmt.Errorf("write manifest: %s: %w", stderr.String(), err)
 	}
 	return nil
@@ -104,11 +140,69 @@ func writeStagedManifest(ctx context.Context, lr *cluster.LookupResult, target s
 // removeStagedManifest deletes the file from the staging directory.
 // Caller should have already checked existence so a missing file
 // here surfaces as a real error (permission, fs problem).
-func removeStagedManifest(ctx context.Context, lr *cluster.LookupResult, target string) error {
+func removeStagedManifest(ctx context.Context, sh nodeShell, target string) error {
 	var stderr bytes.Buffer
-	if err := cluster.RunShell(ctx, lr, "rm "+target, nil, nil, &stderr); err != nil {
+	if err := sh(ctx, "rm "+shellSingleQuote(target), nil, nil, &stderr); err != nil {
 		return fmt.Errorf("rm %s: %s: %w", target, stderr.String(), err)
 	}
+	return nil
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// stageAdd, stageReplace and stageRemove are the rules of the three
+// verbs, apart from cobra and the cluster lookup.
+
+func stageAdd(ctx context.Context, sh nodeShell, out io.Writer, name, target string, data []byte) error {
+	existing, present, err := readStagedManifest(ctx, sh, target)
+	if err != nil {
+		return err
+	}
+	if present {
+		if bytes.Equal(existing, data) {
+			fmt.Fprintf(out, "manifest %q already staged at %s with identical content; no change\n", name, target)
+			return nil
+		}
+		return fmt.Errorf("manifest %q already staged at %s with different content; use `y-cluster manifests replace` to overwrite", name, target)
+	}
+	if err := writeStagedManifest(ctx, sh, target, data); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "staged manifest %q -> %s (%d bytes)\n", name, target, len(data))
+	return nil
+}
+
+func stageReplace(ctx context.Context, sh nodeShell, out io.Writer, name, target string, data []byte) error {
+	existing, present, err := readStagedManifest(ctx, sh, target)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return fmt.Errorf("manifest %q is not staged at %s; use `y-cluster manifests add` to create", name, target)
+	}
+	if bytes.Equal(existing, data) {
+		fmt.Fprintf(out, "manifest %q at %s already matches input; no change\n", name, target)
+		return nil
+	}
+	if err := writeStagedManifest(ctx, sh, target, data); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "replaced manifest %q -> %s (%d bytes)\n", name, target, len(data))
+	return nil
+}
+
+func stageRemove(ctx context.Context, sh nodeShell, out io.Writer, name, target string) error {
+	if _, present, err := readStagedManifest(ctx, sh, target); err != nil {
+		return err
+	} else if !present {
+		return fmt.Errorf("manifest %q is not staged at %s; nothing to remove", name, target)
+	}
+	if err := removeStagedManifest(ctx, sh, target); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "removed manifest %q from %s\n", name, target)
 	return nil
 }
 
@@ -175,22 +269,7 @@ since k3s remembers the prior apply).`,
 			if err != nil {
 				return err
 			}
-			existing, present, err := readStagedManifest(c.Context(), lr, target)
-			if err != nil {
-				return err
-			}
-			if present {
-				if bytes.Equal(existing, data) {
-					fmt.Fprintf(c.OutOrStdout(), "manifest %q already staged at %s with identical content; no change\n", name, target)
-					return nil
-				}
-				return fmt.Errorf("manifest %q already staged at %s with different content; use `y-cluster manifests replace` to overwrite", name, target)
-			}
-			if err := writeStagedManifest(c.Context(), lr, target, data); err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "staged manifest %q -> %s (%d bytes)\n", name, target, len(data))
-			return nil
+			return stageAdd(c.Context(), nodeShellFor(lr), c.OutOrStdout(), name, target, data)
 		},
 	}
 	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
@@ -224,22 +303,7 @@ scripts can read the outcome.`,
 			if err != nil {
 				return err
 			}
-			existing, present, err := readStagedManifest(c.Context(), lr, target)
-			if err != nil {
-				return err
-			}
-			if !present {
-				return fmt.Errorf("manifest %q is not staged at %s; use `y-cluster manifests add` to create", name, target)
-			}
-			if bytes.Equal(existing, data) {
-				fmt.Fprintf(c.OutOrStdout(), "manifest %q at %s already matches input; no change\n", name, target)
-				return nil
-			}
-			if err := writeStagedManifest(c.Context(), lr, target, data); err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "replaced manifest %q -> %s (%d bytes)\n", name, target, len(data))
-			return nil
+			return stageReplace(c.Context(), nodeShellFor(lr), c.OutOrStdout(), name, target, data)
 		},
 	}
 	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
@@ -271,17 +335,7 @@ that's no longer wanted before prepare-export captures it.`,
 			if err != nil {
 				return err
 			}
-			target := stagedManifestPath(name)
-			if _, present, err := readStagedManifest(c.Context(), lr, target); err != nil {
-				return err
-			} else if !present {
-				return fmt.Errorf("manifest %q is not staged at %s; nothing to remove", name, target)
-			}
-			if err := removeStagedManifest(c.Context(), lr, target); err != nil {
-				return err
-			}
-			fmt.Fprintf(c.OutOrStdout(), "removed manifest %q from %s\n", name, target)
-			return nil
+			return stageRemove(c.Context(), nodeShellFor(lr), c.OutOrStdout(), name, stagedManifestPath(name))
 		},
 	}
 	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")

@@ -108,6 +108,46 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 	// (state advancing to running or terminated) proves load made
 	// the bytes available to kubelet.
 	assertAirgapPod(t, ctxName)
+	assertManifestsStaging(t, bin, ctxName)
+}
+
+// assertManifestsStaging runs the manifests verbs against the real
+// node. The verbs' rules are unit tested against a local shell; what
+// only a node can say is whether its own userland agrees: the docker
+// backend's node is the k3s image's busybox, the VM backends' a full
+// distribution.
+func assertManifestsStaging(t *testing.T, bin, ctxName string) {
+	t.Helper()
+	dir := t.TempDir()
+	v1, v2 := filepath.Join(dir, "v1.yaml"), filepath.Join(dir, "v2.yaml")
+	for path, name := range map[string]string{v1: "one", v2: "two"} {
+		body := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: e2e-staging-" + name + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const name = "e2e-staging"
+	staged := "/var/lib/y-cluster/manifests-staging/" + name + ".yaml"
+
+	runYCluster(t, bin, "manifests", "add", "--context="+ctxName, name, v1)
+	if out := runYCluster(t, bin, "manifests", "add", "--context="+ctxName, name, v1); !strings.Contains(out, "no change") {
+		t.Errorf("re-adding identical content should be a no-op, got %q", out)
+	}
+	if out, err := runYClusterRaw(t, bin, "manifests", "add", "--context="+ctxName, name, v2); err == nil {
+		t.Errorf("add over different content should be refused, got %q", out)
+	}
+	// Overwriting an existing file is the step that depends on the
+	// node's userland.
+	runYCluster(t, bin, "manifests", "replace", "--context="+ctxName, name, v2)
+	// A second replace with the same input reads the node's copy
+	// back and compares it byte for byte.
+	if out, err := runYClusterRaw(t, bin, "manifests", "replace", "--context="+ctxName, name, v2); err != nil || !strings.Contains(out, "no change") {
+		t.Errorf("the node should now hold v2 byte for byte (%s): %v %q", staged, err, out)
+	}
+	runYCluster(t, bin, "manifests", "rm", "--context="+ctxName, name)
+	if out, err := runYClusterRaw(t, bin, "manifests", "rm", "--context="+ctxName, name); err == nil {
+		t.Errorf("rm of a name that is no longer staged should fail, got %q", out)
+	}
 }
 
 // assertAirgapPod is CI5: it applies a tiny Pod referencing the
