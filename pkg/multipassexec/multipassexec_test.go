@@ -2,6 +2,7 @@ package multipassexec
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,15 @@ func TestErrNotFound_IsSentinel(t *testing.T) {
 	wrapped := errors.Join(ErrNotFound, errors.New("context"))
 	if !errors.Is(wrapped, ErrNotFound) {
 		t.Fatal("errors.Is should match wrapped ErrNotFound")
+	}
+}
+
+// Purge must never reach beyond the named instance.
+func TestDeleteArgs_PurgeIsScopedToTheInstance(t *testing.T) {
+	if got := strings.Join(deleteArgs("vm1", true), " "); got != "delete --purge vm1" {
+		t.Errorf("purge: %q", got)
+	}
+	if got := strings.Join(deleteArgs("vm1", false), " "); got != "delete vm1" {
+		t.Errorf("no purge: %q", got)
 	}
 }

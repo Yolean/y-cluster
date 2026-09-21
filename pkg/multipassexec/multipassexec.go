@@ -163,21 +163,27 @@ func Stop(ctx context.Context, name string) error {
 	return nil
 }
 
-// Delete wraps `multipass delete <name>`. Pass purge=true to also
-// run `multipass purge` afterwards (drops the recoverable state).
-// ErrNotFound is returned when the VM is missing.
+// deleteArgs is the `multipass delete` argv. Purging is scoped to the
+// named instance with --purge. A bare `multipass purge` would
+// permanently remove EVERY deleted instance on the host, including
+// ones the operator deleted themselves and may still want to recover.
+func deleteArgs(name string, purge bool) []string {
+	if purge {
+		return []string{"delete", "--purge", name}
+	}
+	return []string{"delete", name}
+}
+
+// Delete wraps `multipass delete <name>`. Pass purge=true to drop the
+// instance's recoverable state as well. ErrNotFound is returned when
+// the VM is missing.
 func Delete(ctx context.Context, name string, purge bool) error {
-	out, err := Run(ctx, nil, "delete", name)
+	out, err := Run(ctx, nil, deleteArgs(name, purge)...)
 	if err != nil {
 		if isNotFoundOutput(out) {
 			return ErrNotFound
 		}
 		return fmt.Errorf("multipass delete %s: %s: %w", name, out, err)
-	}
-	if purge {
-		if pout, perr := Run(ctx, nil, "purge"); perr != nil {
-			return fmt.Errorf("multipass purge: %s: %w", pout, perr)
-		}
 	}
 	return nil
 }
