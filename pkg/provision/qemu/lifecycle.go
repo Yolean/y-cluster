@@ -119,12 +119,7 @@ func guestPoweroff(cacheDir, name string, pid int, logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
-	target := sshexec.Target{
-		Host:    "127.0.0.1",
-		Port:    cfg.SSHPort,
-		User:    "ystack",
-		KeyPath: filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"),
-	}
+	target := cfg.endpoints().sshTarget(filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"))
 	// sync first so any pending writes hit disk before systemd
 	// kills off the writers. poweroff is async; the command
 	// returns immediately and shutdown propagates.
