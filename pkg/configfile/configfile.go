@@ -39,14 +39,15 @@ type Defaulter interface {
 	ApplyDefaults()
 }
 
-// Load reads <dir>/<filename> with strict YAML decoding into target.
+// Load reads <dir>/<filename> with strict YAML decoding into target,
+// which must be a pointer.
 // Strict decoding rejects unknown fields, which catches typos before
 // the runtime quietly ignores them.
 //
 // After unmarshal, Load calls target.SetDir(abs) if target implements
 // DirAware, then target.Validate() if target implements Validator.
 // Validation errors are wrapped with the file path.
-func Load[T any](dir, filename string, target *T) error {
+func Load(dir, filename string, target any) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", dir, err)
@@ -73,13 +74,13 @@ func Load[T any](dir, filename string, target *T) error {
 	if err := envsubst.Apply(target, envsubst.OSEnv); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	if d, ok := any(target).(DirAware); ok {
+	if d, ok := target.(DirAware); ok {
 		d.SetDir(abs)
 	}
-	if d, ok := any(target).(Defaulter); ok {
+	if d, ok := target.(Defaulter); ok {
 		d.ApplyDefaults()
 	}
-	if v, ok := any(target).(Validator); ok {
+	if v, ok := target.(Validator); ok {
 		if err := v.Validate(); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}

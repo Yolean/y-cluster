@@ -87,11 +87,10 @@ func run() error {
 		return err
 	}
 
-	providers := []providerTarget{
-		{"qemu.schema.json", config.ProviderQEMU, &config.QEMUConfig{}},
-		{"docker.schema.json", config.ProviderDocker, &config.DockerConfig{}},
-		{"multipass.schema.json", config.ProviderMultipass, &config.MultipassConfig{}},
-		{"hetzner.schema.json", config.ProviderHetzner, &config.HetznerConfig{}},
+	// One schema per registered provider, <provider>.schema.json.
+	var providers []providerTarget
+	for _, name := range config.AllProviders {
+		providers = append(providers, providerTarget{name + ".schema.json", name, config.NewProviderConfig(name)})
 	}
 
 	if err := checkCollisions(providers); err != nil {

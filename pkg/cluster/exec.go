@@ -38,6 +38,14 @@ func RunCrictl(ctx context.Context, lr *LookupResult, args []string, stdin io.Re
 }
 
 func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return execOnNode(ctx, lr, append([]string{binary}, args...), buildVMNodeRemote(binary, args), stdin, stdout, stderr)
+}
+
+// execOnNode is the one place that knows how each backend reaches
+// its node. The docker backend's node is a container and takes an
+// argv; the VM backends run one command line under the node's shell,
+// over ssh or `multipass exec`.
+func execOnNode(ctx context.Context, lr *LookupResult, containerArgv []string, vmCommand string, stdin io.Reader, stdout, stderr io.Writer) error {
 	switch lr.Backend {
 	case BackendDocker:
 		cli, err := dockerexec.New()
@@ -45,17 +53,14 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 			return fmt.Errorf("docker client: %w", err)
 		}
 		defer func() { _ = cli.Close() }()
-		return dockerexec.Exec(ctx, cli, lr.ContainerName,
-			append([]string{binary}, args...),
-			stdin, stdout, stderr)
+		return dockerexec.Exec(ctx, cli, lr.ContainerName, containerArgv, stdin, stdout, stderr)
 	case BackendQEMU, BackendHetzner:
 		return sshexec.ExecStream(ctx, sshexec.Target{
 			Host: lr.SSHHost, Port: lr.SSHPort,
 			User: lr.SSHUser, KeyPath: lr.SSHKey,
-		}, buildVMNodeRemote(binary, args), stdin, stdout, stderr)
+		}, vmCommand, stdin, stdout, stderr)
 	case BackendMultipass:
-		return multipassexec.ExecStream(ctx, lr.MultipassName,
-			buildVMNodeRemote(binary, args), stdin, stdout, stderr)
+		return multipassexec.ExecStream(ctx, lr.MultipassName, vmCommand, stdin, stdout, stderr)
 	default:
 		return fmt.Errorf("unsupported backend %q", lr.Backend)
 	}
@@ -79,30 +84,8 @@ func buildVMNodeRemote(binary string, args []string) string {
 //
 // stdin/stdout/stderr are passthrough so callers can pipe arbitrary
 // bytes (manifest YAML on stdin, command output to stdout).
-//
-// Routing per backend mirrors RunCtr.
 func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
-	switch lr.Backend {
-	case BackendDocker:
-		cli, err := dockerexec.New()
-		if err != nil {
-			return fmt.Errorf("docker client: %w", err)
-		}
-		defer func() { _ = cli.Close() }()
-		return dockerexec.Exec(ctx, cli, lr.ContainerName,
-			[]string{"sh", "-c", cmd},
-			stdin, stdout, stderr)
-	case BackendQEMU, BackendHetzner:
-		return sshexec.ExecStream(ctx, sshexec.Target{
-			Host: lr.SSHHost, Port: lr.SSHPort,
-			User: lr.SSHUser, KeyPath: lr.SSHKey,
-		}, "sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
-	case BackendMultipass:
-		return multipassexec.ExecStream(ctx, lr.MultipassName,
-			"sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
-	default:
-		return fmt.Errorf("unsupported backend %q", lr.Backend)
-	}
+	return execOnNode(ctx, lr, []string{"sh", "-c", cmd}, "sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
 }
 
 // singleQuote wraps a string in POSIX single quotes for safe inclusion

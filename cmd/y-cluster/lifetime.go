@@ -360,13 +360,7 @@ output unconditionally:
 			if err != nil {
 				return err
 			}
-			acc, ok := loaded.(interface {
-				LifetimePolicy() config.LifetimeConfig
-			})
-			if !ok {
-				return nil // provider with no lifetime surface: emit nothing
-			}
-			flags, err := lifetime.GCPFlags(acc.LifetimePolicy().MaxRun)
+			flags, err := lifetime.GCPFlags(loaded.Common().Lifetime.MaxRun)
 			if err != nil {
 				return err
 			}

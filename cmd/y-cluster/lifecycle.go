@@ -9,19 +9,18 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
-	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
-	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
 
 // pauseCmd, resumeCmd, stopCmd, startCmd are the cluster lifecycle
 // subcommands -- a provisioner-neutral surface with per-backend
-// depth: stop dispatches to all three backends; pause and resume
-// are qemu-only and return a "not yet implemented for <backend>"
-// error elsewhere; start assumes qemu outright (it rehydrates from
-// the qemu sidecar, so a stopped docker cluster gets the qemu "no
-// saved state" error rather than a not-implemented one).
+// depth: stop works on every provider; pause and resume are
+// qemu-only, refused for hetzner with the reason and "not yet
+// implemented" elsewhere; start handles qemu and hetzner (it
+// rehydrates from their state sidecars, so a stopped docker
+// cluster gets the qemu "no saved state" error rather than a
+// not-implemented one).
 //
 // All four resolve the cluster via the kubeconfig context (the
 // same convention detect / ctr / crictl use) -- no -c <dir>
@@ -38,11 +37,8 @@ func resumeCmd() *cobra.Command {
 	return signalCmd("resume", "Resume a paused cluster VM (SIGCONT)", qemu.Resume)
 }
 
-// stopCmd dispatches per-backend rather than going through
-// signalCmd: qemu.Stop's signature takes (cacheDir, name); docker
-// and multipass take (ctx, name); a uniform signalCmd helper
-// would need a wrapper per backend anyway, so the explicit switch
-// is clearer.
+// stopCmd resolves the context to a running cluster and hands it to
+// that provider's stop adapter.
 func stopCmd() *cobra.Command {
 	var contextName string
 	cmd := &cobra.Command{
@@ -56,21 +52,13 @@ func stopCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			switch lr.Backend {
-			case cluster.BackendQEMU:
-				// A manual stop ends this run's budget; remove the
-				// host expiry timer. `start` re-arms a fresh window.
-				disarmHostTimer(contextName, logger)
-				return qemu.Stop(qemuCacheDir(), lr.ClusterName, logger)
-			case cluster.BackendDocker:
-				return docker.Stop(ctx, lr.ClusterName, logger)
-			case cluster.BackendMultipass:
-				return multipass.Stop(ctx, lr.ClusterName, logger)
-			case cluster.BackendHetzner:
-				return hetzner.Stop(ctx, lr.ClusterName, logger)
-			default:
-				return fmt.Errorf("stop: not yet implemented for %s", lr.Backend)
+			// Backends and providers share their names; a test holds
+			// that every backend has an entry.
+			ops, ok := providers[string(lr.Backend)]
+			if !ok {
+				return fmt.Errorf("stop: no provisioner for backend %s in this binary", lr.Backend)
 			}
+			return ops.stop(ctx, contextName, lr.ClusterName, logger)
 		},
 	}
 	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")

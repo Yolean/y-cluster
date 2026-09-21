@@ -16,9 +16,6 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/inventory"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
-	"github.com/Yolean/y-cluster/pkg/provision/docker"
-	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
-	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
 )
@@ -308,7 +305,7 @@ func loggerFromContext(ctx context.Context) *zap.Logger {
 // loadProvision is shared by provision/teardown/export/import. Each
 // subcommand reads y-cluster-provision.yaml from its -c <dir>;
 // provider-specific data dispatches via config.LoadProvision.
-func loadProvision(dir string) (any, error) {
+func loadProvision(dir string) (config.ProviderConfig, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("--config (-c) is required")
 	}
@@ -317,10 +314,10 @@ func loadProvision(dir string) (any, error) {
 
 // asQEMU narrows for subcommands that are qemu-specific (export,
 // import: VMDK conversion makes no sense for docker).
-func asQEMU(cfg any) (*config.QEMUConfig, error) {
+func asQEMU(cfg config.ProviderConfig) (*config.QEMUConfig, error) {
 	q, ok := cfg.(*config.QEMUConfig)
 	if !ok {
-		return nil, fmt.Errorf("provider %T not supported by this subcommand (qemu only)", cfg)
+		return nil, fmt.Errorf("provider %q not supported by this subcommand (qemu only)", cfg.Common().Provider)
 	}
 	return q, nil
 }
@@ -354,59 +351,17 @@ message naming what was checked.`,
 			if err != nil {
 				return err
 			}
-			switch v := loaded.(type) {
-			case *config.QEMUConfig:
-				rt := qemu.FromConfig(v)
-				if err := qemu.CheckPrerequisites(); err != nil {
-					return err
-				}
-				if _, err := qemu.Provision(cmd.Context(), rt, logger); err != nil {
-					return err
-				}
-				// Provision armed the deadline; install the host-side
-				// timer that fires the local expiry action.
-				armHostTimerIfLifetime(rt.CacheDir, rt.Name, rt.Context, logger)
-				recordProvisioned(loaded, configDir, logger)
-				logger.Info("cluster ready",
-					zap.String("ssh", rt.SSHCommand()),
-				)
-				return nil
-			case *config.DockerConfig:
-				if _, err := docker.Provision(cmd.Context(), *v, logger); err != nil {
-					return err
-				}
-				recordProvisioned(loaded, configDir, logger)
-				logger.Info("cluster ready",
-					zap.String("docker", fmt.Sprintf("docker exec -it %s sh", v.Name)),
-				)
-				return nil
-			case *config.MultipassConfig:
-				rt := multipass.FromConfig(v)
-				if _, err := multipass.Provision(cmd.Context(), rt, logger); err != nil {
-					return err
-				}
-				recordProvisioned(loaded, configDir, logger)
-				logger.Info("cluster ready",
-					zap.String("multipass", fmt.Sprintf("multipass shell %s", rt.Name)),
-				)
-				return nil
-			case *config.HetznerConfig:
-				cluster, err := hetzner.Provision(cmd.Context(), *v, logger)
-				if err != nil {
-					return err
-				}
-				recordProvisioned(loaded, configDir, logger)
-				// Lifetime expiry details (or the lack of a budget)
-				// are logged by Provision's reaper step.
-				logger.Info("cluster ready",
-					zap.String("ssh", fmt.Sprintf("ssh -i %s %s@%s",
-						filepath.Join(hetzner.CacheDir(), v.Context+"-ssh"),
-						v.SSHUser, cluster.PublicIPv4())),
-				)
-				return nil
-			default:
-				return fmt.Errorf("provider %T not supported by provision", v)
+			ops, err := opsFor(loaded)
+			if err != nil {
+				return err
 			}
+			loginHint, err := ops.provision(cmd.Context(), loaded, logger)
+			if err != nil {
+				return err
+			}
+			recordProvisioned(loaded, ops.hostPorts(loaded), configDir, logger)
+			logger.Info("cluster ready", zap.String("login", loginHint))
+			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
@@ -441,36 +396,19 @@ config directory.`,
 			if err != nil {
 				return err
 			}
-			var ctxName string
-			var tearErr error
-			switch v := loaded.(type) {
-			case *config.QEMUConfig:
-				// Remove the host expiry timer before the cluster goes;
-				// the deadline is moot once teardown removes the sidecar.
-				disarmHostTimer(v.Context, logger)
-				ctxName = v.Context
-				tearErr = qemu.TeardownConfig(qemu.FromConfig(v), keepDisk, logger)
-			case *config.DockerConfig:
-				// docker has no persistent disk; keepDisk is
-				// a no-op for this provider.
-				ctxName = v.Context
-				tearErr = docker.TeardownConfig(*v, keepDisk, logger)
-			case *config.MultipassConfig:
-				ctxName = v.Context
-				tearErr = multipass.TeardownConfig(multipass.FromConfig(v), keepDisk, logger)
-			case *config.HetznerConfig:
-				ctxName = v.Context
-				tearErr = hetzner.Teardown(cmd.Context(), v.Context, logger)
-			default:
-				return fmt.Errorf("provider %T not supported by teardown", v)
+			ops, err := opsFor(loaded)
+			if err != nil {
+				return err
 			}
-			if tearErr == nil {
-				if err := inventory.Remove(ctxName); err != nil {
-					logger.Warn("inventory record removal failed",
-						zap.String("context", ctxName), zap.Error(err))
-				}
+			if err := ops.teardown(cmd.Context(), loaded, keepDisk, logger); err != nil {
+				return err
 			}
-			return tearErr
+			ctxName := loaded.Common().Context
+			if err := inventory.Remove(ctxName); err != nil {
+				logger.Warn("inventory record removal failed",
+					zap.String("context", ctxName), zap.Error(err))
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml; omit to list candidates")
@@ -508,31 +446,18 @@ func listTeardownCandidates(cmd *cobra.Command) error {
 // conflicts. Best-effort by design: inventory trouble must never
 // fail a provision that already succeeded, so errors are logged
 // and dropped.
-func recordProvisioned(loaded any, configDir string, logger *zap.Logger) {
+func recordProvisioned(loaded config.ProviderConfig, hostPorts []string, configDir string, logger *zap.Logger) {
 	abs, err := filepath.Abs(configDir)
 	if err != nil {
 		abs = configDir
 	}
-	rec := inventory.Record{ConfigDir: abs}
-	switch v := loaded.(type) {
-	case *config.QEMUConfig:
-		rec.Provider, rec.Name, rec.Context = "qemu", v.Name, v.Context
-		rec.HostPorts = forwardHostPorts(v.PortForwards)
-		if v.SSHPort != "" {
-			rec.HostPorts = append(rec.HostPorts, v.SSHPort)
-		}
-	case *config.DockerConfig:
-		rec.Provider, rec.Name, rec.Context = "docker", v.Name, v.Context
-		rec.HostPorts = forwardHostPorts(v.PortForwards)
-	case *config.MultipassConfig:
-		rec.Provider, rec.Name, rec.Context = "multipass", v.Name, v.Context
-		rec.HostPorts = forwardHostPorts(v.PortForwards)
-	case *config.HetznerConfig:
-		// Remote provider: no host ports to record, but the
-		// config path is still worth listing for teardown.
-		rec.Provider, rec.Name, rec.Context = "hetzner", v.Name, v.Context
-	default:
-		return
+	c := loaded.Common()
+	rec := inventory.Record{
+		ConfigDir: abs,
+		Provider:  c.Provider,
+		Name:      c.Name,
+		Context:   c.Context,
+		HostPorts: hostPorts,
 	}
 	if err := inventory.Save(rec); err != nil {
 		logger.Warn("inventory record write failed", zap.Error(err))
