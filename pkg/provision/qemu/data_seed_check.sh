@@ -141,6 +141,16 @@ fi
 # fstab mount soft-failed. mkdir -p is a no-op if it already exists.
 mkdir -p "$MOUNT"
 
+# zstdcat's exit status is lost in the pipe below (POSIX sh has no
+# pipefail), and tar accepts a stream that happens to end on a member
+# boundary. Testing the archive first makes a damaged seed fail here,
+# before anything is extracted, instead of possibly as a partial
+# extract with a marker on top.
+if ! zstd -tq "$SEED"; then
+    echo "y-cluster-data-seed: $SEED is damaged; refusing to extract. This appliance disk needs to be replaced." >&2
+    exit 1
+fi
+
 echo "y-cluster-data-seed: extracting $SEED to $MOUNT"
 zstdcat "$SEED" | tar -C "$MOUNT" -xpf -
 echo "y-cluster-data-seed: extracted."
