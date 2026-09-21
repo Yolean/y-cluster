@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -336,11 +337,13 @@ func hetznerRunning(name string) (bool, string, string, string) {
 	return true, filepath.Join(cacheDir, name+"-ssh"), s.IPv4, s.SSHUser
 }
 
-// readQemuState reads the ssh port and the forwards' bind address
-// out of the qemu provisioner's state sidecar at the given path.
-// Returns empty strings on any failure (missing file, bad JSON, no
-// field); callers fall back to defaults. The qemu package's state
-// struct is not imported because qemu imports this package.
+// readQemuState reads where the guest's sshd is reached out of the
+// qemu provisioner's state sidecar at the given path: the recorded
+// ssh port and forward bind address in user mode, the guest's own
+// address and port 22 in tap mode. Returns empty strings on any
+// failure (missing file, bad JSON, no field); callers fall back to
+// defaults. The qemu package's state struct is not imported because
+// qemu imports this package.
 func readQemuState(path string) (sshPort, bindAddress string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -349,9 +352,17 @@ func readQemuState(path string) (sshPort, bindAddress string) {
 	var s struct {
 		SSHPort     string `json:"sshPort"`
 		BindAddress string `json:"bindAddress"`
+		Tap         *struct {
+			GuestAddress string `json:"guestAddress"`
+		} `json:"tap"`
 	}
 	if err := json.Unmarshal(data, &s); err != nil {
 		return "", ""
+	}
+	if s.Tap != nil {
+		if ip, _, err := net.ParseCIDR(s.Tap.GuestAddress); err == nil {
+			return "22", ip.String()
+		}
 	}
 	return s.SSHPort, s.BindAddress
 }
