@@ -30,8 +30,15 @@ type endpoints struct {
 
 // endpoints derives the host-side addresses. A user-mode (slirp)
 // guest is only reachable through the host port forwards, so every
-// host is the address those forwards can be dialed on.
+// host is the address those forwards can be dialed on. A tap guest is
+// reached on its own address.
 func (c Config) endpoints() endpoints {
+	if c.Tap != nil {
+		// The guest has an address of its own; every port is reached
+		// on it directly.
+		ip := c.Tap.guestIP()
+		return endpoints{SSHHost: ip, SSHPort: "22", APIHost: ip, APIPort: "6443", IngressIP: ip}
+	}
 	host := config.HostDialAddress(c.BindAddress)
 	e := endpoints{SSHHost: host, SSHPort: c.SSHPort, APIHost: host}
 	for _, pf := range c.PortForwards {
@@ -79,10 +86,17 @@ func rewriteKubeconfigServer(raw []byte, e endpoints) ([]byte, error) {
 	return bytes.ReplaceAll(raw, []byte(guestAPIServer), []byte(e.APIHost+":"+e.APIPort)), nil
 }
 
-// netdevArg renders qemu's -netdev value: user-mode networking with
-// one hostfwd for ssh and one per configured port forward, all bound
-// to cfg.BindAddress. slirp reads an empty host address as 0.0.0.0.
+// netdevArg renders qemu's -netdev value. User mode: one hostfwd for
+// ssh and one per configured port forward, all bound to
+// cfg.BindAddress; slirp reads an empty host address as 0.0.0.0. Tap
+// mode: the pre-created device.
 func netdevArg(cfg Config) string {
+	if cfg.Tap != nil {
+		// script=no,downscript=no: the device is already configured
+		// by the host operator, and qemu's default scripts would
+		// need root.
+		return fmt.Sprintf("tap,id=%s,ifname=%s,script=no,downscript=no", netdevID, cfg.Tap.Ifname)
+	}
 	netdev := fmt.Sprintf("user,id=%s,hostfwd=tcp:%s:%s-:22", netdevID, cfg.BindAddress, cfg.SSHPort)
 	for _, pf := range cfg.PortForwards {
 		netdev += fmt.Sprintf(",hostfwd=tcp:%s:%s-:%s", cfg.BindAddress, pf.Host, pf.Guest)
@@ -111,6 +125,17 @@ func k3sServerFlags(e endpoints) string {
 }
 
 const netdevID = "net0"
+
+// nicArg renders the -device value for the guest NIC. The MAC is set
+// in tap mode only, which keeps user-mode launches identical to what
+// they were before tap mode existed.
+func nicArg(cfg Config) string {
+	nic := "virtio-net-pci,netdev=" + netdevID
+	if cfg.Tap != nil {
+		nic += ",mac=" + cfg.Tap.MAC
+	}
+	return nic
+}
 
 // vmDisks names the drives of one VM launch, in attach order. The
 // order is load-bearing: the guest sees them as vda, vdb, ... and the
@@ -141,7 +166,7 @@ func vmArgs(cfg Config, disks vmDisks, consolePath, pidFile string) []string {
 	}
 	return append(args,
 		"-netdev", netdevArg(cfg),
-		"-device", "virtio-net-pci,netdev="+netdevID,
+		"-device", nicArg(cfg),
 		"-serial", "file:"+consolePath,
 		"-display", "none",
 		"-daemonize",

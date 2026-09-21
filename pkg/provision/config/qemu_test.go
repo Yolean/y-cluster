@@ -275,23 +275,56 @@ func TestQEMU_Network_Defaults(t *testing.T) {
 }
 
 func TestQEMU_Network_Validate(t *testing.T) {
+	tap := func(mut func(*QEMUConfig)) *QEMUConfig {
+		c := &QEMUConfig{Network: QEMUNetwork{Mode: "tap", Ifname: "ycl0", GuestAddress: "10.88.0.2/24"}}
+		if mut != nil {
+			mut(c)
+		}
+		return c
+	}
+	user := func(mut func(*QEMUConfig)) *QEMUConfig {
+		c := &QEMUConfig{}
+		if mut != nil {
+			mut(c)
+		}
+		return c
+	}
 	for _, tc := range []struct {
-		name, mode, bind, wantErr string
+		name    string
+		cfg     *QEMUConfig
+		wantErr string
 	}{
-		{"loopback", "user", "127.0.0.1", ""},
-		{"wildcard restores exposure on all interfaces", "user", "0.0.0.0", ""},
-		{"specific host address", "user", "192.168.1.10", ""},
-		{"hostname", "user", "localhost", "network.bindAddress"},
-		{"ipv6", "user", "::1", "network.bindAddress"},
-		{"ipv4-mapped ipv6", "user", "::ffff:127.0.0.1", "network.bindAddress"},
-		{"with port", "user", "127.0.0.1:80", "network.bindAddress"},
-		{"unknown mode", "bridge", "127.0.0.1", "network.mode"},
+		{"user: defaults", user(nil), ""},
+		{"user: wildcard restores exposure on all interfaces", user(func(c *QEMUConfig) { c.Network.BindAddress = "0.0.0.0" }), ""},
+		{"user: specific host address", user(func(c *QEMUConfig) { c.Network.BindAddress = "192.168.1.10" }), ""},
+		{"user: hostname", user(func(c *QEMUConfig) { c.Network.BindAddress = "localhost" }), "network.bindAddress"},
+		{"user: ipv6", user(func(c *QEMUConfig) { c.Network.BindAddress = "::1" }), "network.bindAddress"},
+		{"user: ipv4-mapped ipv6", user(func(c *QEMUConfig) { c.Network.BindAddress = "::ffff:127.0.0.1" }), "network.bindAddress"},
+		{"user: with port", user(func(c *QEMUConfig) { c.Network.BindAddress = "127.0.0.1:80" }), "network.bindAddress"},
+		{"user: tap field", user(func(c *QEMUConfig) { c.Network.Ifname = "ycl0" }), "only apply to network.mode"},
+		{"user: dns", user(func(c *QEMUConfig) { c.Network.DNS = []string{"1.1.1.1"} }), "only apply to network.mode"},
+		{"unknown mode", user(func(c *QEMUConfig) { c.Network.Mode = "bridge" }), "network.mode"},
+
+		{"tap: minimal", tap(nil), ""},
+		{"tap: explicit gateway and dns", tap(func(c *QEMUConfig) { c.Network.Gateway = "10.88.0.254"; c.Network.DNS = []string{"10.88.0.254"} }), ""},
+		{"tap: ifname missing", tap(func(c *QEMUConfig) { c.Network.Ifname = "" }), "network.ifname is required"},
+		{"tap: ifname too long", tap(func(c *QEMUConfig) { c.Network.Ifname = "sixteen-chars-xx" }), "not a valid interface name"},
+		{"tap: ifname would inject a netdev option", tap(func(c *QEMUConfig) { c.Network.Ifname = "a,script=x" }), "not a valid interface name"},
+		{"tap: guestAddress missing", tap(func(c *QEMUConfig) { c.Network.GuestAddress = "" }), "network.guestAddress"},
+		{"tap: guestAddress without prefix", tap(func(c *QEMUConfig) { c.Network.GuestAddress = "10.88.0.2" }), "network.guestAddress"},
+		{"tap: guestAddress ipv6", tap(func(c *QEMUConfig) { c.Network.GuestAddress = "fd00::2/64" }), "network.guestAddress"},
+		{"tap: /31 has no room for a gateway", tap(func(c *QEMUConfig) { c.Network.GuestAddress = "10.88.0.2/31" }), "no room for a gateway"},
+		{"tap: gateway outside subnet", tap(func(c *QEMUConfig) { c.Network.Gateway = "10.89.0.1" }), "outside the guestAddress subnet"},
+		{"tap: gateway equals guest", tap(func(c *QEMUConfig) { c.Network.Gateway = "10.88.0.2" }), "are both"},
+		{"tap: guest on the default gateway address", tap(func(c *QEMUConfig) { c.Network.GuestAddress = "10.88.0.1/24" }), "are both"},
+		{"tap: dns not an address", tap(func(c *QEMUConfig) { c.Network.DNS = []string{"resolver.local"} }), "network.dns"},
+		{"tap: bindAddress", tap(func(c *QEMUConfig) { c.Network.BindAddress = "127.0.0.1" }), "network.bindAddress only applies"},
+		{"tap: sshPort", tap(func(c *QEMUConfig) { c.SSHPort = "2222" }), "sshPort and portForwards have no meaning"},
+		{"tap: portForwards", tap(func(c *QEMUConfig) { c.PortForwards = []PortForward{{Host: "80", Guest: "80"}} }), "sshPort and portForwards have no meaning"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &QEMUConfig{}
-			c.ApplyDefaults()
-			c.Network.Mode, c.Network.BindAddress = tc.mode, tc.bind
-			err := c.Validate()
+			tc.cfg.ApplyDefaults()
+			err := tc.cfg.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -299,9 +332,34 @@ func TestQEMU_Network_Validate(t *testing.T) {
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("want error naming %s, got %v", tc.wantErr, err)
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+// Tap mode has no host port forwards, so neither the ssh port nor the
+// forward list may pick up the user-mode defaults.
+func TestQEMU_Network_TapDefaults(t *testing.T) {
+	c := &QEMUConfig{Network: QEMUNetwork{Mode: "tap", Ifname: "ycl0", GuestAddress: "10.88.0.2/24"}}
+	c.ApplyDefaults()
+	if c.SSHPort != "" || len(c.PortForwards) != 0 {
+		t.Errorf("user-mode defaults leaked into tap mode: sshPort=%q portForwards=%v", c.SSHPort, c.PortForwards)
+	}
+	if c.Network.BindAddress != "" {
+		t.Errorf("bindAddress defaulted in tap mode: %q", c.Network.BindAddress)
+	}
+	if c.Network.Gateway != "10.88.0.1" {
+		t.Errorf("gateway: got %q, want the first host address 10.88.0.1", c.Network.Gateway)
+	}
+	if strings.Join(c.Network.DNS, ",") != "1.1.1.1,9.9.9.9" {
+		t.Errorf("dns: %v", c.Network.DNS)
+	}
+	if got := c.Network.GuestIP(); got != "10.88.0.2" {
+		t.Errorf("GuestIP: %q", got)
+	}
+	if got := c.HostRoutableIP(); got != "" {
+		t.Errorf("CommonConfig.HostRoutableIP is about port forwards and must stay empty in tap mode, got %q", got)
 	}
 }
 
@@ -323,7 +381,7 @@ func TestQEMUSchema_Network(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"bindAddress"`, `"default": "127.0.0.1"`, `"QEMUNetwork"`} {
+	for _, want := range []string{`"bindAddress"`, `"guestAddress"`, `"ifname"`, `"tap"`, `"QEMUNetwork"`} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("qemu.schema.json is missing %s; run go generate ./pkg/provision/config/", want)
 		}

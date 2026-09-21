@@ -44,6 +44,9 @@ type savedState struct {
 	// what an empty value still renders.
 	BindAddress string `json:"bindAddress,omitempty"`
 
+	// Tap is present for network.mode tap and absent for user mode.
+	Tap *TapNetwork `json:"tap,omitempty"`
+
 	// DataDisk is launch state: a start that does not attach it
 	// boots with /data/yolean on the boot disk (the fstab entry is
 	// nofail), silently splitting the cluster's data.
@@ -83,6 +86,7 @@ func saveState(cfg Config) error {
 		SSHPort:      cfg.SSHPort,
 		PortForwards: cfg.PortForwards,
 		BindAddress:  cfg.BindAddress,
+		Tap:          cfg.Tap,
 		Context:      cfg.Context,
 		CacheDir:     cfg.CacheDir,
 		K3s:          cfg.K3s,
@@ -150,6 +154,7 @@ func loadState(cacheDir, name string) (Config, error) {
 		SSHPort:      s.SSHPort,
 		PortForwards: s.PortForwards,
 		BindAddress:  s.BindAddress,
+		Tap:          s.Tap,
 		Context:      s.Context,
 		CacheDir:     s.CacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),

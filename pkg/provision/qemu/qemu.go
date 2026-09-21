@@ -9,6 +9,7 @@ package qemu
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,13 +57,15 @@ type Config struct {
 	// listen on. Empty only for state written before the option
 	// existed, when qemu bound the wildcard.
 	BindAddress string
-	Context     string
-	CacheDir    string
-	Kubeconfig  string
-	K3s         K3s
-	Registries  config.Registries
-	Gateway     config.GatewayConfig
-	Storage     config.StorageConfig
+	// Tap is set in network.mode tap and nil in user mode.
+	Tap        *TapNetwork
+	Context    string
+	CacheDir   string
+	Kubeconfig string
+	K3s        K3s
+	Registries config.Registries
+	Gateway    config.GatewayConfig
+	Storage    config.StorageConfig
 
 	// DataDisk is the operator-owned external qcow2 attached as a
 	// labeled `y-cluster-data` volume at /data/yolean. Empty means
@@ -149,6 +152,7 @@ func FromConfig(c *config.QEMUConfig) Config {
 		SSHPort:      c.SSHPort,
 		PortForwards: pfs,
 		BindAddress:  c.Network.BindAddress,
+		Tap:          tapFromConfig(c),
 		Context:      c.Context,
 		CacheDir:     cacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),
@@ -228,6 +232,11 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 	if err := pf.Run(); err != nil {
 		return nil, err
+	}
+	if cfg.Tap != nil {
+		if err := checkTap(*cfg.Tap, sysTapHost{}); err != nil {
+			return nil, err
+		}
 	}
 
 	// Initialize kubeconfig manager early — validates KUBECONFIG env
@@ -571,6 +580,7 @@ func perVMArtefacts(cacheDir, name string) []string {
 		prefix + "-ssh",
 		prefix + "-ssh.pub",
 		prefix + "-seed.img",
+		prefix + "-network-config.yaml",
 		prefix + "-cloud-init.yaml",
 		prefix + "-meta-data.yaml",
 		prefix + "-console.log",
@@ -916,7 +926,17 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 	}
 
 	seedPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-seed.img")
-	cmd := exec.Command("cloud-localds", seedPath, cloudInitPath, metaDataPath)
+	args := []string{seedPath, cloudInitPath, metaDataPath}
+	if c.cfg.Tap != nil {
+		// Without a network-config cloud-init falls back to DHCP,
+		// which nothing answers on a tap device.
+		networkConfigPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-network-config.yaml")
+		if err := os.WriteFile(networkConfigPath, []byte(renderNetworkConfig(*c.cfg.Tap)), 0o644); err != nil {
+			return "", err
+		}
+		args = append([]string{"--network-config=" + networkConfigPath}, args...)
+	}
+	cmd := exec.Command("cloud-localds", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloud-localds: %s: %w", out, err)
 	}
@@ -958,6 +978,35 @@ const sshWaitTimeout = 600 * time.Second
 // so a slow cloud-init doesn't read as a hang.
 const sshWaitHeartbeat = 30 * time.Second
 
+// sshTimeoutError explains an ssh wait that ran out. In tap mode a
+// wrong static network config is indistinguishable from a slow boot
+// while waiting, so the end of the console log goes into the error:
+// it shows whether the guest came up and which address it took.
+func sshTimeoutError(cfg Config, consolePath string) error {
+	msg := fmt.Sprintf("SSH not available after %s; first boots can spend minutes in cloud-init -- see console log %s", sshWaitTimeout, consolePath)
+	if cfg.Tap == nil {
+		return errors.New(msg)
+	}
+	e := cfg.endpoints()
+	msg += fmt.Sprintf("\nnetwork.mode tap: tried %s:%s. Check that the host routes %s via %s and that the guest took the address. Console tail:\n%s",
+		e.SSHHost, e.SSHPort, cfg.Tap.GuestAddress, cfg.Tap.Ifname, tailFile(consolePath, 40))
+	return errors.New(msg)
+}
+
+// tailFile returns the last n lines of path, or a note when it
+// cannot be read.
+func tailFile(path string, n int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("(cannot read %s: %v)", path, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (c *Cluster) waitForSSH(ctx context.Context) error {
 	consolePath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-console.log")
 	c.logger.Info("waiting for SSH",
@@ -972,7 +1021,7 @@ func (c *Cluster) waitForSSH(ctx context.Context) error {
 		}
 		now := time.Now()
 		if now.After(deadline) {
-			return fmt.Errorf("SSH not available after %s; first boots can spend minutes in cloud-init -- see console log %s", sshWaitTimeout, consolePath)
+			return sshTimeoutError(c.cfg, consolePath)
 		}
 		if now.After(nextHeartbeat) {
 			c.logger.Info("waiting for SSH",

@@ -263,6 +263,25 @@ func TestQemuRunning_SSHHostFollowsBindAddress(t *testing.T) {
 	}
 }
 
+// In tap mode there is no forward: sshd is on the guest's own address.
+func TestQemuRunning_TapModeDialsTheGuest(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", dir)
+	name := "y-cluster-test-tap"
+	if err := os.WriteFile(filepath.Join(dir, name+".pid"),
+		[]byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"sshPort":"","tap":{"ifname":"ycl0","guestAddress":"10.88.0.2/24"}}`
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, host, port := qemuRunning(name)
+	if host != "10.88.0.2" || port != "22" {
+		t.Fatalf("got %s:%s, want 10.88.0.2:22", host, port)
+	}
+}
+
 // TestHetznerRunning_FromState round-trips the hetzner state
 // discovery: write a fake state sidecar, verify hetznerRunning
 // returns the IPv4 + sshUser the state encodes plus the

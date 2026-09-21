@@ -38,7 +38,10 @@ func fillNonZero(t *testing.T, v reflect.Value, path string) {
 		elem := reflect.New(v.Type().Elem()).Elem()
 		fillNonZero(t, elem, path+"[0]")
 		v.Set(reflect.Append(v, elem))
-	case reflect.Map, reflect.Ptr, reflect.Interface:
+	case reflect.Ptr:
+		v.Set(reflect.New(v.Type().Elem()))
+		fillNonZero(t, v.Elem(), path)
+	case reflect.Map, reflect.Interface:
 		// Left at zero. A persisted field of this kind fails the
 		// round trip below, which is the prompt to teach this
 		// helper about it.

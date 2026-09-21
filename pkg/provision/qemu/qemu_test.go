@@ -545,6 +545,7 @@ func TestPerVMArtefacts(t *testing.T) {
 		"/c/n-ssh",
 		"/c/n-ssh.pub",
 		"/c/n-seed.img",
+		"/c/n-network-config.yaml",
 		"/c/n-cloud-init.yaml",
 		"/c/n-meta-data.yaml",
 		"/c/n-console.log",
