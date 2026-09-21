@@ -7,6 +7,7 @@ package e2e
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,6 +130,37 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "k3s") {
 		t.Fatalf("k3s --version: %q", out)
+	}
+
+	// A process that exits without reading its stdin must not leave
+	// NodeExec waiting on the caller's reader. The pipe is never
+	// written to nor closed, like a terminal nobody types into.
+	neverEnds, neverEndsW := io.Pipe()
+	t.Cleanup(func() { _ = neverEndsW.Close() })
+	execDone := make(chan error, 1)
+	go func() {
+		_, err := cluster.NodeExec(ctx, "true", neverEnds)
+		execDone <- err
+	}()
+	select {
+	case err := <-execDone:
+		if err != nil {
+			t.Errorf("NodeExec of `true` with an idle stdin: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Error("NodeExec still waiting 20s after the process exited; it is blocked on the caller's stdin")
+	}
+
+	// A command that outlives its context must not hold NodeExec.
+	shortCtx, cancelShort := context.WithTimeout(ctx, 2*time.Second)
+	started := time.Now()
+	_, err = cluster.NodeExec(shortCtx, "sleep 120", nil)
+	cancelShort()
+	if err == nil {
+		t.Error("NodeExec of `sleep 120` under a 2s context returned without error")
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Errorf("NodeExec returned %s after its context ended", elapsed.Round(time.Second))
 	}
 
 	// kubectl through the merged kubeconfig sees a Ready node.
