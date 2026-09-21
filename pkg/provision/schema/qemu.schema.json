@@ -143,6 +143,9 @@
           "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
           "type": "string"
         },
+        "network": {
+          "$ref": "#/$defs/QEMUNetwork"
+        },
         "portForwards": {
           "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
           "items": {
@@ -172,6 +175,25 @@
       "required": [
         "provider"
       ],
+      "type": "object"
+    },
+    "QEMUNetwork": {
+      "additionalProperties": false,
+      "properties": {
+        "bindAddress": {
+          "default": "127.0.0.1",
+          "description": "IPv4 address the host port forwards (sshPort and portForwards) listen on. 0.0.0.0 exposes them on every interface of the host.",
+          "type": "string"
+        },
+        "mode": {
+          "default": "user",
+          "description": "Network attachment. user is qemu user-mode networking with host port forwards.",
+          "enum": [
+            "user"
+          ],
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "Registries": {

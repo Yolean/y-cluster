@@ -247,7 +247,7 @@ qemu-system-x86_64 \
     -machine accel=kvm -cpu host \
     -smp 2 -m 4096 \
     -drive "file=$BUNDLE_DIR/$NAME.qcow2,format=qcow2,if=virtio" \
-    -netdev "user,id=n0,hostfwd=tcp::$IMP_SSH_PORT-:22,hostfwd=tcp::$IMP_HTTP_PORT-:80" \
+    -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$IMP_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$IMP_HTTP_PORT-:80" \
     -device virtio-net-pci,netdev=n0 \
     -serial "file:$EXPORT_DIR/console.log" \
     -display none \

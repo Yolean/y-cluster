@@ -1,5 +1,10 @@
 package config
 
+import (
+	"net"
+	"strings"
+)
+
 // QEMUConfig is the on-disk shape of `y-cluster-provision.yaml` when
 // `provider: qemu`. CommonConfig carries the portable fields shared
 // with other providers; the fields below are qemu-specific.
@@ -27,9 +32,39 @@ type QEMUConfig struct {
 	// DiskSize so the schema reads consistently.
 	DataDiskSize string `yaml:"dataDiskSize,omitempty" json:"dataDiskSize,omitempty" jsonschema:"description=Size for a freshly-created DataDisk ([num][KMGT]). Default 10G; ignored when the DataDisk file already exists or when DataDisk itself is empty."`
 
+	Network QEMUNetwork `yaml:"network,omitempty" json:"network,omitempty"`
+
 	// Dir is filled at load time from the absolute path of the
 	// directory the config came from. Not part of the schema.
 	Dir string `yaml:"-" json:"-" jsonschema:"-"`
+}
+
+// QEMUNetworkModeUser is qemu user-mode (slirp) networking: no host
+// setup and no privilege, every guest port reached through a host
+// port forward. The guest sees all traffic as coming from 10.0.2.2.
+const QEMUNetworkModeUser = "user"
+
+// QEMUNetwork configures how the VM is attached to the host network.
+type QEMUNetwork struct {
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty" jsonschema:"default=user,enum=user,description=Network attachment. user is qemu user-mode networking with host port forwards."`
+
+	// BindAddress applies to every forward including SSH. The
+	// default is loopback because a forward is otherwise reachable
+	// from every network the host is on: on a host with a public
+	// address that publishes the VM's SSH and the k3s API to the
+	// internet.
+	BindAddress string `yaml:"bindAddress,omitempty" json:"bindAddress,omitempty" jsonschema:"default=127.0.0.1,description=IPv4 address the host port forwards (sshPort and portForwards) listen on. 0.0.0.0 exposes them on every interface of the host."`
+}
+
+// HostDialAddress is the address the host itself dials to reach a
+// forward bound to bindAddress. The wildcard is not dialable and an
+// empty value is a forward from before bindAddress existed, which
+// qemu bound to the wildcard; both are reached over loopback.
+func HostDialAddress(bindAddress string) string {
+	if bindAddress == "" || bindAddress == "0.0.0.0" {
+		return "127.0.0.1"
+	}
+	return bindAddress
 }
 
 // SetDir satisfies configfile.DirAware so relative paths in the
@@ -63,6 +98,12 @@ func (c *QEMUConfig) Validate() error {
 	}
 	if c.SSHPort == "" {
 		return errInvalid("sshPort must not be empty after defaults")
+	}
+	if c.Network.Mode != QEMUNetworkModeUser {
+		return errInvalid("network.mode must be %q, got %q", QEMUNetworkModeUser, c.Network.Mode)
+	}
+	if ip := net.ParseIP(c.Network.BindAddress); ip == nil || ip.To4() == nil || strings.Contains(c.Network.BindAddress, ":") {
+		return errInvalid("network.bindAddress must be an IPv4 address such as 127.0.0.1 or 0.0.0.0, got %q", c.Network.BindAddress)
 	}
 	switch c.K3s.Install {
 	case "", "airgap", "script":

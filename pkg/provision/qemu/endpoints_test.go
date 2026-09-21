@@ -35,6 +35,20 @@ func TestEndpoints(t *testing.T) {
 			want: endpoints{SSHHost: "127.0.0.1", SSHPort: "2222", APIHost: "127.0.0.1", APIPort: "6443"},
 		},
 		{
+			name: "wildcard bind is dialed over loopback",
+			cfg: Config{SSHPort: "2222", BindAddress: "0.0.0.0", PortForwards: []PortForward{
+				{Host: "6443", Guest: "6443"}, {Host: "80", Guest: "80"},
+			}},
+			want: endpoints{SSHHost: "127.0.0.1", SSHPort: "2222", APIHost: "127.0.0.1", APIPort: "6443", IngressIP: "127.0.0.1"},
+		},
+		{
+			name: "specific bind address is where everything is dialed",
+			cfg: Config{SSHPort: "2222", BindAddress: "192.168.1.10", PortForwards: []PortForward{
+				{Host: "6443", Guest: "6443"}, {Host: "80", Guest: "80"},
+			}},
+			want: endpoints{SSHHost: "192.168.1.10", SSHPort: "2222", APIHost: "192.168.1.10", APIPort: "6443", IngressIP: "192.168.1.10"},
+		},
+		{
 			name: "first forward to 6443 wins",
 			cfg: Config{SSHPort: "2222", PortForwards: []PortForward{
 				{Host: "16443", Guest: "6443"},
@@ -55,6 +69,13 @@ func TestEndpoints_SSHTarget(t *testing.T) {
 	got := Config{SSHPort: "2229"}.endpoints().sshTarget("/keys/x-ssh")
 	if got.Host != "127.0.0.1" || got.Port != "2229" || got.User != "ystack" || got.KeyPath != "/keys/x-ssh" {
 		t.Fatalf("unexpected target: %+v", got)
+	}
+}
+
+func TestSSHCommand(t *testing.T) {
+	got := Config{Name: "vm", CacheDir: "/c", SSHPort: "2229", BindAddress: "192.168.1.10"}.SSHCommand()
+	if want := "ssh -p 2229 -i /c/vm-ssh ystack@192.168.1.10"; got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }
 
@@ -99,9 +120,21 @@ func TestNetdevArg(t *testing.T) {
 		want string
 	}{
 		{
-			name: "ssh only",
+			name: "state from before bindAddress: empty host, which slirp binds to the wildcard",
 			cfg:  Config{SSHPort: "2222"},
 			want: "user,id=net0,hostfwd=tcp::2222-:22",
+		},
+		{
+			name: "default loopback bind applies to ssh and every forward",
+			cfg: Config{SSHPort: "2222", BindAddress: "127.0.0.1", PortForwards: []PortForward{
+				{Host: "6443", Guest: "6443"},
+			}},
+			want: "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:6443-:6443",
+		},
+		{
+			name: "explicit wildcard",
+			cfg:  Config{SSHPort: "2222", BindAddress: "0.0.0.0"},
+			want: "user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22",
 		},
 		{
 			name: "forwards keep config order after ssh",
@@ -165,4 +198,30 @@ func TestVMArgs(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The host kubeconfig names the apiserver by APIHost, so an APIHost
+// k3s would not put in its serving cert by itself needs a SAN.
+func TestK3sServerFlags(t *testing.T) {
+	base := "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"
+	if got := k3sServerFlags(Config{BindAddress: "127.0.0.1"}.endpoints()); got != base {
+		t.Errorf("loopback: %q", got)
+	}
+	if got := k3sServerFlags(Config{BindAddress: "0.0.0.0"}.endpoints()); got != base {
+		t.Errorf("wildcard is dialed over loopback: %q", got)
+	}
+	if got := k3sServerFlags(Config{BindAddress: "192.168.1.10"}.endpoints()); got != base+" --tls-san=192.168.1.10" {
+		t.Errorf("specific address: %q", got)
+	}
+}
+
+func TestRewriteKubeconfigServer_SpecificBindAddress(t *testing.T) {
+	e := Config{BindAddress: "192.168.1.10", PortForwards: []PortForward{{Host: "6443", Guest: "6443"}}}.endpoints()
+	got, err := rewriteKubeconfigServer([]byte(k3sKubeconfig), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "server: https://192.168.1.10:6443\n") {
+		t.Fatalf("server not rewritten:\n%s", got)
+	}
 }

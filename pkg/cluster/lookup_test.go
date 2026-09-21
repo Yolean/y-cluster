@@ -105,7 +105,7 @@ func TestReadQemuStateSSHPort(t *testing.T) {
 	if err := os.WriteFile(good, []byte(`{"version":1,"name":"x","sshPort":"2229"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := readQemuStateSSHPort(good); got != "2229" {
+	if got, _ := readQemuState(good); got != "2229" {
 		t.Errorf("good: got %q, want %q", got, "2229")
 	}
 
@@ -113,11 +113,11 @@ func TestReadQemuStateSSHPort(t *testing.T) {
 	if err := os.WriteFile(noField, []byte(`{"version":1,"name":"x"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := readQemuStateSSHPort(noField); got != "" {
+	if got, _ := readQemuState(noField); got != "" {
 		t.Errorf("no-field: got %q, want empty", got)
 	}
 
-	if got := readQemuStateSSHPort(filepath.Join(dir, "missing.json")); got != "" {
+	if got, _ := readQemuState(filepath.Join(dir, "missing.json")); got != "" {
 		t.Errorf("missing: got %q, want empty", got)
 	}
 
@@ -125,7 +125,7 @@ func TestReadQemuStateSSHPort(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := readQemuStateSSHPort(bad); got != "" {
+	if got, _ := readQemuState(bad); got != "" {
 		t.Errorf("bad-json: got %q, want empty", got)
 	}
 }
@@ -149,7 +149,7 @@ func TestQemuRunning_PortFromState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	alive, sshKey, sshPort := qemuRunning(name)
+	alive, sshKey, _, sshPort := qemuRunning(name)
 	if !alive {
 		t.Fatalf("expected alive=true (pid %d is this test process)", pid)
 	}
@@ -178,12 +178,40 @@ func TestQemuRunning_PortFallbackWhenStateMissing(t *testing.T) {
 	}
 	// no <name>.json on purpose
 
-	alive, _, sshPort := qemuRunning(name)
+	alive, _, sshHost, sshPort := qemuRunning(name)
 	if !alive {
 		t.Fatal("expected alive=true")
 	}
 	if sshPort != "" {
 		t.Errorf("sshPort: got %q, want empty (so caller falls back to default)", sshPort)
+	}
+	if sshHost != "127.0.0.1" {
+		t.Errorf("sshHost: got %q, want loopback (a forward without a recorded bind address is on the wildcard)", sshHost)
+	}
+}
+
+// TestQemuRunning_SSHHostFollowsBindAddress: ctr/crictl/images load
+// have to dial the address the ssh forward actually listens on.
+func TestQemuRunning_SSHHostFollowsBindAddress(t *testing.T) {
+	for bind, want := range map[string]string{
+		"127.0.0.1":    "127.0.0.1",
+		"0.0.0.0":      "127.0.0.1",
+		"192.168.1.10": "192.168.1.10",
+	} {
+		dir := t.TempDir()
+		t.Setenv("Y_CLUSTER_QEMU_CACHE_DIR", dir)
+		name := "y-cluster-test-bind"
+		if err := os.WriteFile(filepath.Join(dir, name+".pid"),
+			[]byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		state := fmt.Sprintf(`{"sshPort":"2229","bindAddress":%q}`, bind)
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, got, _ := qemuRunning(name); got != want {
+			t.Errorf("bindAddress %q: sshHost %q, want %q", bind, got, want)
+		}
 	}
 }
 

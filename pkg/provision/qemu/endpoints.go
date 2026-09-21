@@ -3,16 +3,14 @@ package qemu
 import (
 	"bytes"
 	"fmt"
+	"path/filepath"
 
+	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
 // guestUser is the login cloud-init creates in the guest.
 const guestUser = "ystack"
-
-// loopback is where the host reaches a user-mode (slirp) guest: every
-// guest port is only available through a hostfwd on the host.
-const loopback = "127.0.0.1"
 
 // endpoints is the single answer to "how does the host reach the
 // guest". Everything that dials the guest (ssh, the kubeconfig
@@ -30,9 +28,12 @@ type endpoints struct {
 	IngressIP string
 }
 
-// endpoints derives the host-side addresses from the port forwards.
+// endpoints derives the host-side addresses. A user-mode (slirp)
+// guest is only reachable through the host port forwards, so every
+// host is the address those forwards can be dialed on.
 func (c Config) endpoints() endpoints {
-	e := endpoints{SSHHost: loopback, SSHPort: c.SSHPort, APIHost: loopback}
+	host := config.HostDialAddress(c.BindAddress)
+	e := endpoints{SSHHost: host, SSHPort: c.SSHPort, APIHost: host}
 	for _, pf := range c.PortForwards {
 		switch pf.Guest {
 		case "6443":
@@ -40,7 +41,7 @@ func (c Config) endpoints() endpoints {
 				e.APIPort = pf.Host
 			}
 		case "80":
-			e.IngressIP = loopback
+			e.IngressIP = host
 		}
 	}
 	return e
@@ -56,13 +57,21 @@ func (e endpoints) sshTarget(keyPath string) sshexec.Target {
 	}
 }
 
+// SSHCommand is the ssh invocation an operator uses to log in to the
+// guest.
+func (c Config) SSHCommand() string {
+	e := c.endpoints()
+	return fmt.Sprintf("ssh -p %s -i %s %s@%s", e.SSHPort, filepath.Join(c.CacheDir, c.Name+"-ssh"), guestUser, e.SSHHost)
+}
+
 // guestAPIServer is the server address k3s writes into its own
 // kubeconfig: the apiserver as seen from inside the guest.
 const guestAPIServer = "127.0.0.1:6443"
 
 // rewriteKubeconfigServer points a kubeconfig read from the guest at
-// the host-side apiserver address. TLS keeps validating because k3s
-// lists 127.0.0.1 among its serving cert SANs.
+// the host-side apiserver address. TLS validates against that
+// address because k3s lists 127.0.0.1 among its serving cert SANs by
+// default and k3sServerFlags adds any other APIHost.
 func rewriteKubeconfigServer(raw []byte, e endpoints) ([]byte, error) {
 	if e.APIPort == "" {
 		return nil, fmt.Errorf("portForwards has no guest:6443 entry; cannot reach k3s API")
@@ -71,13 +80,34 @@ func rewriteKubeconfigServer(raw []byte, e endpoints) ([]byte, error) {
 }
 
 // netdevArg renders qemu's -netdev value: user-mode networking with
-// one hostfwd for ssh and one per configured port forward.
+// one hostfwd for ssh and one per configured port forward, all bound
+// to cfg.BindAddress. slirp reads an empty host address as 0.0.0.0.
 func netdevArg(cfg Config) string {
-	netdev := fmt.Sprintf("user,id=%s,hostfwd=tcp::%s-:22", netdevID, cfg.SSHPort)
+	netdev := fmt.Sprintf("user,id=%s,hostfwd=tcp:%s:%s-:22", netdevID, cfg.BindAddress, cfg.SSHPort)
 	for _, pf := range cfg.PortForwards {
-		netdev += fmt.Sprintf(",hostfwd=tcp::%s-:%s", pf.Host, pf.Guest)
+		netdev += fmt.Sprintf(",hostfwd=tcp:%s:%s-:%s", cfg.BindAddress, pf.Host, pf.Guest)
 	}
 	return netdev
+}
+
+// k3sServerFlags is the INSTALL_K3S_EXEC value.
+//
+// traefik is disabled because y-cluster ships Envoy Gateway as the
+// cluster ingress; two controllers would fight over the :80/:443
+// forwards. local-storage is disabled because y-cluster ships its own
+// local-path-provisioner (pkg/provision/localstorage) and k3s's deploy
+// controller would reconcile that config back to upstream defaults on
+// every restart.
+//
+// The kubeconfig written on the host names the apiserver by APIHost.
+// k3s only puts 127.0.0.1 and the node's own addresses in its serving
+// cert, so any other host address has to be added as a SAN.
+func k3sServerFlags(e endpoints) string {
+	flags := "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"
+	if e.APIHost != "127.0.0.1" {
+		flags += " --tls-san=" + e.APIHost
+	}
+	return flags
 }
 
 const netdevID = "net0"

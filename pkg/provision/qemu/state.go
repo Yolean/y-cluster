@@ -39,6 +39,11 @@ type savedState struct {
 	CacheDir     string        `json:"cacheDir"`
 	K3s          K3s           `json:"k3s"`
 
+	// BindAddress is absent from sidecars written before the option
+	// existed; those VMs had their forwards on the wildcard, which is
+	// what an empty value still renders.
+	BindAddress string `json:"bindAddress,omitempty"`
+
 	// DataDisk is launch state: a start that does not attach it
 	// boots with /data/yolean on the boot disk (the fstab entry is
 	// nofail), silently splitting the cluster's data.
@@ -77,6 +82,7 @@ func saveState(cfg Config) error {
 		CPUs:         cfg.CPUs,
 		SSHPort:      cfg.SSHPort,
 		PortForwards: cfg.PortForwards,
+		BindAddress:  cfg.BindAddress,
 		Context:      cfg.Context,
 		CacheDir:     cfg.CacheDir,
 		K3s:          cfg.K3s,
@@ -143,6 +149,7 @@ func loadState(cacheDir, name string) (Config, error) {
 		CPUs:         s.CPUs,
 		SSHPort:      s.SSHPort,
 		PortForwards: s.PortForwards,
+		BindAddress:  s.BindAddress,
 		Context:      s.Context,
 		CacheDir:     s.CacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),

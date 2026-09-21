@@ -260,3 +260,72 @@ func TestCommonSchemaIsCanonical(t *testing.T) {
 		}
 	}
 }
+
+// Loopback is the default because a forward is otherwise reachable
+// from every network the host is on.
+func TestQEMU_Network_Defaults(t *testing.T) {
+	c := &QEMUConfig{}
+	c.ApplyDefaults()
+	if c.Network.Mode != "user" || c.Network.BindAddress != "127.0.0.1" {
+		t.Fatalf("network defaults: %+v", c.Network)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("defaulted config should validate: %v", err)
+	}
+}
+
+func TestQEMU_Network_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, bind, wantErr string
+	}{
+		{"loopback", "user", "127.0.0.1", ""},
+		{"wildcard restores exposure on all interfaces", "user", "0.0.0.0", ""},
+		{"specific host address", "user", "192.168.1.10", ""},
+		{"hostname", "user", "localhost", "network.bindAddress"},
+		{"ipv6", "user", "::1", "network.bindAddress"},
+		{"ipv4-mapped ipv6", "user", "::ffff:127.0.0.1", "network.bindAddress"},
+		{"with port", "user", "127.0.0.1:80", "network.bindAddress"},
+		{"unknown mode", "bridge", "127.0.0.1", "network.mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &QEMUConfig{}
+			c.ApplyDefaults()
+			c.Network.Mode, c.Network.BindAddress = tc.mode, tc.bind
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error naming %s, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestHostDialAddress(t *testing.T) {
+	for bind, want := range map[string]string{
+		"":             "127.0.0.1", // forward from before bindAddress existed: wildcard
+		"0.0.0.0":      "127.0.0.1", // the wildcard is not dialable
+		"127.0.0.1":    "127.0.0.1",
+		"192.168.1.10": "192.168.1.10",
+	} {
+		if got := HostDialAddress(bind); got != want {
+			t.Errorf("HostDialAddress(%q) = %q, want %q", bind, got, want)
+		}
+	}
+}
+
+func TestQEMUSchema_Network(t *testing.T) {
+	data, err := os.ReadFile("../schema/qemu.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"bindAddress"`, `"default": "127.0.0.1"`, `"QEMUNetwork"`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("qemu.schema.json is missing %s; run go generate ./pkg/provision/config/", want)
+		}
+	}
+}

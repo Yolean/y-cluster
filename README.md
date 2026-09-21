@@ -83,6 +83,20 @@ source (`type: y-kustomize-local`) or a Kubernetes informer
 interchangeable; switch by changing `type:` in
 `y-cluster-serve.yaml`.
 
+**qemu: port forwards listen on loopback unless you say otherwise.**
+The qemu provider uses user-mode networking: the guest has no address
+the host network can reach, and everything (ssh, the k3s API, ingress
+on 80/443) goes through host port forwards. Those forwards bind
+`network.bindAddress`, default `127.0.0.1`. Set it to `0.0.0.0` to
+reach the cluster from other machines, and know what that means: on a
+host with a public address and no firewall it publishes the VM's sshd
+and the k3s API to the internet. A specific host address works too;
+the kubeconfig then names that address and k3s gets it as a TLS SAN.
+A cluster provisioned before this option existed keeps its wildcard
+forwards across `stop`/`start`; re-provision to move it to loopback.
+User-mode networking also means workloads never see real client IPs:
+every connection arrives from `10.0.2.2`.
+
 ## Specs
 
 Design notes, migration recipes, and the still-pending feature
