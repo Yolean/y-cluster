@@ -231,7 +231,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		}
 	}
 
-	// Initialize kubeconfig manager early — validates KUBECONFIG env
+	// Initialize kubeconfig manager early -- validates KUBECONFIG env
 	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err

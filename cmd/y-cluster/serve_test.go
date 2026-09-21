@@ -32,7 +32,7 @@ func TestServeEnsureCmd_RequiresConfig(t *testing.T) {
 
 func TestServeStopCmd_DefaultsOK(t *testing.T) {
 	cmd := serveStopCmd()
-	// No --state-dir provided → falls through to DefaultStateDir().
+	// No --state-dir provided -> falls through to DefaultStateDir().
 	// We don't want to touch the real HOME, so just assert flag parsing.
 	cmd.SetArgs([]string{"--help"})
 	var out bytes.Buffer

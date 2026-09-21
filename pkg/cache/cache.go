@@ -1,6 +1,6 @@
 // Package cache resolves the on-disk root y-cluster uses for
 // downloaded artefacts (k3s airgap bundles, OCI image layouts).
-// Runtime state — qcow2 disks, pidfiles, ssh keys — stays in
+// Runtime state -- qcow2 disks, pidfiles, ssh keys -- stays in
 // each provisioner's own cache (e.g. ~/.cache/y-cluster-qemu)
 // because that's not a "download" and shouldn't be cleared by
 // `y-cluster cache purge`.
@@ -25,7 +25,7 @@ import (
 )
 
 // Root returns the resolved cache directory. The directory is
-// not created here — callers that write into Images() / K3s()
+// not created here -- callers that write into Images() / K3s()
 // own MkdirAll. flagOverride is the value of a `--cache-dir`
 // flag (empty means "no flag was given").
 func Root(flagOverride string) (string, error) {

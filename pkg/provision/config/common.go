@@ -4,10 +4,10 @@
 // # Common vs provider-specific fields
 //
 // Every provider config struct embeds CommonConfig (in this file).
-// The shared fields — provider discriminator, instance name,
-// kubeconfig context, memory, cpus, k3s install settings — keep
+// The shared fields -- provider discriminator, instance name,
+// kubeconfig context, memory, cpus, k3s install settings -- keep
 // their YAML keys identical across providers so a user can switch
-// provider: qemu → provider: docker without renaming anything else
+// provider: qemu -> provider: docker without renaming anything else
 // in the file.
 //
 // Provider-specific fields live on the per-provider struct (qemu.go,
@@ -34,7 +34,7 @@ import "time"
 
 // Provider IDs. Single source of truth for both the per-provider
 // `Validate()` checks and the `enum` constraint on
-// CommonConfig.Provider — schemagen reads AllProviders to build
+// CommonConfig.Provider -- schemagen reads AllProviders to build
 // the enum, and per-provider schema post-processing replaces it
 // with a const constraint.
 const (
@@ -335,7 +335,7 @@ func (c CommonConfig) HostAPIPort() string {
 }
 
 // K3sConfig controls the k3s install. The container image is
-// **not** a config field — it's derived from Version at runtime
+// **not** a config field -- it's derived from Version at runtime
 // (MirrorImage / UpstreamImage in defaults.go) so a Version bump
 // is the only edit required to switch k3s versions. The docker
 // provisioner additionally probes the mirror at provision time and

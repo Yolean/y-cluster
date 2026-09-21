@@ -132,7 +132,7 @@ func TestServe_EnsureRoundtrip(t *testing.T) {
 	cfgDir := prepareFixture(t, "serve-ykustomize-local", port)
 	stateDir := t.TempDir()
 
-	// 1. ensure → daemon starts, /health 200 on the configured port
+	// 1. ensure -> daemon starts, /health 200 on the configured port
 	if out, err := runServe(t, bin, stateDir, "serve", "ensure", "-c", cfgDir); err != nil {
 		t.Fatalf("ensure: %v\n%s", err, out)
 	}
@@ -163,7 +163,7 @@ func TestServe_EnsureRoundtrip(t *testing.T) {
 		t.Fatalf("cache-control: got %q, want no-cache", cc)
 	}
 
-	// 3. conditional GET with matching ETag → 304
+	// 3. conditional GET with matching ETag -> 304
 	code, err := httpGetWithETag(fmt.Sprintf("http://127.0.0.1:%d/v1/blobs/setup-bucket-job/base-for-annotations.yaml", port), etag)
 	if err != nil {
 		t.Fatalf("conditional GET: %v", err)
@@ -192,7 +192,7 @@ func TestServe_EnsureRoundtrip(t *testing.T) {
 		}
 	}
 
-	// 6. ensure a second time → no-op (pid unchanged)
+	// 6. ensure a second time -> no-op (pid unchanged)
 	pidBefore, err := os.ReadFile(filepath.Join(stateDir, "serve.pid"))
 	if err != nil {
 		t.Fatalf("read pid: %v", err)
@@ -205,10 +205,10 @@ func TestServe_EnsureRoundtrip(t *testing.T) {
 		t.Fatalf("read pid: %v", err)
 	}
 	if string(pidBefore) != string(pidAfter) {
-		t.Fatalf("daemon restarted on identical ensure: %s → %s", pidBefore, pidAfter)
+		t.Fatalf("daemon restarted on identical ensure: %s -> %s", pidBefore, pidAfter)
 	}
 
-	// 7. stop → pidfile gone, /health errors
+	// 7. stop -> pidfile gone, /health errors
 	if out, err := runServe(t, bin, stateDir, "serve", "stop"); err != nil {
 		t.Fatalf("stop: %v\n%s", err, out)
 	}
@@ -315,7 +315,7 @@ func retryGET(url string) (*http.Response, error) {
 // waitForHealth polls /health and runs predicate on the decoded body
 // until it returns true or timeout elapses. Use this for any check
 // that depends on the in-cluster watch having seen a particular
-// state — apply/patch/delete propagation, route count, etc. Polling
+// state -- apply/patch/delete propagation, route count, etc. Polling
 // /health (rather than a specific route URL) keeps each iteration
 // cheap and decoupled from whatever the test is actually verifying.
 func waitForHealth(t *testing.T, url string, predicate func(map[string]any) bool, timeout time.Duration, what string) map[string]any {
@@ -347,7 +347,7 @@ func waitForHealth(t *testing.T, url string, predicate func(map[string]any) bool
 
 // waitForStatus polls a URL until it returns the expected status or
 // timeout. Useful when the test cares specifically about a route's
-// presence/absence — e.g. after deleting a Secret, we expect 404.
+// presence/absence -- e.g. after deleting a Secret, we expect 404.
 func waitForStatus(t *testing.T, url string, want int, timeout time.Duration, what string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -406,7 +406,7 @@ func TestServe_InCluster(t *testing.T) {
 	cfgDir := filepath.Join(dst, "config")
 
 	// Clean slate: remove the Secret if a previous run left it
-	// behind. KUBECONFIG must be explicit — relying on the env set
+	// behind. KUBECONFIG must be explicit -- relying on the env set
 	// by setupCluster races other tests that may have unset it via
 	// their own t.Cleanup.
 	secretName := "y-kustomize.blobs.setup-bucket-job"
@@ -447,7 +447,7 @@ func TestServe_InCluster(t *testing.T) {
 	// is supposed to gate the daemon's listener, but on a freshly
 	// started kwok container the LIST occasionally lands before the
 	// just-applied Secret is visible. Wait on /health.routes
-	// instead of polling the route URL — /health is the cheap
+	// instead of polling the route URL -- /health is the cheap
 	// canonical status, the route URL is the test's actual subject.
 	const propagation = 30 * time.Second
 	h := waitForHealth(t, healthURL, func(h map[string]any) bool {

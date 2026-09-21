@@ -10,14 +10,14 @@ import (
 )
 
 // pidAlive reports whether `pid` refers to a process the current
-// user can signal. signal(0) is the POSIX liveness probe — no
+// user can signal. signal(0) is the POSIX liveness probe -- no
 // signal is delivered, only the permission/existence checks fire.
 //
 // Replaces a `kill -0 <pid>` shell-out. Stdlib gives us typed
 // errors (ESRCH = "no such process", EPERM = "exists but not
 // owned by us") that the bash version collapsed into "exit 1".
 // We treat ESRCH as not-alive; EPERM as alive (we just can't
-// signal it — still a running pid the test cares about).
+// signal it -- still a running pid the test cares about).
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false

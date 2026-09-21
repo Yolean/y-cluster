@@ -19,7 +19,7 @@ import (
 // Load streams an OCI archive (or any tar containerd's image
 // importer accepts) into the cluster's containerd via
 // `ctr -n k8s.io image import -`. The archive's manifest carries
-// the ref + tag — the same way `ctr image import` would behave
+// the ref + tag -- the same way `ctr image import` would behave
 // if the operator ran it on the node directly. No cache is
 // touched: callers driving from local build artefacts (e.g. a
 // `contain` tarball under /tmp) can purge those independently.

@@ -37,7 +37,7 @@ func ParseChecks(cueDir string) ([]Check, error) {
 
 	checksVal := val.LookupPath(cue.ParsePath("step.checks"))
 	if err := checksVal.Err(); err != nil {
-		// step.checks not found — no checks defined
+		// step.checks not found -- no checks defined
 		return nil, nil
 	}
 
@@ -67,7 +67,7 @@ const verifySchemaImport = "yolean.se/ystack/yconverge/verify"
 //
 // Example with module "yolean.se/ystack":
 //
-//	import "yolean.se/ystack/k3s/30-blobs:blobs" → "k3s/30-blobs"
+//	import "yolean.se/ystack/k3s/30-blobs:blobs" -> "k3s/30-blobs"
 func ParseImports(cueFile, modulePath string) ([]string, error) {
 	data, err := os.ReadFile(cueFile)
 	if err != nil {

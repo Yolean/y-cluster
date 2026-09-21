@@ -338,7 +338,7 @@ func lastErrorFromLog(path string) string {
 }
 
 // runForeground runs the daemon body in-process with console logging to
-// stderr. Does NOT write a pidfile — the point of foreground is to
+// stderr. Does NOT write a pidfile -- the point of foreground is to
 // opt out of the single-instance contract.
 func runForeground(parent context.Context, cfgs []*Config, paths StatePaths) error {
 	logger := newConsoleLogger()

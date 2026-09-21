@@ -4,7 +4,7 @@
 // (detect / ctr / crictl). These need a real cluster with a
 // reachable containerd, so the helpers in this file are called
 // from each provisioner-specific e2e test (docker_test.go,
-// qemu_test.go) — once per backend, against the cluster that
+// qemu_test.go) -- once per backend, against the cluster that
 // test just provisioned.
 //
 // kwok-backed tests don't exercise this surface: kwok is a fake
@@ -47,7 +47,7 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 		t.Fatalf("detect: got %q want %q", got, expectedBackend)
 	}
 
-	// 2. `y-cluster detect <backend>` matches → "up".
+	// 2. `y-cluster detect <backend>` matches -> "up".
 	out = runYCluster(t, bin, "detect", "--context="+ctxName, expectedBackend)
 	if got := strings.TrimSpace(out); got != "up" {
 		t.Fatalf("detect %s: got %q want up", expectedBackend, got)
@@ -90,7 +90,7 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 
 	// 6. `images load <archive>` imports a local OCI archive and
 	// the loaded ref shows up under `ctr image ls -n k8s.io`.
-	// Synthetic archive — no registry needed for this leg.
+	// Synthetic archive -- no registry needed for this leg.
 	archive := filepath.Join(t.TempDir(), "fixture.tar")
 	cluster.SaveFixtureArchive(t, archive, "y-cluster.local/e2e-load", "v1")
 	if loadOut, err := runYClusterRaw(t, bin, "images", "load", "--context="+ctxName, archive); err != nil {
@@ -102,7 +102,7 @@ func assertClusterFeatures(t *testing.T, ctxName, expectedBackend string) {
 	}
 
 	// 7. CI5: airgap proof. Deploy a Pod referencing the loaded
-	// image with imagePullPolicy: Never — kubelet won't reach for
+	// image with imagePullPolicy: Never -- kubelet won't reach for
 	// any registry, and emits state.waiting.reason=ErrImageNeverPull
 	// when the image isn't on the node. Pull resolution succeeding
 	// (state advancing to running or terminated) proves load made
@@ -154,14 +154,14 @@ func assertManifestsStaging(t *testing.T, bin, ctxName string) {
 // synthetic image assertClusterFeatures just loaded
 // (y-cluster.local/e2e-load:v1), with imagePullPolicy: Never, and
 // asserts kubelet resolves the image. The synthetic image has no
-// runnable entrypoint, so we don't wait for Ready — once
+// runnable entrypoint, so we don't wait for Ready -- once
 // container state leaves Pending/Waiting, the pull worked.
 //
 // Failure modes the assertion distinguishes:
-//   - state.waiting.reason=ErrImageNeverPull → load didn't reach
+//   - state.waiting.reason=ErrImageNeverPull -> load didn't reach
 //     the node's containerd (the actual airgap regression we
 //     care about catching).
-//   - timeout with state still ContainerCreating/Pending → kubelet
+//   - timeout with state still ContainerCreating/Pending -> kubelet
 //     hasn't observed the pod; usually a node-readiness issue.
 func assertAirgapPod(t *testing.T, ctxName string) {
 	t.Helper()
@@ -204,7 +204,7 @@ spec:
 			running := parts[1]
 			terminated := parts[2]
 			if waitingReason == "ErrImageNeverPull" {
-				t.Fatalf("airgap proof FAILED: kubelet says %q for %s — `images load` didn't reach the node",
+				t.Fatalf("airgap proof FAILED: kubelet says %q for %s -- `images load` didn't reach the node",
 					waitingReason, podName)
 			}
 			if running != "" || terminated != "" {

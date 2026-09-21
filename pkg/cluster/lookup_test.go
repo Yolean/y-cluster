@@ -65,7 +65,7 @@ func TestReadClusterName_UnknownContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// kubectl jsonpath returns empty string for no-match — Lookup
+	// kubectl jsonpath returns empty string for no-match -- Lookup
 	// turns that into a user-facing error, but the helper itself
 	// just propagates the empty value.
 	if got != "" {

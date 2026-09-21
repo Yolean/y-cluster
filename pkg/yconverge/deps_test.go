@@ -132,7 +132,7 @@ func TestResolveDeps_NoCueFile(t *testing.T) {
 	root := t.TempDir()
 	writeYstackModule(t, root)
 	writeFile(t, filepath.Join(root, "base/kustomization.yaml"), "")
-	// No yconverge.cue — should return just the target
+	// No yconverge.cue -- should return just the target
 	order, err := ResolveDeps(root, filepath.Join(root, "base"))
 	if err != nil {
 		t.Fatal(err)

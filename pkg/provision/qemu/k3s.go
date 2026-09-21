@@ -185,8 +185,8 @@ func urlEncodeK3sVersion(v string) string {
 }
 
 // shellQuote wraps an argument in single quotes for safe inclusion
-// in a remote shell command. Embedded single quotes are escaped
-// using the standard `'\”` trick. Used for the values we pass via
+// in a remote shell command. Embedded single quotes are closed,
+// escaped and reopened. Used for the values we pass via
 // SSH: version strings (-rc3-k3s1) and INSTALL_K3S_EXEC arguments.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

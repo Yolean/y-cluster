@@ -44,7 +44,7 @@ func TestGenerateKey_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse authorized key: %v", err)
 	}
-	// Marshal both sides back to wire bytes and compare — the
+	// Marshal both sides back to wire bytes and compare -- the
 	// signer's public key should match the .pub file's parsed key.
 	if string(parsedPub.Marshal()) != string(signer.PublicKey().Marshal()) {
 		t.Fatal("private/public key pair does not match on disk")

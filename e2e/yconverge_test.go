@@ -100,7 +100,7 @@ func TestOrdering_TransitiveChain(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// frontend → backend → db
+	// frontend -> backend -> db
 	result, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
 		KustomizeDir: filepath.Join(td, "e2e-frontend/base"),
@@ -168,7 +168,7 @@ func TestCustomization_QaOverlayAggregatesBaseChecks(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// db/qa has no yconverge.cue — checks come from db/base via traversal
+	// db/qa has no yconverge.cue -- checks come from db/base via traversal
 	_, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
 		KustomizeDir: filepath.Join(td, "e2e-db/qa"),

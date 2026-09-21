@@ -177,7 +177,7 @@ func ResolveDigest(ctx context.Context, ref string) (string, error) {
 }
 
 // digestReference rebuilds the input reference with its digest
-// resolved, e.g. "nginx:1.27" → "nginx@sha256:abc…", preserving
+// resolved, e.g. "nginx:1.27" -> "nginx@sha256:abc...", preserving
 // repository / registry. Used for log lines and for the return
 // value of Cache so callers always know exactly what landed.
 func digestReference(parsed name.Reference, d v1.Hash) (string, error) {

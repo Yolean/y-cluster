@@ -73,7 +73,7 @@ users: []
 func TestCtrCmd_ForwardsArgsAfterDoubleDash(t *testing.T) {
 	requireKubectl(t)
 	// We can't actually exec docker without a cluster, so we go
-	// only as far as Lookup — which fails with a known error
+	// only as far as Lookup -- which fails with a known error
 	// when nothing is running. The point of this test is that
 	// cobra parsed the `--` boundary correctly: the flag
 	// `--context` is consumed by cobra, the rest forwards.

@@ -315,8 +315,8 @@ func TestQemu_ExportImport(t *testing.T) {
 // Two FRs land in the same round-trip:
 //
 //   - FR 3: format-sniff path (importFormatFromExt(".qcow2") ->
-//     qemu-img convert -f qcow2) — exercised by step 5.
-//   - FR 4: provision uses the staged disk from import — the
+//     qemu-img convert -f qcow2) -- exercised by step 5.
+//   - FR 4: provision uses the staged disk from import -- the
 //     second Provision call (step 6) hits the
 //     <CacheDir>/<Name>.qcow2-already-exists branch and reaches
 //     SSH + kubeconfig WITHOUT re-running k3s install. Pre-FR 4

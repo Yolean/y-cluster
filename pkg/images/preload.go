@@ -176,7 +176,7 @@ func BuildPreloadScript(entry IndexEntry, urls map[string]string) string {
 			continue
 		}
 		// One mkdir per directory prefix is cheaper than -p on
-		// each curl, but `mkdir -p $(dirname …)` is portable and
+		// each curl, but `mkdir -p $(dirname ...)` is portable and
 		// the overhead is irrelevant here. Quote the URL so any
 		// signed-query-string special chars survive the shell.
 		b.WriteString("mkdir -p \"$LAYOUT/")

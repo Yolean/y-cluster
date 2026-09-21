@@ -7,12 +7,12 @@ name: CI
 # uploaded artifacts so a tag run ships the same bytes everywhere.
 #
 # Triggers:
-#   push main         → lint, test, build, e2e-serve, image(sha)
-#   push tag v*       → all of the above + image(tag) + release-assets
-#   pull_request      → lint, test, build, e2e-serve only
-#   workflow_dispatch → same as push main
+#   push main         -> lint, test, build, e2e-serve, image(sha)
+#   push tag v*       -> all of the above + image(tag) + release-assets
+#   pull_request      -> lint, test, build, e2e-serve only
+#   workflow_dispatch -> same as push main
 #
-# Image is only published under Yolean (not YoleanAgents) — the `if:`
+# Image is only published under Yolean (not YoleanAgents) -- the `if:`
 # on the image/release-assets jobs is belt-and-braces; the human owner
 # mirrors manually when ready to open-source.
 

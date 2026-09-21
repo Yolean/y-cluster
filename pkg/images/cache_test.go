@@ -174,8 +174,8 @@ func TestCache_FallbackFromRegistryK8s(t *testing.T) {
 	}
 }
 
-// Layout-existence edge cases — cheap to cover here without a
-// real registry. End-to-end "warm cache → no-op → byte-equal
+// Layout-existence edge cases -- cheap to cover here without a
+// real registry. End-to-end "warm cache -> no-op -> byte-equal
 // layout" coverage lives in CI4e against a registry container.
 func TestLayoutExists_Empty(t *testing.T) {
 	dir := t.TempDir()

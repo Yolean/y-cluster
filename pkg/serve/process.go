@@ -160,12 +160,12 @@ func runDaemon(ctx context.Context, servers []*server, logger *zap.Logger) error
 func stopByPidfile(paths StatePaths, timeout time.Duration) error {
 	pid, err := ReadPidfile(paths.Pid)
 	if err != nil {
-		// Corrupt pidfile — remove it and treat as stopped.
+		// Corrupt pidfile -- remove it and treat as stopped.
 		_ = os.Remove(paths.Pid)
 		return nil
 	}
 	if pid == 0 {
-		// No pidfile — nothing to do.
+		// No pidfile -- nothing to do.
 		return nil
 	}
 	if !PidAlive(pid) {

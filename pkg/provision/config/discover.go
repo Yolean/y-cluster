@@ -25,7 +25,7 @@ import (
 //
 //   - On macOS, multipass is the only path to a real VM; the qemu
 //     provisioner errors out without /dev/kvm.
-//   - On Linux, multipass isn't installed by default — the user has
+//   - On Linux, multipass isn't installed by default -- the user has
 //     explicitly chosen it, so honouring that choice is the least
 //     surprising thing.
 //

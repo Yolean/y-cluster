@@ -8,10 +8,10 @@
 // "bring your own ssh client": x/crypto/ssh returns typed errors
 // the OpenSSH CLI flattens into "exit status 1":
 //
-//   - net.OpError("connection refused")    → VM still booting
-//   - *ssh.ServerAuthError                  → key wrong, fatal
-//   - *ssh.ExitError + ExitStatus()         → remote command failed
-//   - *ssh.ExitMissingError                 → connection died mid-cmd
+//   - net.OpError("connection refused")    -> VM still booting
+//   - *ssh.ServerAuthError                  -> key wrong, fatal
+//   - *ssh.ExitError + ExitStatus()         -> remote command failed
+//   - *ssh.ExitMissingError                 -> connection died mid-cmd
 //
 // All knownhost checks are intentionally disabled: the keys
 // y-cluster targets are dev-cluster VMs we just brought up, and
@@ -135,7 +135,7 @@ func ExecStream(ctx context.Context, t Target, cmd string, stdin io.Reader, stdo
 
 // SCP uploads localPath to remotePath via SFTP. We use SFTP
 // (RFC-defined, framed) rather than the legacy SCP wire
-// protocol — sftp.Client gives us typed errors per file
+// protocol -- sftp.Client gives us typed errors per file
 // operation and is what `pkg/sftp` is best at.
 func SCP(ctx context.Context, t Target, localPath, remotePath string) error {
 	cli, err := Dial(ctx, t)

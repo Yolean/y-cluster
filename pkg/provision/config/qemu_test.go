@@ -178,7 +178,7 @@ func TestSchemaIsCanonical(t *testing.T) {
 	if !strings.Contains(str, `"default": "20G"`) {
 		t.Fatal("schema missing diskSize default")
 	}
-	// Image is no longer a schema field — it's derived at runtime.
+	// Image is no longer a schema field -- it's derived at runtime.
 	if strings.Contains(str, `"image"`) {
 		t.Fatal("schema must not contain an image property")
 	}
