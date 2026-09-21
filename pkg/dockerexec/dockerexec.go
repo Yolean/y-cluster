@@ -144,32 +144,43 @@ func Exec(ctx context.Context, cli *client.Client, name string, cmd []string, st
 	}
 	defer att.Close()
 
+	// The attach connection takes no context. Closing it is what
+	// unblocks both copies below when ctx ends.
+	stop := context.AfterFunc(ctx, att.Close)
+	defer stop()
+
 	// Pump stdin (if any) and demux stdout/stderr in parallel.
-	// stdin returns when the writer side closes, so we tear it
-	// down explicitly via CloseWrite once the caller-side reader
-	// EOFs.
-	errCh := make(chan error, 2)
+	stdinErr := make(chan error, 1)
 	if stdin != nil {
 		go func() {
 			_, copyErr := io.Copy(att.Conn, stdin)
+			// Tell the process its input ended; commands like
+			// `ctr image import -` wait for that.
 			_ = att.CloseWrite()
-			errCh <- copyErr
+			stdinErr <- copyErr
 		}()
-	} else {
-		errCh <- nil
 	}
-	go func() {
-		errCh <- demuxTo(att.Reader, stdout, stderr)
-	}()
 
-	var firstErr error
-	for i := 0; i < 2; i++ {
-		if e := <-errCh; e != nil && firstErr == nil {
-			firstErr = e
-		}
+	// The output side ending means the process is gone, and that
+	// decides when Exec returns. The stdin copy is not waited for: it
+	// may be blocked in a Read on the caller's reader (a terminal, a
+	// pipe nobody closes) that a process which exited without
+	// draining its input will never cause to return.
+	outErr := demuxTo(att.Reader, stdout, stderr)
+	if ctx.Err() != nil {
+		return fmt.Errorf("exec %s: %w", name, ctx.Err())
 	}
-	if firstErr != nil {
-		return fmt.Errorf("exec stream %s: %w", name, firstErr)
+	if outErr != nil {
+		return fmt.Errorf("exec stream %s: %w", name, outErr)
+	}
+	select {
+	case err := <-stdinErr:
+		// Finished before the process did: a failure to read the
+		// caller's input is the caller's to know about.
+		if err != nil {
+			return fmt.Errorf("exec stdin %s: %w", name, err)
+		}
+	default:
 	}
 
 	// Inspect the exec to surface the remote exit code.
