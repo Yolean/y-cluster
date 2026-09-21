@@ -45,27 +45,22 @@ var prepareInguestScript string
 //     the appliance looked like at export time. Then stops
 //     the cluster.
 //   - OFFLINE phase (cluster stopped): builds the data-seed
-//     tarball + runs virt-customize to identity-reset the
-//     filesystem, same as the prior behavior.
+//     tarball + runs virt-customize with the in-guest script.
 //
 // The same shared inguest script also runs on the Hetzner
 // Packer build path (inline, in a live VM); see
 // prepareInguestScript above.
 //
-// VM MUST BE RUNNING when invoked. Earlier versions of
-// PrepareExport required the VM to be stopped first (operator
-// ran `y-cluster stop && y-cluster prepare-export`). The new
-// live-phase steps need the apiserver, so callers should drop
-// the explicit `y-cluster stop` -- prepare-export stops the VM
-// itself between the live and offline phases. Reordered run:
+// VM MUST BE RUNNING when invoked: the live phase needs the
+// apiserver. prepare-export stops the VM itself between the live
+// and offline phases, so a caller must not `y-cluster stop` first:
 //
 //	y-cluster provision
-//	y-cluster prepare-export   # prepare-export now stops internally
+//	y-cluster prepare-export   # stops the VM internally
 //
-// Idempotent. A prepared appliance is no longer a usable dev
-// cluster locally; the next start runs cloud-init re-init and
-// regenerates identity bits. Re-provision (teardown + provision)
-// for a fresh dev cluster.
+// Idempotent. A prepared appliance is not a usable dev cluster
+// locally: the next start runs cloud-init as on a first boot.
+// Re-provision (teardown + provision) for a fresh dev cluster.
 func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -80,7 +75,7 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 		return fmt.Errorf("virt-customize not found in PATH; install with: sudo apt install libguestfs-tools")
 	}
 	if _, err := exec.LookPath("kubectl"); err != nil {
-		return fmt.Errorf("kubectl not found in PATH; install kubectl (prepare-export now snapshots reconciled Gateway state, which needs kubectl)")
+		return fmt.Errorf("kubectl not found in PATH; install kubectl (prepare-export snapshots reconciled Gateway state with it)")
 	}
 	if _, err := exec.LookPath("zstd"); err != nil {
 		return fmt.Errorf("zstd not found in PATH; install with: sudo apt install zstd (prepare-export compresses the /data/yolean seed with it)")
@@ -94,7 +89,7 @@ func PrepareExport(ctx context.Context, cacheDir, name string, logger *zap.Logge
 		return fmt.Errorf("load state: %w", err)
 	}
 	if running, _ := cfg.IsRunning(); !running {
-		return fmt.Errorf("VM %q is not running; start the cluster first (prepare-export now needs the apiserver up to snapshot reconciled Gateway state and clear the per-deploy dns-hint-ip annotation -- it stops the VM internally before the offline phase)", name)
+		return fmt.Errorf("VM %q is not running; start the cluster first (prepare-export needs the apiserver up to snapshot reconciled Gateway state and clear the per-deploy dns-hint-ip annotation; it stops the VM itself before the offline phase)", name)
 	}
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	if _, err := os.Stat(diskPath); err != nil {

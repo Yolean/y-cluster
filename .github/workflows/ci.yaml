@@ -265,11 +265,10 @@ jobs:
           # listens for:
           # - First run for a tag: `gh release create ... <files>`
           #   uploads atomically, so publish fires only after the
-          #   assets are present. The previous shape called
-          #   `release create` (empty publish, fires the event)
-          #   THEN `release upload`; the event-driven validator
-          #   raced in and saw an empty release ("no assets to
-          #   download").
+          #   assets are present. `release create` followed by
+          #   `release upload` would publish empty, fire the event,
+          #   and let the event-driven validator see a release
+          #   with "no assets to download".
           # - Re-run for an existing tag: skip create, use
           #   `release upload --clobber` to refresh the assets
           #   without retriggering publish.

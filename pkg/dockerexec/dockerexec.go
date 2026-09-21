@@ -125,10 +125,8 @@ func Logs(ctx context.Context, cli *client.Client, name string, tail string) ([]
 }
 
 // Exec runs cmd inside the container with stdin/stdout/stderr
-// passthrough -- the same shape exec.Cmd has, so callers that
-// previously shelled out to `docker exec` switch with minimal
-// friction. Returns the exec's exit code via *ExitError when
-// non-zero so callers can categorise.
+// passthrough, the same shape exec.Cmd has. Returns the exec's exit
+// code via *ExitError when non-zero so callers can categorise.
 func Exec(ctx context.Context, cli *client.Client, name string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	create, err := cli.ExecCreate(ctx, name, client.ExecCreateOptions{
 		Cmd:          cmd,
@@ -212,8 +210,8 @@ func demux(rc io.Reader) ([]byte, error) {
 	if err := demuxTo(rc, &stdout, &stderr); err != nil {
 		return nil, err
 	}
-	// Mirror the previous CombinedOutput semantics: stdout +
-	// stderr concatenated.
+	// stdout followed by stderr, NOT interleaved as a terminal would
+	// show them: the daemon multiplexes the two streams.
 	out := append(stdout.Bytes(), stderr.Bytes()...)
 	return out, nil
 }

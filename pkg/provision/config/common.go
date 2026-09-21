@@ -84,9 +84,8 @@ type CommonConfig struct {
 // instance start; locally the deadline is recomputed on each
 // `y-cluster start`.
 //
-// MaxRun empty (or "0") disables the whole feature -- a cluster
-// with no lifetime runs until manually stopped, the historical
-// behaviour.
+// MaxRun empty (or "0") disables the whole feature: a cluster
+// with no lifetime runs until manually stopped.
 type LifetimeConfig struct {
 	// MaxRun is the wall-clock budget as a Go duration string
 	// (e.g. "8h", "90m", "24h"). Empty disables. Validated to

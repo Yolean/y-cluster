@@ -273,12 +273,12 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	//     extract the kubeconfig context. Re-installing k3s
 	//     here would clobber the appliance's pre-baked state.
 	//
-	// The staged-disk branch closes the import->boot deadlock
-	// (provision used to error "disk already exists; run start"
-	// while start errored "no kubeconfig context"). After a
-	// successful staged-disk provision, the kubeconfig is
-	// populated and subsequent stop/start cycles take the
-	// existing-cluster path.
+	// Without the staged-disk branch an imported disk could not
+	// be booted at all: provision would refuse an existing disk
+	// and start would refuse a cluster without a kubeconfig
+	// context. After a successful staged-disk provision the
+	// kubeconfig is populated and subsequent stop/start cycles
+	// take the existing-cluster path.
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	stagedDisk := false
 	if _, err := os.Stat(diskPath); err == nil {
@@ -960,10 +960,10 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 // sshWaitTimeout bounds waitForSSH. Cold-cache first boots are
 // dominated by cloud-init: 5-15 minutes observed when the qcow2,
 // seed image and host page cache are all cold, while warm-cache
-// boots take well under a minute. The prior 120s aborted cold
-// boots while qemu kept running, leaving a "VM already running"
-// trap for the next provision. See the specs repo,
-// ISSUE_QEMU_PROVISION_SSH_TIMEOUT.md.
+// boots take well under a minute. A timeout shorter than a cold
+// boot aborts provision while qemu keeps running, which leaves a
+// "VM already running" trap for the next provision. See the specs
+// repo, ISSUE_QEMU_PROVISION_SSH_TIMEOUT.md.
 const sshWaitTimeout = 600 * time.Second
 
 // sshWaitHeartbeat spaces the progress log lines during the wait

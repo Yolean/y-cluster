@@ -33,8 +33,8 @@ import (
 // the dynamic-modules filter in front of the router, so the
 // container is a drop-in upstream service for any HTTPRoute.
 //
-// Replaces the older registry.k8s.io/echoserver:1.10 (nginx-lua
-// behind a self-signed wrapper) -- the envoy variant matches what
+// Preferred over registry.k8s.io/echoserver (nginx-lua behind a
+// self-signed wrapper): the envoy variant matches what
 // production traffic flows through (real Envoy data plane), the
 // response is structured JSON instead of plain-text, and the
 // bundled config requires no init scaffolding (no /var/lib/nginx

@@ -37,10 +37,10 @@ const k3sReadyTimeout = 5 * time.Minute
 //   - --disable=local-storage         y-cluster ships its own
 //     local-path provisioner.
 //
-// Phase 1 uses script-mode (curl | sh). Airgap mode -- mirroring
-// pkg/provision/qemu's installK3sAirgap, which downloads the k3s
-// binary + image tarball locally and SCPs them in -- lands later
-// once the dev-cluster experience needs offline-capable installs.
+// Script mode (curl | sh) is the only install this provider has;
+// config validation refuses k3s.install: airgap. The server has
+// outbound internet, which is what qemu's airgap path exists to
+// avoid depending on.
 func (c *Cluster) installK3s(ctx context.Context) error {
 	if c.cfg.K3s.Version == "" {
 		return fmt.Errorf("k3s.version is empty; pkg/provision/config sets a pin-driven default")
@@ -101,11 +101,10 @@ func (c *Cluster) waitForK3sReady(ctx context.Context) error {
 // Note on security: the rewritten kubeconfig dials 6443 directly,
 // which means the Hetzner server's API port has to be reachable
 // from the operator's host. Hetzner Cloud servers are open to the
-// public internet by default; phase 5 polish should add a Hetzner
-// Cloud Firewall pinning 6443 to operator-supplied source IPs.
-// k3s's bearer-token auth keeps an open 6443 from being a free
-// API for anyone who finds the IP, but a tighter firewall is the
-// right belt-and-braces.
+// public internet by default, and y-cluster configures no Hetzner
+// Cloud Firewall. k3s's bearer-token auth keeps an open 6443 from
+// being a free API for anyone who finds the IP; pinning 6443 to
+// known source IPs is left to the operator.
 func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
 	raw, err := c.SSH(ctx, "sudo cat /etc/rancher/k3s/k3s.yaml")
 	if err != nil {

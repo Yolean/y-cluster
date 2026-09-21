@@ -4,9 +4,8 @@
 //
 // Implemented on top of the typed File schema (schema.go) +
 // sigs.k8s.io/yaml, NOT k8s.io/client-go/tools/clientcmd. The
-// kubeconfig file format is small enough that hand-rolling lets us
-// drop client-go from y-cluster's binary; the Manager's behaviour is
-// otherwise identical to the previous clientcmd-backed version.
+// kubeconfig file format is small enough that hand-rolling keeps
+// client-go out of y-cluster's binary.
 package kubeconfig
 
 import (

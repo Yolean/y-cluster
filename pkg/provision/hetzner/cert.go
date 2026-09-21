@@ -16,8 +16,7 @@ import (
 // is generous for the dev-cluster shape (typical cluster lifetime
 // is hours to days); the trade is that an operator who keeps a
 // cluster running >1 year sees TLS warnings until they reprovision.
-// Phase 5 polish could add periodic rotation if real installations
-// run that long.
+// Nothing rotates the certificate.
 const certValidity = 365 * 24 * time.Hour
 
 // certKeySize is the RSA key length. 2048 is the sweet spot: still

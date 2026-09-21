@@ -98,8 +98,8 @@ func DockerTag(v string) string { return dockerTag(v) }
 // string field whose `jsonschema:"default=..."` tag carries a value.
 // Recurses into nested structs. The function intentionally limits
 // itself to string fields; numeric fields in y-cluster configs are
-// declared as strings (matching the historical qemu shape) so we
-// don't have to mix types here.
+// declared as strings (qemu and docker take them as command line
+// text) so we don't have to mix types here.
 //
 // Tag values starting with `__...__` are treated as placeholders and
 // skipped: those fields are filled by callers who know how to
