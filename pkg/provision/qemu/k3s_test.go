@@ -78,3 +78,13 @@ func TestDownloadFile_Non200(t *testing.T) {
 		t.Fatal("dest file should not exist after failed download")
 	}
 }
+
+// "k3s ready" has to mean the apiserver answers, also on a disk whose
+// kubeconfig file already exists from an earlier boot.
+func TestK3sReadyProbe_AsksTheAPIServer(t *testing.T) {
+	for _, want := range []string{"test -s /etc/rancher/k3s/k3s.yaml", "k3s kubectl get --raw=/readyz"} {
+		if !strings.Contains(k3sReadyProbe, want) {
+			t.Errorf("probe lacks %q: %s", want, k3sReadyProbe)
+		}
+	}
+}
