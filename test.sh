@@ -21,8 +21,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Unit tests must never touch the operator's kubeconfig. They run
+# against a sentinel file instead, and any write to it is a failure.
+sentinel=$(mktemp)
+printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: y-cluster\n  cluster:\n    server: https://127.0.0.1:6443\ncontexts:\n- name: local\n  context:\n    cluster: y-cluster\n    user: y-cluster\nusers:\n- name: y-cluster\n  user: {}\n' > "$sentinel"
+sentinel_sum=$(sha256sum "$sentinel")
+
 echo "==> unit tests"
-go test -count=1 ./...
+KUBECONFIG="$sentinel" go test -count=1 ./...
+if [ "$sentinel_sum" != "$(sha256sum "$sentinel")" ]; then
+  echo "FAIL: a unit test modified \$KUBECONFIG ($sentinel)" >&2
+  exit 1
+fi
+rm "$sentinel"
 
 echo
 echo "==> go vet"

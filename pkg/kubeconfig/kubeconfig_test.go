@@ -7,19 +7,26 @@ import (
 	"testing"
 )
 
-func TestNew_RequiresKUBECONFIG(t *testing.T) {
-	os.Unsetenv("KUBECONFIG")
-	_, err := New("local", "ystack-qemu", nil)
-	if err == nil {
+// TestNew_RejectsEmptyPath: an unnamed file must never resolve to
+// the operator's real kubeconfig through the environment.
+func TestNew_RejectsEmptyPath(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "must-not-be-used"))
+	if _, err := New("", "local", "ystack-qemu", nil); err == nil {
+		t.Fatal("expected error for empty path")
+	}
+}
+
+func TestFromEnv_RequiresKUBECONFIG(t *testing.T) {
+	t.Setenv("KUBECONFIG", "")
+	if _, err := FromEnv("local", "ystack-qemu", nil); err == nil {
 		t.Fatal("expected error when KUBECONFIG not set")
 	}
 }
 
-func TestNew_ReadsKUBECONFIG(t *testing.T) {
-	os.Setenv("KUBECONFIG", "/tmp/test-kubeconfig")
-	defer os.Unsetenv("KUBECONFIG")
+func TestFromEnv_ReadsKUBECONFIG(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/test-kubeconfig")
 
-	m, err := New("local", "ystack-qemu", nil)
+	m, err := FromEnv("local", "ystack-qemu", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +88,8 @@ func TestLoad_MissingFileEmptyConfig(t *testing.T) {
 func TestImport_NewKubeconfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kubeconfig")
-	os.Setenv("KUBECONFIG", path)
-	defer os.Unsetenv("KUBECONFIG")
 
-	m, err := New("local", "ystack-test", nil)
+	m, err := New(path, "local", "ystack-test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,10 +156,7 @@ users:
 		t.Fatal(err)
 	}
 
-	os.Setenv("KUBECONFIG", path)
-	defer os.Unsetenv("KUBECONFIG")
-
-	m, err := New("local", "ystack-test", nil)
+	m, err := New(path, "local", "ystack-test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,10 +201,7 @@ func TestCleanupStale_NoError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	os.Setenv("KUBECONFIG", path)
-	defer os.Unsetenv("KUBECONFIG")
-
-	m, _ := New("nonexistent", "nonexistent", nil)
+	m, _ := New(path, "nonexistent", "nonexistent", nil)
 	// Should not panic or error when entries don't exist
 	m.CleanupStale()
 }

@@ -129,7 +129,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return nil, err
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Context, cfg.Name, logger)
+	kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +277,7 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		logger.Info("teardown complete, VM deleted", zap.String("name", cfg.Name))
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Context, cfg.Name, logger)
+	kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger)
 	if err == nil {
 		kubecfg.CleanupTeardown()
 	}

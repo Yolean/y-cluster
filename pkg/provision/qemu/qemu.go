@@ -254,7 +254,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 
 	// Initialize kubeconfig manager early — validates KUBECONFIG env
-	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
 	if err != nil {
 		return nil, err
 	}
@@ -510,8 +510,8 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		return err
 	}
 
-	// Clean kubeconfig — remove context and fix null→[] for kubie
-	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	// Without a kubeconfig path there is no context to remove.
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
 	if err == nil {
 		kubecfg.CleanupTeardown()
 	}

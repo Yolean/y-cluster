@@ -1,6 +1,7 @@
 package qemu
 
 import (
+	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +204,64 @@ func TestImportFormatFromExt(t *testing.T) {
 		if got != c.want {
 			t.Errorf("importFormatFromExt(%q) = %q, want %q", c.path, got, c.want)
 		}
+	}
+}
+
+// seedKubeconfig writes a kubeconfig holding the default context and
+// cluster names, i.e. the entries TeardownConfig would remove.
+func seedKubeconfig(t *testing.T, cfg Config) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	content := "apiVersion: v1\nkind: Config\n" +
+		"clusters:\n- name: " + cfg.Name + "\n  cluster:\n    server: https://127.0.0.1:6443\n" +
+		"contexts:\n- name: " + cfg.Context + "\n  context:\n    cluster: " + cfg.Name + "\n    user: " + cfg.Name + "\n" +
+		"users:\n- name: " + cfg.Name + "\n  user: {}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTeardownConfig_IgnoresKubeconfigEnv: only Config.Kubeconfig
+// names the file to clean. $KUBECONFIG is the operator's real file
+// when tests run, so it must stay byte-identical.
+func TestTeardownConfig_IgnoresKubeconfigEnv(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = ""
+	envPath := seedKubeconfig(t, cfg)
+	before, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", envPath)
+
+	if err := TeardownConfig(cfg, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("TeardownConfig modified $KUBECONFIG:\n%s", after)
+	}
+}
+
+func TestTeardownConfig_RemovesContextFromConfiguredKubeconfig(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = seedKubeconfig(t, cfg)
+
+	if err := TeardownConfig(cfg, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	f, err := kubeconfig.Load(cfg.Kubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ContextCluster(cfg.Context); got != "" {
+		t.Fatalf("context %q still points at cluster %q", cfg.Context, got)
 	}
 }
 

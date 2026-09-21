@@ -236,7 +236,7 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		return nil, fmt.Errorf("disk %s not found; re-provision", diskPath)
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
 	if err != nil {
 		return nil, err
 	}
