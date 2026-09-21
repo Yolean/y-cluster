@@ -170,6 +170,10 @@ func ensureLoadBalancer(ctx context.Context, hc *hcloud.Client, cfg lbConfig, fi
 	if err != nil {
 		return nil, fmt.Errorf("re-fetch LB %d: %w", res.LoadBalancer.ID, err)
 	}
+	if lb == nil {
+		// GetByID reports "not found" as (nil, nil).
+		return nil, fmt.Errorf("LB %d was created but is gone on re-fetch", res.LoadBalancer.ID)
+	}
 	logger.Info("Hetzner LB ready",
 		zap.Int64("id", lb.ID),
 		zap.String("ipv4", lb.PublicNet.IPv4.IP.String()),

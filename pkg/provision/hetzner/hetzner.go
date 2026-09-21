@@ -630,10 +630,13 @@ func Start(ctx context.Context, contextName string, logger *zap.Logger) (string,
 			return "", fmt.Errorf("wait for poweron: %w", err)
 		}
 	}
-	// Re-fetch to pick up the post-boot public-net snapshot.
-	srv, _, err = hc.Server.GetByID(ctx, srv.ID)
+	// Re-fetch to pick up the post-boot public-net snapshot. The id
+	// is kept apart: GetByID returns a nil server along with its
+	// error, and the error message is where the id is needed.
+	serverID := srv.ID
+	srv, _, err = hc.Server.GetByID(ctx, serverID)
 	if err != nil {
-		return "", fmt.Errorf("re-describe server id=%d: %w", srv.ID, err)
+		return "", fmt.Errorf("re-describe server id=%d: %w", serverID, err)
 	}
 	ipv4 := ""
 	if srv != nil && srv.PublicNet.IPv4.IP != nil {
