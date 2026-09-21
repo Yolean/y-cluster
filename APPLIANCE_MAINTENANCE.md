@@ -85,9 +85,11 @@ The supplier builds the v1 appliance disk:
    `stop` first). Live phase: clears per-deploy dns-hint-ip
    GatewayClass annotations and snapshots reconciled Gateway state
    for the bundle, then stops the VM itself. Offline phase:
-   virt-customize-driven identity reset (machine-id, ssh host keys,
-   cloud-init clean), netplan generic-NIC match, systemd-timesyncd
-   enable, **build the data seed** (see Mechanism 1 below), **move
+   virt-customize-driven portability reset (`cloud-init clean`, a
+   generic-NIC DHCP netplan that cloud-init may no longer
+   regenerate, systemd-timesyncd enable; `/etc/machine-id`, the ssh
+   host keys and `authorized_keys` are deliberately KEPT, see the
+   header of `pkg/provision/qemu/prepare_inguest.sh` for why), **build the data seed** (see Mechanism 1 below), **move
    staged manifests** into k3s's auto-apply directory.
 5. `y-cluster export <bundle-dir> --format=...` packs the result for
    the target hypervisor (qcow2 / raw / vmdk / ova / gcp-tar).
@@ -425,7 +427,15 @@ Completed state and doesn't recreate the pod).
 
 The name is the file basename (without `.yaml`). It MUST:
 - Match `[a-zA-Z0-9][a-zA-Z0-9._-]*` (no path separators, no `..`).
-- Not already exist in the staging directory (the subcommand bails).
+- Not already exist in the staging directory (the subcommand bails,
+  except that re-adding byte-identical content is a no-op so a build
+  script can run twice).
+
+While iterating on a build, `y-cluster manifests replace <name>
+<path|->` overwrites a name that IS staged and `y-cluster manifests rm
+<name>` drops one; both bail when the name is not staged. There is no
+force flag: the verb states which situation the caller believes it is
+in.
 
 The name is also the source-of-truth identifier for the migration. We
 recommend a versioned shape like `migrate-v0.5.0-userdb-add-tenants`.
