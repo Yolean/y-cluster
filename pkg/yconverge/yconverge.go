@@ -129,8 +129,15 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 
 	// Resolve dependency order from all CUE files in the kustomize
 	// tree. An overlay (e.g. backend/qa) inherits dependencies from
-	// its base (e.g. backend/base/yconverge.cue imports db). The
-	// traversal must succeed: if it fails (corrupt kustomization,
+	// its base (e.g. backend/base/yconverge.cue imports db): the
+	// base's IMPORTS become steps, the base itself does not. It is
+	// part of the target and is applied once, as the target builds
+	// it. Applied by itself first it would go in unpatched, and for
+	// an overlay that sets the namespace or a name prefix (the
+	// site-apply-namespaced -> ../site-apply shape) that means
+	// resources under the wrong name or in the wrong namespace.
+	//
+	// The traversal must succeed: if it fails (corrupt kustomization,
 	// permission denied, symlink cycle) the apply might still
 	// succeed but no checks would be discovered, leaving the apply
 	// silently unverified. Treat traversal errors as fatal.
@@ -150,6 +157,9 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				return nil, fmt.Errorf("resolve deps from %s: %w", cueDir, depErr)
 			}
 			for _, s := range depSteps {
+				if s == cueDir && cueDir != absDir {
+					continue // in the target's own tree, see above
+				}
 				if !visited[s] {
 					visited[s] = true
 					steps = append(steps, s)
