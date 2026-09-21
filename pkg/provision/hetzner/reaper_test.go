@@ -2,6 +2,8 @@ package hetzner
 
 import (
 	"context"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +48,7 @@ func argsContain(args []string, want ...string) bool {
 }
 
 // reaperTestOpts is the baseline installReaperOpts the rendering
-// tests vary. 90m makes the seconds substitution (5400) visibly
-// distinct from an hours-based value.
+// tests vary: a 90m budget from reaperTestNow.
 func reaperTestOpts(onExpiry string) installReaperOpts {
 	return installReaperOpts{
 		KubectlContext: "alice-dev",
@@ -76,9 +77,9 @@ func TestReaperManifest_Teardown(t *testing.T) {
 		"image: hetznercloud/cli:", // pinned image
 		"name: y-cluster-reaper",   // namespace
 		"name: reaper",             // job name (rejectUpstream gate + e2e depend on it)
-		// The window: 90m as sleep seconds AND as the readable
-		// annotation value.
-		`value: "5400"`,
+		// The deadline as epoch seconds for the script (reaperTestNow
+		// + 90m), and the window as the readable annotation value.
+		`value: "1767328445"`,
 		`y-cluster.yolean.se/max-run: "1h30m0s"`,
 		// The action, as env + label + annotation.
 		`value: "teardown"`,
@@ -86,14 +87,13 @@ func TestReaperManifest_Teardown(t *testing.T) {
 		`y-cluster.yolean.se/on-expiry: "teardown"`,
 		// expires-at computed at install: now + maxRun.
 		`y-cluster.yolean.se/expires-at: "2026-01-02T04:34:05Z"`,
-		`value: "12345"`,       // server id
-		`value: "67890"`,       // lb id
-		`value: "alice"`,       // lb-group
-		`token: "tok-XYZ"`,     // captured operator token
-		"hcloud server delete", // canonical teardown step
-		"hcloud load-balancer delete",
+		`value: "12345"`,                   // server id
+		`value: "67890"`,                   // lb id
+		`value: "alice"`,                   // lb-group
+		`token: "tok-XYZ"`,                 // captured operator token
+		`act server delete "${SERVER_ID}"`, // canonical teardown step
+		`act load-balancer delete "${LB_ID}"`,
 		"managed-by: y-cluster",
-		`sleep "${SLEEP_SECONDS}"`,
 		// backoffLimit > 0 is what lets the reaper survive a node
 		// reboot / transient pod failure; 0 would permanently kill
 		// the expiry action on the first pod loss.
@@ -124,10 +124,10 @@ func TestReaperManifest_Stop(t *testing.T) {
 		`y-cluster.yolean.se/on-expiry: "stop"`,
 		`y-cluster.yolean.se/max-run: "1h30m0s"`,
 		`y-cluster.yolean.se/expires-at: "2026-01-02T04:34:05Z"`,
-		`value: "5400"`,
+		`value: "1767328445"`,
 		// Graceful ACPI shutdown; no delete of server or LB in
 		// this branch.
-		"hcloud server shutdown",
+		`act server shutdown "${SERVER_ID}"`,
 		"backoffLimit: 6",
 	} {
 		if !strings.Contains(rendered, want) {
@@ -163,7 +163,7 @@ func TestInstallReaper_DeleteThenApply(t *testing.T) {
 	if !argsContain(apply.args, "--context=alice-dev", "apply", "--server-side") {
 		t.Errorf("apply call args unexpected: %v", apply.args)
 	}
-	if !strings.Contains(apply.stdin, `value: "5400"`) || !strings.Contains(apply.stdin, `value: "stop"`) {
+	if !strings.Contains(apply.stdin, `y-cluster.yolean.se/max-run: "1h30m0s"`) || !strings.Contains(apply.stdin, `value: "stop"`) {
 		t.Errorf("apply manifest missing window / action:\n%s", apply.stdin)
 	}
 }
@@ -224,8 +224,15 @@ func TestRearmReaper_FreshWindow(t *testing.T) {
 		t.Errorf("first call should probe /readyz: %v", (*calls)[0].args)
 	}
 	apply := (*calls)[2]
-	if !strings.Contains(apply.stdin, `value: "5400"`) {
-		t.Errorf("re-armed manifest should carry the full 90m window:\n%s", apply.stdin)
+	// A fresh full window counted from now, not what was left of the
+	// one armed at provision.
+	m := regexp.MustCompile(`name: EXPIRES_EPOCH\s+value: "(\d+)"`).FindStringSubmatch(apply.stdin)
+	if m == nil {
+		t.Fatalf("re-armed manifest has no EXPIRES_EPOCH:\n%s", apply.stdin)
+	}
+	epoch, _ := strconv.ParseInt(m[1], 10, 64)
+	if want := time.Now().Add(90 * time.Minute).Unix(); epoch < want-30 || epoch > want+30 {
+		t.Errorf("re-armed deadline %d is not now + 90m (%d)", epoch, want)
 	}
 	if !strings.Contains(apply.stdin, `value: "teardown"`) {
 		t.Errorf("re-armed manifest should keep the persisted action:\n%s", apply.stdin)
