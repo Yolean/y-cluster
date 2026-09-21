@@ -200,16 +200,8 @@ func CheckPrerequisites() error {
 
 // IsRunning checks if a VM with this config is already running.
 func (c Config) IsRunning() (bool, int) {
-	pidFile := filepath.Join(c.CacheDir, c.Name+".pid")
-	data, err := os.ReadFile(pidFile)
+	pid, err := readPidFile(pidFilePath(c.CacheDir, c.Name))
 	if err != nil {
-		return false, 0
-	}
-	var pid int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		return false, 0
-	}
-	if !pidAlive(pid) {
 		return false, 0
 	}
 	return true, pid
@@ -613,23 +605,18 @@ func stopVM(pidFile string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	pid, err := readPidFile(pidFile)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case errors.Is(err, errStalePidfile):
+		// Nothing of ours is running. Remove the file so the next
+		// provision starts clean, and leave whatever process may
+		// hold the number now alone.
+		_ = os.Remove(pidFile)
+		return nil
+	case err != nil:
 		return fmt.Errorf("read %s: %w", pidFile, err)
-	}
-	var pid int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		// Corrupt pidfile; nothing actionable. Remove it so the
-		// next provision starts clean.
-		_ = os.Remove(pidFile)
-		return nil
-	}
-	if !pidAlive(pid) {
-		_ = os.Remove(pidFile)
-		return nil
 	}
 
 	logger.Info("stopping VM", zap.Int("pid", pid))

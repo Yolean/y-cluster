@@ -2,6 +2,7 @@ package qemu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -286,9 +287,16 @@ func pidFilePath(cacheDir, name string) string {
 	return filepath.Join(cacheDir, name+".pid")
 }
 
-// readPidFile parses the qemu pid out of pidFile and verifies the
-// process is alive. Returns os.ErrNotExist when the file isn't
-// there so callers can branch on errors.Is.
+// errStalePidfile marks a pidfile that does not name a running VM:
+// unparseable, the pid is gone, or the pid now belongs to some other
+// process.
+var errStalePidfile = errors.New("stale pidfile")
+
+// readPidFile returns the pid of the running qemu that owns pidFile.
+// It is the only place a pid from disk is trusted; see vmAlive for
+// what that takes. Errors: os.ErrNotExist when there is no pidfile,
+// errStalePidfile when it names no running VM, anything else is a
+// read failure.
 func readPidFile(pidFile string) (int, error) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -296,10 +304,10 @@ func readPidFile(pidFile string) (int, error) {
 	}
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		return 0, fmt.Errorf("parse %s: %w", pidFile, err)
+		return 0, fmt.Errorf("%w: parse %s: %v", errStalePidfile, pidFile, err)
 	}
-	if !pidAlive(pid) {
-		return 0, fmt.Errorf("%s: pid %d not alive (cluster stopped?)", pidFile, pid)
+	if !vmAlive(pid, pidFile) {
+		return 0, fmt.Errorf("%w: %s: pid %d is not a running qemu started with this pidfile (cluster stopped?)", errStalePidfile, pidFile, pid)
 	}
 	return pid, nil
 }

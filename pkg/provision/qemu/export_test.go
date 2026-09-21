@@ -159,10 +159,7 @@ func TestExport_RejectsRunningCluster(t *testing.T) {
 	if err := saveState(cfg); err != nil {
 		t.Fatal(err)
 	}
-	pidFile := filepath.Join(cacheDir, cfg.Name+".pid")
-	if err := os.WriteFile(pidFile, []byte("1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	startVMStandin(t, pidFilePath(cacheDir, cfg.Name), false)
 	err := Export(context.Background(), ExportOptions{
 		CacheDir:  cacheDir,
 		Name:      cfg.Name,

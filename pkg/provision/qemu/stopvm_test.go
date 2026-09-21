@@ -1,10 +1,14 @@
 package qemu
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -61,6 +65,54 @@ func TestStopVM_CorruptPidFile(t *testing.T) {
 	}
 }
 
+// TestHelperVM is not a test. Re-executed by startVMStandin, the test
+// binary plays the part of a running qemu: it stays alive, and
+// optionally ignores SIGTERM like a wedged VM does.
+func TestHelperVM(t *testing.T) {
+	mode := os.Getenv("Y_CLUSTER_TEST_VM_STANDIN")
+	if mode == "" {
+		return
+	}
+	if mode == "ignore-term" {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	fmt.Println("ready")
+	time.Sleep(60 * time.Second)
+	os.Exit(0)
+}
+
+// startVMStandin starts a process that stop/teardown will accept as
+// the qemu owning pidFile, and writes its pid there. What makes it
+// acceptable is what makes a real qemu acceptable: `-pidfile
+// <pidFile>` on its command line.
+func startVMStandin(t *testing.T, pidFile string, ignoreTerm bool) *exec.Cmd {
+	t.Helper()
+	mode := "exit-on-term"
+	if ignoreTerm {
+		mode = "ignore-term"
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperVM$", "--", "-pidfile", pidFile)
+	cmd.Env = append(os.Environ(), "Y_CLUSTER_TEST_VM_STANDIN="+mode)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start VM stand-in: %v", err)
+	}
+	// "ready" is printed after the signal disposition is in place.
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("VM stand-in did not come up: %q %v", line, err)
+	}
+	// Reaped here for the reason startReapableChild explains.
+	go func() { _, _ = cmd.Process.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
 // startReapableChild spawns a child and starts a goroutine that
 // Wait()s on it, so that once the kernel finishes killing the
 // process we don't leave behind a zombie. In production qemu is
@@ -83,8 +135,8 @@ func startReapableChild(t *testing.T, name string, args ...string) *exec.Cmd {
 func TestStopVM_TerminatesOnSIGTERM(t *testing.T) {
 	withGraceTimeouts(t, 3*time.Second, 1*time.Second)
 
-	cmd := startReapableChild(t, "sleep", "60")
-	pidFile := writePidFile(t, t.TempDir(), cmd.Process.Pid)
+	pidFile := filepath.Join(t.TempDir(), "vm.pid")
+	cmd := startVMStandin(t, pidFile, false)
 
 	if err := stopVM(pidFile, nil); err != nil {
 		t.Fatalf("stopVM: %v", err)
@@ -120,11 +172,8 @@ func TestStop_FallsBackToSignalsWhenSSHUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := startReapableChild(t, "sleep", "60")
 	pidFile := pidFilePath(cacheDir, cfg.Name)
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	cmd := startVMStandin(t, pidFile, false)
 	// Leave a placeholder ssh key file so guestPoweroff doesn't
 	// fail at the file-read step (the dial is the failure we
 	// want to exercise).
@@ -153,23 +202,8 @@ func TestStopVM_EscalatesToSIGKILL(t *testing.T) {
 	// that the shell has time to install its trap before we signal.
 	withGraceTimeouts(t, 1*time.Second, 5*time.Second)
 
-	// bash trap '' TERM ignores SIGTERM until the shell exits; only
-	// SIGKILL will reap it. A long finite sleep keeps it alive
-	// without burning CPU. We avoid `sleep infinity` because that's
-	// a GNU coreutils extension -- macOS BSD sleep rejects it with
-	// "invalid time interval" and bash exits before the test has a
-	// chance to send SIGTERM, making the test pass-by-coincidence
-	// (returning fast through the "process is already dead" branch
-	// of stopVM). 60s is plenty for the test's grace timeouts.
-	cmd := startReapableChild(t, "bash", "-c", "trap '' TERM; sleep 60")
-
-	// Give bash a moment to install the trap before we ask stopVM
-	// to send SIGTERM. Without this the signal can race the trap
-	// setup and the process exits "nicely", which would mask the
-	// escalation path we want to exercise.
-	time.Sleep(200 * time.Millisecond)
-
-	pidFile := writePidFile(t, t.TempDir(), cmd.Process.Pid)
+	pidFile := filepath.Join(t.TempDir(), "vm.pid")
+	cmd := startVMStandin(t, pidFile, true)
 
 	start := time.Now()
 	if err := stopVM(pidFile, nil); err != nil {
@@ -190,4 +224,60 @@ func TestStopVM_EscalatesToSIGKILL(t *testing.T) {
 		t.Fatalf("pidfile should be removed; stat err=%v", err)
 	}
 	_, _ = cmd.Process.Wait()
+}
+
+// The pid in a pidfile can belong to anything by the time it is read:
+// the file survives a reboot or a crashed qemu, and the kernel reuses
+// the number. Such a process must not be signalled.
+func TestStopVM_LeavesAnUnrelatedProcessAlone(t *testing.T) {
+	withGraceTimeouts(t, 1*time.Second, 1*time.Second)
+
+	cmd := startReapableChild(t, "sleep", "60")
+	pidFile := writePidFile(t, t.TempDir(), cmd.Process.Pid)
+
+	if err := stopVM(pidFile, nil); err != nil {
+		t.Fatalf("stopVM: %v", err)
+	}
+	if !pidAlive(cmd.Process.Pid) {
+		t.Fatal("stopVM killed a process that is not the VM")
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("the stale pidfile should be removed; stat err=%v", err)
+	}
+}
+
+func TestIsRunning_PidReusedByAnotherProcess(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	// This test process: certainly alive, certainly not the VM.
+	if err := os.WriteFile(pidFilePath(cfg.CacheDir, cfg.Name), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if running, pid := cfg.IsRunning(); running {
+		t.Fatalf("pid %d is alive but is not this cluster's qemu", pid)
+	}
+}
+
+func TestCmdlineNamesPidfile(t *testing.T) {
+	argv := func(args ...string) []byte { return []byte(strings.Join(args, "\x00") + "\x00") }
+	const pidFile = "/home/u/.cache/y-cluster-qemu/local.pid"
+	for _, tc := range []struct {
+		name    string
+		cmdline []byte
+		want    bool
+	}{
+		{"qemu started with this pidfile", argv("qemu-system-x86_64", "-name", "local", "-daemonize", "-pidfile", pidFile), true},
+		{"same cluster, cache dir spelled differently", argv("qemu-system-x86_64", "-pidfile", "../.cache/y-cluster-qemu/local.pid"), true},
+		{"qemu of another cluster", argv("qemu-system-x86_64", "-name", "other", "-pidfile", "/home/u/.cache/y-cluster-qemu/other.pid"), false},
+		{"unrelated process", argv("sleep", "60"), false},
+		{"path mentioned but not as the -pidfile argument", argv("tail", "-f", pidFile), false},
+		{"-pidfile as the last argument", argv("qemu-system-x86_64", "-pidfile"), false},
+		{"empty", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cmdlineNamesPidfile(tc.cmdline, pidFile); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
