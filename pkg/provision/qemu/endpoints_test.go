@@ -79,35 +79,28 @@ func TestSSHCommand(t *testing.T) {
 	}
 }
 
-// k3sKubeconfig is the relevant part of /etc/rancher/k3s/k3s.yaml.
-const k3sKubeconfig = "apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:6443\n  name: default\n"
-
-func TestRewriteKubeconfigServer(t *testing.T) {
-	e := Config{PortForwards: []PortForward{{Host: "26443", Guest: "6443"}}}.endpoints()
-	got, err := rewriteKubeconfigServer([]byte(k3sKubeconfig), e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "server: https://127.0.0.1:26443\n") {
-		t.Fatalf("server not rewritten:\n%s", got)
-	}
-}
-
-// A forward that keeps 6443 on the host must survive the rewrite
-// unchanged rather than being mangled by a partial match.
-func TestRewriteKubeconfigServer_SamePort(t *testing.T) {
-	e := Config{PortForwards: []PortForward{{Host: "6443", Guest: "6443"}}}.endpoints()
-	got, err := rewriteKubeconfigServer([]byte(k3sKubeconfig), e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != k3sKubeconfig {
-		t.Fatalf("kubeconfig changed:\n%s", got)
+func TestAPIAddress(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"forwarded port on loopback", Config{PortForwards: []PortForward{{Host: "26443", Guest: "6443"}}}, "127.0.0.1:26443"},
+		{"wildcard bind is dialed over loopback", Config{BindAddress: "0.0.0.0", PortForwards: []PortForward{{Host: "6443", Guest: "6443"}}}, "127.0.0.1:6443"},
+		{"specific bind address", Config{BindAddress: "192.168.1.10", PortForwards: []PortForward{{Host: "6443", Guest: "6443"}}}, "192.168.1.10:6443"},
+	} {
+		got, err := c.cfg.endpoints().apiAddress()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+		}
 	}
 }
 
-func TestRewriteKubeconfigServer_NoAPIForward(t *testing.T) {
-	_, err := rewriteKubeconfigServer([]byte(k3sKubeconfig), Config{}.endpoints())
+func TestAPIAddress_NoAPIForward(t *testing.T) {
+	_, err := Config{}.endpoints().apiAddress()
 	if err == nil || !strings.Contains(err.Error(), "guest:6443") {
 		t.Fatalf("want an error naming the missing forward, got %v", err)
 	}
@@ -212,16 +205,5 @@ func TestK3sServerFlags(t *testing.T) {
 	}
 	if got := k3sServerFlags(Config{BindAddress: "192.168.1.10"}.endpoints()); got != base+" --tls-san=192.168.1.10" {
 		t.Errorf("specific address: %q", got)
-	}
-}
-
-func TestRewriteKubeconfigServer_SpecificBindAddress(t *testing.T) {
-	e := Config{BindAddress: "192.168.1.10", PortForwards: []PortForward{{Host: "6443", Guest: "6443"}}}.endpoints()
-	got, err := rewriteKubeconfigServer([]byte(k3sKubeconfig), e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "server: https://192.168.1.10:6443\n") {
-		t.Fatalf("server not rewritten:\n%s", got)
 	}
 }

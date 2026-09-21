@@ -24,6 +24,7 @@ package hetzner
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -517,20 +518,25 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 	return nil
 }
 
-// SSH runs cmd on the cluster's node over SSH. Mirrors qemu's
-// Cluster.SSH so the cmd/y-cluster ctr / crictl / RunShell paths
-// can dispatch uniformly via cluster.Lookup.
-func (c *Cluster) SSH(ctx context.Context, cmd string) ([]byte, error) {
-	out, err := sshexec.Exec(ctx, sshexec.Target{
+// target is how the operator's host reaches the node over ssh.
+func (c *Cluster) target() sshexec.Target {
+	return sshexec.Target{
 		Host:    c.state.IPv4,
 		Port:    "22",
 		User:    c.cfg.SSHUser,
 		KeyPath: filepath.Join(c.cacheDir, c.cfg.Context+"-ssh"),
-	}, cmd, nil)
-	if err != nil {
-		return out, err
 	}
-	return out, nil
+}
+
+// NodeExec runs a shell command on the node, optionally piping stdin
+// into it, and returns the combined output.
+func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader) ([]byte, error) {
+	return sshexec.Exec(ctx, c.target(), command, stdin)
+}
+
+// SSH is NodeExec without stdin.
+func (c *Cluster) SSH(ctx context.Context, cmd string) ([]byte, error) {
+	return c.NodeExec(ctx, cmd, nil)
 }
 
 // PublicIPv4 is what the operator's host hits for SSH and the k3s
@@ -657,14 +663,8 @@ func Start(ctx context.Context, contextName string, logger *zap.Logger) (string,
 func (c *Cluster) waitForSSH(ctx context.Context, timeout time.Duration) error {
 	c.logger.Info("waiting for SSH", zap.String("host", c.state.IPv4))
 	deadline := time.Now().Add(timeout)
-	keyPath := filepath.Join(c.cacheDir, c.cfg.Context+"-ssh")
 	for {
-		_, err := sshexec.Exec(ctx, sshexec.Target{
-			Host:    c.state.IPv4,
-			Port:    "22",
-			User:    c.cfg.SSHUser,
-			KeyPath: keyPath,
-		}, "true", nil)
+		_, err := c.NodeExec(ctx, "true", nil)
 		if err == nil {
 			return nil
 		}

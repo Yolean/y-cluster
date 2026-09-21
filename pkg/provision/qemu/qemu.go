@@ -7,7 +7,6 @@
 package qemu
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/cache"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
@@ -382,7 +382,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// Stage /etc/rancher/k3s/registries.yaml before installing k3s
 	// so containerd reads it on first start. Skipped when the user
 	// hasn't configured any mirrors or auth.
-	if err := c.writeRegistries(ctx); err != nil {
+	if err := registries.WriteToNode(ctx, c.NodeExec, c.cfg.Registries, c.logger); err != nil {
 		return nil, fmt.Errorf("write registries: %w", err)
 	}
 
@@ -681,34 +681,6 @@ func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader)
 	return sshexec.Exec(ctx, c.target(), command, stdin)
 }
 
-// writeRegistries renders the configured registries.yaml and
-// stages it on the VM at registries.Path. No-op when the config
-// has no mirrors and no auth (the empty case shouldn't write a
-// file at all -- containerd then uses its default behaviour).
-func (c *Cluster) writeRegistries(ctx context.Context) error {
-	body, err := registries.Marshal(c.cfg.Registries)
-	if err != nil {
-		return err
-	}
-	if body == nil {
-		return nil
-	}
-	c.logger.Info("writing registries.yaml",
-		zap.String("path", registries.Path),
-		zap.Int("mirrors", len(c.cfg.Registries.Mirrors)),
-		zap.Int("configs", len(c.cfg.Registries.Configs)),
-	)
-	// install -d creates the dir with the right mode if missing;
-	// tee writes the file as root with 0600 since it may carry
-	// credentials.
-	cmd := "sudo install -d -m 0755 /etc/rancher/k3s && sudo install -m 0600 /dev/stdin " + registries.Path
-	out, err := c.NodeExec(ctx, cmd, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("write %s: %s: %w", registries.Path, out, err)
-	}
-	return nil
-}
-
 // DiskPath returns the path to the VM's disk image.
 func (c *Cluster) DiskPath() string {
 	return filepath.Join(c.cfg.CacheDir, c.cfg.Name+".qcow2")
@@ -773,7 +745,7 @@ func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
 	}
 	c.logger.Info("downloading cloud image", zap.String("version", ubuntuVersion))
 	url := fmt.Sprintf("https://cloud-images.ubuntu.com/%s/current/%s-server-cloudimg-amd64.img", ubuntuVersion, ubuntuVersion)
-	if err := downloadFile(ctx, url, imgPath); err != nil {
+	if err := cache.Download(ctx, url, imgPath); err != nil {
 		return "", fmt.Errorf("download cloud image: %w", err)
 	}
 	return imgPath, nil
