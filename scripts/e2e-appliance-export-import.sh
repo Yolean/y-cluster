@@ -77,7 +77,7 @@ Environment:
   DEBUG            Set non-empty for bash trace
 
 Dependencies:
-  go, qemu-system-x86_64, kubectl, ssh, ssh-keygen, curl, virt-sysprep (libguestfs-tools)
+  go, qemu-system-x86_64, qemu-img, kubectl, ssh, ssh-keygen, curl, virt-sysprep + virt-format (libguestfs-tools)
 
 Exit codes:
   0  Round-trip succeeded; imported instance answered the smoketest
@@ -125,7 +125,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in go qemu-system-x86_64 kubectl ssh ssh-keygen curl virt-sysprep; do
+for tool in go qemu-system-x86_64 qemu-img kubectl ssh ssh-keygen curl virt-sysprep virt-format; do
     command -v "$tool" >/dev/null \
         || { echo "missing required tool: $tool" >&2; exit 1; }
 done
@@ -241,12 +241,23 @@ qemu-img info "$BUNDLE_DIR/$NAME.qcow2" | grep -E '^(file format|virtual size|di
 # the bundle is genuinely self-contained: any host that can run
 # qemu (with the cloud image NOT present at the build path)
 # would boot it.
+# The appliance refuses to start k3s unless a volume labeled
+# y-cluster-data is mounted at /data/yolean (y-cluster-data-seed,
+# see APPLIANCE_MAINTENANCE.md): the customer attaches their data
+# disk before first boot. Do what they do, with an empty one; the
+# seed unit extracts the build-time /data/yolean snapshot onto it.
+DATA_DISK="$EXPORT_DIR/customer-data.qcow2"
+stage "creating the customer's empty labeled data volume"
+qemu-img create -f qcow2 "$DATA_DISK" 10G >/dev/null
+virt-format -a "$DATA_DISK" --filesystem=ext4 --label=y-cluster-data
+
 stage "booting bundled qcow2 via raw qemu (host ports $IMP_SSH_PORT -> :22, $IMP_HTTP_PORT -> :80)"
 qemu-system-x86_64 \
     -name "$NAME-imported" \
     -machine accel=kvm -cpu host \
     -smp 2 -m 4096 \
     -drive "file=$BUNDLE_DIR/$NAME.qcow2,format=qcow2,if=virtio" \
+    -drive "file=$DATA_DISK,format=qcow2,if=virtio" \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$IMP_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$IMP_HTTP_PORT-:80" \
     -device virtio-net-pci,netdev=n0 \
     -serial "file:$EXPORT_DIR/console.log" \
@@ -325,6 +336,7 @@ ssh $SSH_OPTS -p "$IMP_SSH_PORT" ystack@127.0.0.1 \
     'echo ===nodes===; sudo k3s kubectl get nodes -o wide;
      echo ===pods===; sudo k3s kubectl get pods -A;
      echo ===k3s status===; systemctl is-active k3s;
+     echo ===data seed===; systemctl status y-cluster-data-seed --no-pager -n 20;
      echo ===listen===; sudo ss -tlnp | grep -E ":(80|443|6443)\b"
     ' >&2 # y-script-lint:disable=or-true # diagnostic best-effort
 echo "  imported ssh: ssh -p $IMP_SSH_PORT -i $BUNDLE_DIR/$NAME-ssh ystack@127.0.0.1" >&2
