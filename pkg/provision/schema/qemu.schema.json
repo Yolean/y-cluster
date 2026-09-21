@@ -4,8 +4,7 @@
       "additionalProperties": false,
       "properties": {
         "className": {
-          "default": "y-cluster",
-          "description": "GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true.",
+          "description": "GatewayClass name. Default y-cluster. Consumer Gateway resources reference this via gatewayClassName. Ignored and left empty when skip is true.",
           "type": "string"
         },
         "resources": {
@@ -81,7 +80,7 @@
           "type": "string"
         },
         "host": {
-          "description": "Host port. Empty string lets the provider pick (qemu: SLIRP-assigned; docker: docker-assigned).",
+          "description": "Host port. docker: an empty string lets docker pick one. qemu: required; qemu rejects a forward without a host port.",
           "type": "string"
         }
       },

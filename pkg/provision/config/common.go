@@ -218,8 +218,11 @@ type GatewayConfig struct {
 	// consumers that hardcoded that name in pre-v0.4 cluster
 	// configs (the ystack gateway-v4 surface, for one).
 	//
-	// Ignored when Skip is true.
-	ClassName string `yaml:"className,omitempty" json:"className,omitempty" jsonschema:"default=y-cluster,description=GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true."`
+	// Ignored when Skip is true. The default is applied in
+	// applyGatewayDefaults and deliberately not as a tag default:
+	// the tag pass knows nothing about Skip and would fill it in
+	// for a config that asked for no install at all.
+	ClassName string `yaml:"className,omitempty" json:"className,omitempty" jsonschema:"description=GatewayClass name. Default y-cluster. Consumer Gateway resources reference this via gatewayClassName. Ignored and left empty when skip is true."`
 
 	// Resources tunes resource requests on the EG controller pod
 	// and the per-Gateway envoy proxy pod. Defaults target a
@@ -290,7 +293,7 @@ func (c CommonConfig) EffectiveGatewayClassName() string {
 // providers: qemu uses it for SLIRP -netdev hostfwd, docker uses
 // it for container PortBindings.
 type PortForward struct {
-	Host  string `yaml:"host"  json:"host"  jsonschema:"description=Host port. Empty string lets the provider pick (qemu: SLIRP-assigned; docker: docker-assigned)."`
+	Host  string `yaml:"host"  json:"host"  jsonschema:"description=Host port. docker: an empty string lets docker pick one. qemu: required; qemu rejects a forward without a host port."`
 	Guest string `yaml:"guest" json:"guest" jsonschema:"description=Guest port to forward to."`
 }
 
@@ -405,7 +408,49 @@ func (c *CommonConfig) validateCommon(expected string) error {
 	if err := c.Lifetime.validate(); err != nil {
 		return err
 	}
+	// Memory and CPUs are strings because providers pass them on as
+	// text, but every provider needs a whole number: qemu -m / -smp,
+	// docker's byte and nano-cpu arithmetic, multipass --memory NM.
+	if _, err := positiveInt(c.Memory); err != nil {
+		return errInvalid("memory %q must be a positive whole number of MB", c.Memory)
+	}
+	if _, err := positiveInt(c.CPUs); err != nil {
+		return errInvalid("cpus %q must be a positive whole number", c.CPUs)
+	}
+	switch c.Storage.ReclaimPolicy {
+	case "Retain", "Delete":
+	default:
+		return errInvalid("storage.reclaimPolicy must be Retain or Delete, got %q", c.Storage.ReclaimPolicy)
+	}
+	return c.validatePortForwards()
+}
+
+// validatePortForwards checks the forwards as far as every provider
+// agrees. An empty host port is left to the provider: docker assigns
+// one, qemu cannot.
+func (c *CommonConfig) validatePortForwards() error {
+	seenHost := map[string]bool{}
+	for i, pf := range c.PortForwards {
+		if !validPort(pf.Guest) {
+			return errInvalid("portForwards[%d].guest %q must be a port number (1-65535)", i, pf.Guest)
+		}
+		if pf.Host == "" {
+			continue
+		}
+		if !validPort(pf.Host) {
+			return errInvalid("portForwards[%d].host %q must be a port number (1-65535)", i, pf.Host)
+		}
+		if seenHost[pf.Host] {
+			return errInvalid("portForwards: host port %s is forwarded twice", pf.Host)
+		}
+		seenHost[pf.Host] = true
+	}
 	return nil
+}
+
+func validPort(s string) bool {
+	n, err := positiveInt(s)
+	return err == nil && n <= 65535
 }
 
 // validate enforces the lifetime invariants. A disabled lifetime
