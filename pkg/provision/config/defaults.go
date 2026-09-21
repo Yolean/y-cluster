@@ -2,6 +2,7 @@ package config
 
 import (
 	_ "embed"
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -28,10 +29,15 @@ type pinFile struct {
 	} `yaml:"mirror"`
 }
 
-// k3sPin parses the embedded pin file once at package init.
+// k3sPin parses the embedded pin file once at package init. The file
+// is compiled in, so a parse failure is a build defect and panics
+// instead of surfacing later as "k3s.version is empty" in some
+// operator's provision.
 var k3sPin = func() pinFile {
 	var p pinFile
-	_ = yaml.Unmarshal(k3sYAML, &p)
+	if err := yaml.Unmarshal(k3sYAML, &p); err != nil {
+		panic(fmt.Sprintf("pkg/provision/config/k3s.yaml: %v", err))
+	}
 	return p
 }()
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -83,6 +84,6 @@ func LoadProvision(dir string) (any, error) {
 		}
 		return &c, nil
 	default:
-		return nil, fmt.Errorf("%s: unknown provider %q (supported: docker, hetzner, multipass, qemu)", path, hdr.Provider)
+		return nil, fmt.Errorf("%s: unknown provider %q (supported: %s)", path, hdr.Provider, strings.Join(AllProviders, ", "))
 	}
 }
