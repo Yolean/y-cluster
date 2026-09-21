@@ -465,11 +465,15 @@ func ClearDNSHintIPAnnotation(ctx context.Context, kubectlContext, gatewayClassN
 func runKubectl(ctx context.Context, kubectlContext string, args ...string) ([]byte, error) {
 	full := append([]string{"--context=" + kubectlContext}, args...)
 	cmd := exec.CommandContext(ctx, "kubectl", full...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("kubectl %s: %s: %w", strings.Join(args, " "), out, err)
+	// stdout and stderr are kept apart: callers parse stdout as JSON,
+	// and kubectl writes warnings (deprecated API versions, auth
+	// plugin notices) to stderr on otherwise successful calls.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("kubectl %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()+stdout.String()), err)
 	}
-	return out, nil
+	return stdout.Bytes(), nil
 }
 
 // kubectlGetJSON runs `kubectl get <kinds> -A -o json` and
