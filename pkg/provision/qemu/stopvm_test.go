@@ -192,14 +192,13 @@ func TestStop_FallsBackToSignalsWhenSSHUnreachable(t *testing.T) {
 	}
 }
 
-// TestStopVM_EscalatesToSIGKILL covers the regression we're fixing:
-// a process that ignores SIGTERM must still be killed (and the
-// pidfile cleaned) by stopVM. The downstream agent saw qemu surviving
-// teardown and blocking the next provision; this is the smaller test
-// that asserts our SIGKILL escalation works.
+// TestStopVM_EscalatesToSIGKILL: a process that ignores SIGTERM must
+// still be killed (and the pidfile cleaned) by stopVM. A qemu that
+// survives teardown keeps its port forwards and blocks the next
+// provision.
 func TestStopVM_EscalatesToSIGKILL(t *testing.T) {
-	// termGrace must be small so the test is fast, but big enough
-	// that the shell has time to install its trap before we signal.
+	// termGrace small so the test is fast; the stand-in has its
+	// signal disposition in place before startVMStandin returns.
 	withGraceTimeouts(t, 1*time.Second, 5*time.Second)
 
 	pidFile := filepath.Join(t.TempDir(), "vm.pid")

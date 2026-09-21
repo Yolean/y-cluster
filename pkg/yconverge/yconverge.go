@@ -194,10 +194,10 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				KustomizeDir: step,
 				DryRun:       opts.DryRun,
 				SkipChecks:   opts.SkipChecks,
-				// Q14: --checks-only must propagate so callers can
-				// verify a whole chain without applying anywhere.
-				// Earlier this field was dropped, so deps re-applied
-				// even when the user only wanted a health check.
+				// --checks-only must propagate so callers can verify
+				// a whole chain without applying anywhere. A dep that
+				// did not get it would be re-applied by what the user
+				// asked for as a health check.
 				ChecksOnly: opts.ChecksOnly,
 				// Selector propagates so a `-l app=foo` run on a
 				// target with deps filters every dep's apply by the

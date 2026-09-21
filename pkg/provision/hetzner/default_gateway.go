@@ -35,7 +35,7 @@ func defaultGatewayHostnamePattern(contextName, lbGroup, fqdnDomain string) stri
 
 // defaultGatewayManifest renders the per-cluster Gateway resource:
 //
-//   - Listens on HTTP/80 only. The LB terminates HTTPS (Phase 3.c.2),
+//   - Listens on HTTP/80 only. The LB terminates HTTPS and
 //     forwards as plain HTTP. envoy-gateway therefore needs a
 //     plaintext listener; it is the LB's certificate that does
 //     transport security at the public-internet boundary.

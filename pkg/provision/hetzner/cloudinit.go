@@ -20,13 +20,10 @@ import (
 //     EC2 IMDS / GCE metadata. Cosmetic on Hetzner-stays-Hetzner
 //     but matches the qemu provisioner's convention so future
 //     image-export paths inherit the pin.
-//  3. NO k3s install -- phase 1 keeps cloud-init small and
-//     installs k3s via SSH after first boot. That's the curl|sh
-//     "script" install in pkg/provision/qemu/k3s.go's
-//     installK3sScript shape; Hetzner servers have outbound HTTPS
-//     so the script-mode is sufficient. (Airgap-mode mirroring
-//     qemu lands in a later phase if the dev-cluster experience
-//     needs it.)
+//  3. NO k3s install: cloud-init stays small and k3s is installed
+//     via SSH after first boot, with the curl|sh "script" install
+//     of pkg/provision/qemu/k3s.go's installK3sScript shape.
+//     Hetzner servers have outbound HTTPS, so that is sufficient.
 func renderCloudInitUserData(hostname, sshUser, sshPubKey string) string {
 	return fmt.Sprintf(`#cloud-config
 hostname: %s

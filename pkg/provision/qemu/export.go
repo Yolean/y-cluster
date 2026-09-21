@@ -58,9 +58,8 @@ const (
 
 // VMDKSubformatDefault is the subformat used when --vmdk-subformat
 // is not set. streamOptimized is what VMware ESXi expects out of
-// the box; we keep it as the default so the historical "y-cluster
-// export --format=vmdk" shape still produces an ESXi-importable
-// disk.
+// the box, so a plain `y-cluster export --format=vmdk` produces an
+// ESXi-importable disk.
 const VMDKSubformatDefault = "streamOptimized"
 
 // AllVMDKSubformats lists every VMDK subformat qemu-img accepts.

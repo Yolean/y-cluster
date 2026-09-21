@@ -10,8 +10,7 @@ import (
 )
 
 // lbType is the cheapest tier (~5 EUR/mo, 10k connections) -- well
-// over what a per-developer dev cluster needs. Phase 5 makes this
-// configurable if a customer scenario ever lands here.
+// over what a per-developer dev cluster needs. Not configurable.
 const lbType = "lb11"
 
 // lbHealthCheckInterval / Timeout / Retries match Hetzner's UI

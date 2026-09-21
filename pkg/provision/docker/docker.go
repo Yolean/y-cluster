@@ -51,7 +51,7 @@ type Cluster struct {
 // cap on systems where the default is 128. CI runners (ubuntu-latest)
 // have high enough limits; developer laptops sometimes don't.
 //
-// docker daemon reachability is now checked through the daemon
+// docker daemon reachability is checked through the daemon
 // API (Ping) rather than `docker info` so we get typed errors
 // instead of "exit status 1": socket-not-found surfaces as
 // net.OpError, version mismatch as a typed errdefs error.
@@ -79,10 +79,8 @@ func CheckPrerequisites() error {
 }
 
 // readFirstLine reads `path` and returns its first line trimmed.
-// We used to shell out to `cat` here; the stdlib version
-// surfaces typed errors (os.ErrNotExist when /proc/sys/fs/...
-// doesn't exist on a non-Linux host, fs.PathError with
-// permission detail) instead of just `exit status 1`.
+// Errors are typed: os.ErrNotExist when /proc/sys/fs/... doesn't
+// exist on a non-Linux host, fs.PathError with permission detail.
 func readFirstLine(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

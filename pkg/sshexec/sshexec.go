@@ -1,12 +1,12 @@
 // Package sshexec is the y-cluster SSH client used to talk to
-// provisioner-managed VMs (qemu) and to forward node commands
-// from cluster.RunCtr / cluster.RunCrictl into a qemu backend.
+// provisioner-managed machines (qemu VMs, hetzner servers) and to
+// forward node commands from cluster.RunCtr / cluster.RunCrictl.
 //
-// It replaces three separate OpenSSH binary shell-outs: `ssh`
+// It covers what would otherwise be three OpenSSH binaries: `ssh`
 // (remote command), `scp` (file upload), `ssh-keygen` (ed25519
-// key creation). The motivation is error categorisation, not
-// "bring your own ssh client": x/crypto/ssh returns typed errors
-// the OpenSSH CLI flattens into "exit status 1":
+// key creation). The reason to do it in-process is error
+// categorisation: x/crypto/ssh returns typed errors that the
+// OpenSSH CLI flattens into "exit status 1":
 //
 //   - net.OpError("connection refused")    -> VM still booting
 //   - *ssh.ServerAuthError                  -> key wrong, fatal
@@ -67,9 +67,7 @@ func Dial(ctx context.Context, t Target) (*ssh.Client, error) {
 }
 
 // Exec runs cmd on the target and returns its stdout+stderr
-// concatenated, mirroring exec.Cmd.CombinedOutput so callers
-// switching from the previous shell-out don't have to change
-// what they assert on. Errors are typed: *ssh.ExitError on
+// concatenated, like exec.Cmd.CombinedOutput. Errors are typed: *ssh.ExitError on
 // non-zero remote exit, net.OpError on transport.
 func Exec(ctx context.Context, t Target, cmd string, stdin io.Reader) ([]byte, error) {
 	cli, err := Dial(ctx, t)
@@ -171,7 +169,7 @@ func SCP(ctx context.Context, t Target, localPath, remotePath string) error {
 
 // GenerateKey writes an ed25519 keypair to keyPath (private,
 // PEM/OPENSSH format) and keyPath+".pub" (one-line OpenSSH
-// authorized_keys format). Replaces `ssh-keygen -t ed25519`.
+// authorized_keys format), as `ssh-keygen -t ed25519` would.
 //
 // The OpenSSH-format private key is what `ssh -i <key>` expects
 // and what cloud-init's `ssh_authorized_keys` line consumes

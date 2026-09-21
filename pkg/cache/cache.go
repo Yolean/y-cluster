@@ -74,8 +74,7 @@ func ImageLayout(flagOverride, digest string) (string, error) {
 }
 
 // K3s returns the k3s download root: airgap tarballs, k3s binary,
-// per-version. Replaces the qemu provisioner's old
-// ~/.cache/y-cluster-qemu/airgap/<version> location.
+// per-version.
 func K3s(flagOverride string) (string, error) {
 	root, err := Root(flagOverride)
 	if err != nil {

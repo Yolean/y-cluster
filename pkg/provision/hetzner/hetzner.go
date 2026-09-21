@@ -1,29 +1,22 @@
 // Package hetzner provisions a single-node k3s cluster on Hetzner
-// Cloud. It mirrors the qemu provisioner's API surface (Provision /
-// Teardown / Stop / Start / RunShell) so cmd/y-cluster's dispatch
-// picks it up uniformly.
+// Cloud. cmd/y-cluster dispatches to its package-level Provision /
+// Teardown / Stop / Start; unlike the local providers it does not
+// implement provision.Cluster, because its verbs address a cluster by
+// context name through the Hetzner API rather than through an
+// in-memory handle.
 //
-// Phase 1 (this commit) lands bare Provision + Teardown:
+// What a provision leaves behind, and Teardown reverses:
 //
-//   - SSH keypair generated per context, uploaded as a Hetzner
-//     SSHKey resource named after the context.
-//   - Server created from a public Ubuntu cloud image with
-//     user_data that creates the unprivileged user + pins
-//     cloud-init's datasource_list. NO k3s install yet -- the
-//     cloud-init payload stays small; k3s lands via SSH after
-//     first boot in a follow-up phase.
-//   - State sidecar (<context>.json) tracks server ID + IPv4 +
-//     SSH key resource name so Teardown can reverse without the
-//     YAML config in hand.
-//
-// Later phases bolt on:
-//
-//   - k3s install + envoy-gateway           (phase 1 finish)
-//   - Lifetime expiry via in-cluster reaper Job (phase 2;
-//     supersedes the reverted at(1)-on-host approach)
-//   - Shared LB + TLS + dns-hint-ip          (phase 3)
-//   - images load <archive|-|url>            (phase 4)
-//   - Per-dev .env defaults + polish         (phase 5)
+//   - an SSH keypair per context, the public half uploaded as a
+//     Hetzner SSHKey resource named after the context;
+//   - a server from a public Ubuntu cloud image, with k3s installed
+//     over SSH after first boot and Envoy Gateway on top;
+//   - a self-signed certificate and a load balancer shared by the
+//     lb group, carrying the dns-hint-ip for /etc/hosts tooling;
+//   - an in-cluster reaper Job that enforces lifetime.maxRun, so
+//     expiry does not depend on the provisioning host being up;
+//   - a state sidecar (<context>.json) with the resource ids, so
+//     Teardown works without the YAML config in hand.
 //
 // See HETZNER_PROVISIONER.md in the specs repo (specs/y-cluster/).
 package hetzner
@@ -96,10 +89,10 @@ func newClient() (*hcloud.Client, error) {
 	return hcloud.NewClient(hcloud.WithToken(tok)), nil
 }
 
-// Provision creates a Hetzner Cloud server matching cfg, generates
-// an SSH key for it, and waits for SSH to come up. Returns a
-// *Cluster ready for follow-up SSH-driven steps (k3s install in
-// phase 1.b, LB attach in phase 3).
+// Provision creates a Hetzner Cloud server matching cfg and takes it
+// all the way to a usable cluster: SSH key, server, k3s over SSH,
+// optional image pre-load, certificate, load balancer, Envoy
+// Gateway, expiry reaper, and last the upstream-pull lockdown.
 //
 // Idempotency: if a server with cfg.Context already exists in the
 // project, Provision treats that as an error rather than reusing it
@@ -157,8 +150,8 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("upload ssh key: %w", err)
 	}
 
-	// Cloud-init payload. Phase 1: just the user + datasource
-	// pin. k3s lands via SSH after boot in phase 1.b.
+	// Cloud-init payload: just the user + datasource pin. k3s is
+	// installed over SSH after boot, which keeps user_data small.
 	userData := renderCloudInitUserData(cfg.Context, cfg.SSHUser, string(pubKey))
 
 	logger.Info("creating Hetzner server",
@@ -231,8 +224,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		hc:       hc,
 	}
 
-	// Wait for sshd. Phase 1.b: install k3s and merge kubeconfig.
-	// Phase 3 layers envoy-gateway + LB on top.
+	// Wait for sshd, then install k3s and merge the kubeconfig.
 	if err := c.waitForSSH(ctx, 3*time.Minute); err != nil {
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
@@ -245,7 +237,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 
-	// Phase 6.c: pre-load images from the S3 cache, if configured.
+	// pre-load images from the S3 cache, if configured.
 	// Lands here -- after k3s is up (containerd is reachable for
 	// `ctr image import`) but before envoy-gateway, so the gateway
 	// install benefits from cache hits too.
@@ -255,7 +247,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		}
 	}
 
-	// Phase 3.c: generate + upload a per-context self-signed cert
+	// generate + upload a per-context self-signed cert
 	// before the LB so a fresh-LB create can include it in the
 	// initial HTTPS service (Hetzner refuses an empty cert list).
 	commonName, dnsNames := certSubjectsForContext(cfg.Context, cfg.LBGroup, cfg.FQDNDomain)
@@ -272,7 +264,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		return nil, fmt.Errorf("save state with cert id: %w", err)
 	}
 
-	// Phase 3.a: ensure the lb-group LB exists and includes us.
+	// ensure the lb-group LB exists and includes us.
 	// Server already carries managed-by + lb-group labels, so the
 	// label_selector target on the LB picks us up on creation.
 	// On a fresh-LB create we hand cert in as firstCert so the
@@ -299,7 +291,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		lbIPv4 = lb.PublicNet.IPv4.IP.String()
 	}
 
-	// Phase 3.b: install envoy-gateway and stamp the LB IPv4 onto
+	// install envoy-gateway and stamp the LB IPv4 onto
 	// the GatewayClass under yolean.se/dns-hint-ip. ystack's
 	// y-k8s-ingress-hosts reads that annotation when populating
 	// /etc/hosts on the operator's machine, so consumer kustomize
@@ -338,7 +330,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		}
 	}
 
-	// Phase 2, unified with the standard lifetime feature: the
+	// the
 	// in-cluster reaper Job is hetzner's expiry mechanism (the
 	// analog of GCP's max-run-duration). It sleeps lifetime.maxRun
 	// then runs onExpiry via the hcloud API. Installed only when a
@@ -376,7 +368,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		logger.Info("no lifetime configured; cluster runs (and bills) until manual stop or teardown")
 	}
 
-	// Phase 6.d: lock down upstream pulls. Lands LAST so the
+	// lock down upstream pulls. Lands LAST so the
 	// bootstrap (pre-load, envoy-gateway, reaper apply) finishes
 	// against an upstream-pull-allowed k3s and only the workload
 	// image-pull surface tightens up.
@@ -541,8 +533,8 @@ func (c *Cluster) SSH(ctx context.Context, cmd string) ([]byte, error) {
 	return out, nil
 }
 
-// PublicIPv4 is what the operator's host hits for SSH and (until
-// the LB lands in phase 3) HTTP/HTTPS too.
+// PublicIPv4 is what the operator's host hits for SSH and the k3s
+// API. HTTP/HTTPS go through the lb group's load balancer.
 func (c *Cluster) PublicIPv4() string { return c.state.IPv4 }
 
 // State returns a snapshot of the persisted sidecar. Tests use it
@@ -700,10 +692,9 @@ func waitForActions(ctx context.Context, hc *hcloud.Client, actions []*hcloud.Ac
 }
 
 // labelSelectorForGroup returns a Hetzner-API label selector
-// matching every server we created for the given lbGroup. Used in
-// phase 3 to enumerate group members for the shared LB; defined
-// here so phase 1's create flow and phase 3's lookup flow share
-// the same label vocabulary.
+// matching every server we created for the given lbGroup. The
+// create flow labels servers and the shared-LB flow enumerates them;
+// both go through here so they share one label vocabulary.
 func labelSelectorForGroup(lbGroup string) string {
 	return strings.Join([]string{
 		labelManagedBy,
