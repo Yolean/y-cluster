@@ -36,7 +36,7 @@ var _ provision.Cluster = (*Cluster)(nil)
 
 // PortForward maps a host port to a guest port.
 type PortForward struct {
-	Host  string // host port (empty = auto)
+	Host  string // host port
 	Guest string // guest port
 }
 
