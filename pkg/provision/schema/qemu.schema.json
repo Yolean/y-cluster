@@ -143,6 +143,9 @@
           "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
           "type": "string"
         },
+        "network": {
+          "$ref": "#/$defs/QEMUNetwork"
+        },
         "portForwards": {
           "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
           "items": {
@@ -172,6 +175,44 @@
       "required": [
         "provider"
       ],
+      "type": "object"
+    },
+    "QEMUNetwork": {
+      "additionalProperties": false,
+      "properties": {
+        "bindAddress": {
+          "description": "User mode only. IPv4 address the host port forwards (sshPort and portForwards) listen on. Default 127.0.0.1. 0.0.0.0 exposes them on every interface of the host.",
+          "type": "string"
+        },
+        "dns": {
+          "description": "Tap mode only. Nameservers for the guest. Default 1.1.1.1 and 9.9.9.9; the host is not assumed to run a resolver.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gateway": {
+          "description": "Tap mode only. The host's address on the tap device and the guest's default route. Default: first host address of the guestAddress subnet.",
+          "type": "string"
+        },
+        "guestAddress": {
+          "description": "Tap mode only; required. Static IPv4 address of the guest in CIDR form such as 10.88.0.2/24.",
+          "type": "string"
+        },
+        "ifname": {
+          "description": "Tap mode only; required. Name of a tap device that exists and is owned by the invoking user. One per VM.",
+          "type": "string"
+        },
+        "mode": {
+          "default": "user",
+          "description": "Network attachment. user: qemu user-mode networking with host port forwards; needs no host setup. tap: attach to a pre-created tap device; the guest gets its own address and workloads see real client addresses.",
+          "enum": [
+            "user",
+            "tap"
+          ],
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "Registries": {

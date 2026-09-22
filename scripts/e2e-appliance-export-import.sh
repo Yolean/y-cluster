@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Round-trip an y-cluster appliance through the export/import contract:
 # build with y-cluster, install a placeholder application via kubectl,
-# prepare-export, stop, copy the qcow2, then boot a SECOND qemu
+# prepare-export, export the qcow2, then boot a SECOND qemu
 # instance against the copy with no y-cluster involvement (simulating
 # the customer's IT importing on their hypervisor) and verify the
 # application reaches a 200 from a fresh process.
@@ -31,7 +31,8 @@
 #      throwaway name.
 #   3. Apply the placeholder app via kubectl.
 #   4. Smoketest curl on the build-side host.
-#   5. y-cluster stop + prepare-export.
+#   5. y-cluster prepare-export (needs the cluster running; it stops
+#      the VM itself).
 #   6. y-cluster export to a bundle dir (flattened qcow2 +
 #      keypair + README).
 #   7. Boot a fresh qemu against the BUNDLED qcow2 with new
@@ -39,12 +40,16 @@
 #      on y-cluster's cloud-image cache; this proves the disk is
 #      genuinely portable.
 #   8. Wait for ssh + curl on the imported instance.
+#
+# A downstream repo can run its own converge and checks inside this
+# flow through APPLIANCE_SEED_CMD / APPLIANCE_VERIFY_CMD, the same
+# contract appliance-qemu-to-gcp.sh offers (scripts/_hooks.sh).
 #   9. On failure, ssh in and dump k3s state for diagnosis.
 
 [ -z "$DEBUG" ] || set -x
 set -eo pipefail
 
-YHELP='e2e-appliance-export-import.sh - local round-trip provision -> kubectl install -> prepare-export -> stop -> raw-qemu boot -> verify
+YHELP='e2e-appliance-export-import.sh - local round-trip provision -> kubectl install -> prepare-export -> export -> raw-qemu boot -> verify
 
 Usage: e2e-appliance-export-import.sh
 
@@ -58,11 +63,21 @@ Environment:
   IMP_SSH_PORT     Import-side host port -> guest 22 (default: 2230)
   Y_CLUSTER        Path to dev binary (default: ./dist/y-cluster)
   CACHE_DIR        Where y-cluster keeps its qcow2 (default: ~/.cache/y-cluster-qemu)
+  APPLIANCE_SEED_CMD    Optional shell cmd run on the build side after
+                        the workloads are up, before prepare-export.
+                        Receives Y_CLUSTER_CURRENT_* (scripts/_hooks.sh).
+  APPLIANCE_VERIFY_CMD  Optional shell cmd run after the imported
+                        instance passed its smoketest. Additionally
+                        receives Y_CLUSTER_CURRENT_IMPORTED_HTTP_PORT,
+                        _IMPORTED_SSH_PORT and _IMPORTED_SSH_KEY. The
+                        imported instance has no kubeconfig context;
+                        reach its apiserver with
+                        ssh ... sudo k3s kubectl.
   KEEP_BUILD       Set to keep the build-side cluster after success (default: tear it down)
   DEBUG            Set non-empty for bash trace
 
 Dependencies:
-  go, qemu-system-x86_64, kubectl, ssh, ssh-keygen, curl, virt-sysprep (libguestfs-tools)
+  go, qemu-system-x86_64, qemu-img, kubectl, ssh, ssh-keygen, curl, virt-sysprep + virt-format (libguestfs-tools)
 
 Exit codes:
   0  Round-trip succeeded; imported instance answered the smoketest
@@ -76,6 +91,7 @@ case "${1:-}" in
 esac
 
 NAME="${NAME:-appliance-export-test}"
+KUBECTX="$NAME"
 # Import-side host ports: kept hardcoded (not env-overridable +
 # defaulted) because the import-side qemu is started directly by
 # this script (no y-cluster CLI involvement) and these values
@@ -90,6 +106,9 @@ EXPORT_DIR=$(mktemp -d -p /tmp e2e-export.XXXXXX)
 CFG_DIR=$(mktemp -d -p /tmp e2e-config.XXXXXX)
 
 stage() { printf '\n=== %s ===\n' "$*"; }
+
+# shellcheck source=scripts/_hooks.sh
+. "$REPO_ROOT/scripts/_hooks.sh"
 
 cleanup() {
     set +e
@@ -106,7 +125,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in go qemu-system-x86_64 kubectl ssh ssh-keygen curl virt-sysprep; do
+for tool in go qemu-system-x86_64 qemu-img kubectl ssh ssh-keygen curl virt-sysprep virt-format; do
     command -v "$tool" >/dev/null \
         || { echo "missing required tool: $tool" >&2; exit 1; }
 done
@@ -192,16 +211,14 @@ probe() {
 probe echo "http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo"
 probe s3   "http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health"
 
-# === 5. stop + prepare-export ===
-# y-cluster stop owns the graceful guest shutdown (ssh
-# poweroff -> wait for qemu exit -> SIGTERM/SIGKILL fallback).
-# Without that, qemu's SIGTERM exits in ~200ms and the guest's
-# k3s/containerd state isn't flushed, leaving zero-byte
-# overlayfs snapshot files on the qcow2 and "exec format error"
-# crash loops on the imported boot.
-stage "stopping cluster ($NAME)"
-"$Y_CLUSTER" stop --context="$NAME"
+hooks_env_local
+hooks_run "seed (APPLIANCE_SEED_CMD)" "${APPLIANCE_SEED_CMD:-}"
 
+# === 5. prepare-export ===
+# prepare-export needs the apiserver up and rejects a stopped VM. It
+# owns the graceful guest shutdown before its offline phase; a bare
+# SIGTERM to qemu would leave k3s/containerd state unflushed and the
+# imported boot crash-looping on zero-byte overlayfs snapshot files.
 stage "prepare-export ($NAME)"
 "$Y_CLUSTER" prepare-export --context="$NAME"
 
@@ -224,13 +241,24 @@ qemu-img info "$BUNDLE_DIR/$NAME.qcow2" | grep -E '^(file format|virtual size|di
 # the bundle is genuinely self-contained: any host that can run
 # qemu (with the cloud image NOT present at the build path)
 # would boot it.
+# The appliance refuses to start k3s unless a volume labeled
+# y-cluster-data is mounted at /data/yolean (y-cluster-data-seed,
+# see APPLIANCE_MAINTENANCE.md): the customer attaches their data
+# disk before first boot. Do what they do, with an empty one; the
+# seed unit extracts the build-time /data/yolean snapshot onto it.
+DATA_DISK="$EXPORT_DIR/customer-data.qcow2"
+stage "creating the customer's empty labeled data volume"
+qemu-img create -f qcow2 "$DATA_DISK" 10G >/dev/null
+virt-format -a "$DATA_DISK" --filesystem=ext4 --label=y-cluster-data
+
 stage "booting bundled qcow2 via raw qemu (host ports $IMP_SSH_PORT -> :22, $IMP_HTTP_PORT -> :80)"
 qemu-system-x86_64 \
     -name "$NAME-imported" \
     -machine accel=kvm -cpu host \
     -smp 2 -m 4096 \
     -drive "file=$BUNDLE_DIR/$NAME.qcow2,format=qcow2,if=virtio" \
-    -netdev "user,id=n0,hostfwd=tcp::$IMP_SSH_PORT-:22,hostfwd=tcp::$IMP_HTTP_PORT-:80" \
+    -drive "file=$DATA_DISK,format=qcow2,if=virtio" \
+    -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$IMP_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$IMP_HTTP_PORT-:80" \
     -device virtio-net-pci,netdev=n0 \
     -serial "file:$EXPORT_DIR/console.log" \
     -display none \
@@ -284,6 +312,11 @@ imp_probe() {
 }
 if imp_probe echo "http://127.0.0.1:$IMP_HTTP_PORT/q/envoy/echo" \
     && imp_probe s3 "http://127.0.0.1:$IMP_HTTP_PORT/s3/health"; then
+    hooks_env_local
+    export Y_CLUSTER_CURRENT_IMPORTED_HTTP_PORT="$IMP_HTTP_PORT"
+    export Y_CLUSTER_CURRENT_IMPORTED_SSH_PORT="$IMP_SSH_PORT"
+    export Y_CLUSTER_CURRENT_IMPORTED_SSH_KEY="$BUNDLE_DIR/$NAME-ssh"
+    hooks_run "verify (APPLIANCE_VERIFY_CMD)" "${APPLIANCE_VERIFY_CMD:-}"
     echo "=== success: round-trip works (echo + s3) ==="
     echo "  imported echo reachable at: http://127.0.0.1:$IMP_HTTP_PORT/q/envoy/echo"
     echo "  imported s3 reachable at:   http://127.0.0.1:$IMP_HTTP_PORT/s3/health"
@@ -303,6 +336,7 @@ ssh $SSH_OPTS -p "$IMP_SSH_PORT" ystack@127.0.0.1 \
     'echo ===nodes===; sudo k3s kubectl get nodes -o wide;
      echo ===pods===; sudo k3s kubectl get pods -A;
      echo ===k3s status===; systemctl is-active k3s;
+     echo ===data seed===; systemctl status y-cluster-data-seed --no-pager -n 20;
      echo ===listen===; sudo ss -tlnp | grep -E ":(80|443|6443)\b"
     ' >&2 # y-script-lint:disable=or-true # diagnostic best-effort
 echo "  imported ssh: ssh -p $IMP_SSH_PORT -i $BUNDLE_DIR/$NAME-ssh ystack@127.0.0.1" >&2

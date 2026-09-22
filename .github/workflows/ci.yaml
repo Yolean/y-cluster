@@ -38,6 +38,10 @@ jobs:
         with:
           version: v2.11.4
           args: --timeout=5m
+      # Preinstalled on ubuntu runners. Nothing else executes the
+      # workflow scripts in CI, so this is their only gate here.
+      - name: shellcheck
+        run: shellcheck -x --severity=warning test.sh scripts/*.sh testdata/appliance-hooks/*.sh
 
   test:
     runs-on: ubuntu-latest

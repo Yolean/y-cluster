@@ -35,11 +35,10 @@
 #      :80 of the eventual GCE VM.
 #         curl http://127.0.0.1:80/q/envoy/echo
 #
-#   5. Stop the cluster cleanly so the qcow2 is quiesced. The
-#      graceful-stop logic flushes containerd snapshot state.
-#         y-cluster stop --context=$NAME
-#
-#   6. prepare-export: virt-customize-driven identity reset
+#   5-6. prepare-export, against the RUNNING cluster: it snapshots
+#      gateway state, then stops the VM gracefully itself (flushing
+#      containerd snapshot state) before the offline
+#      virt-customize-driven identity reset
 #      (machine-id retained, ssh host keys retained, cloud-init
 #      cleaned, netplan generic-NIC match installed,
 #      systemd-timesyncd enabled). This is the step that makes
@@ -265,11 +264,9 @@ probe_local() {
 probe_local echo "http://127.0.0.1:${APP_HTTP_PORT:-80}/q/envoy/echo"
 probe_local s3   "http://127.0.0.1:${APP_HTTP_PORT:-80}/s3/health"
 
-# === 5. Stop ===
-stage "stopping cluster"
-"$Y_CLUSTER" stop --context="$NAME"
-
-# === 6. prepare-export ===
+# === 5-6. prepare-export ===
+# Runs against the live cluster and stops the VM itself; a VM that
+# was stopped first is rejected.
 stage "prepare-export"
 "$Y_CLUSTER" prepare-export --context="$NAME"
 

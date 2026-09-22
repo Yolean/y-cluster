@@ -1,6 +1,7 @@
 package qemu
 
 import (
+	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,6 +207,64 @@ func TestImportFormatFromExt(t *testing.T) {
 	}
 }
 
+// seedKubeconfig writes a kubeconfig holding the default context and
+// cluster names, i.e. the entries TeardownConfig would remove.
+func seedKubeconfig(t *testing.T, cfg Config) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	content := "apiVersion: v1\nkind: Config\n" +
+		"clusters:\n- name: " + cfg.Name + "\n  cluster:\n    server: https://127.0.0.1:6443\n" +
+		"contexts:\n- name: " + cfg.Context + "\n  context:\n    cluster: " + cfg.Name + "\n    user: " + cfg.Name + "\n" +
+		"users:\n- name: " + cfg.Name + "\n  user: {}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTeardownConfig_IgnoresKubeconfigEnv: only Config.Kubeconfig
+// names the file to clean. $KUBECONFIG is the operator's real file
+// when tests run, so it must stay byte-identical.
+func TestTeardownConfig_IgnoresKubeconfigEnv(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = ""
+	envPath := seedKubeconfig(t, cfg)
+	before, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", envPath)
+
+	if err := TeardownConfig(cfg, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("TeardownConfig modified $KUBECONFIG:\n%s", after)
+	}
+}
+
+func TestTeardownConfig_RemovesContextFromConfiguredKubeconfig(t *testing.T) {
+	cfg := defaultedRuntimeConfig(t)
+	cfg.CacheDir = t.TempDir()
+	cfg.Kubeconfig = seedKubeconfig(t, cfg)
+
+	if err := TeardownConfig(cfg, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	f, err := kubeconfig.Load(cfg.Kubeconfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ContextCluster(cfg.Context); got != "" {
+		t.Fatalf("context %q still points at cluster %q", cfg.Context, got)
+	}
+}
+
 func TestTeardownConfig_NoPidFile(t *testing.T) {
 	cfg := defaultedRuntimeConfig(t)
 	cfg.CacheDir = t.TempDir()
@@ -236,7 +295,7 @@ func TestTeardownConfig_KeepDisk(t *testing.T) {
 // snippet that pins datasource_list to NoCloud + None so a
 // re-imported disk doesn't stall on EC2 IMDS probing.
 func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n", false)
+	body := renderCloudInitUserData("foo", "ssh-ed25519 AAAA test@host\n", false, false)
 	if !strings.Contains(body, "/etc/cloud/cloud.cfg.d/99-y-cluster-pin.cfg") {
 		t.Errorf("user-data must drop pin file under /etc/cloud/cloud.cfg.d/:\n%s", body)
 	}
@@ -252,7 +311,7 @@ func TestRenderCloudInitUserData_DatasourceListPin(t *testing.T) {
 // missing labeled volume (nofail keeps boot moving, but the
 // noise in `journalctl -u systemd-fsck@*` is undesirable).
 func TestRenderCloudInitUserData_NoMountWhenDataDiskDisabled(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", false)
+	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", false, false)
 	if strings.Contains(body, "LABEL=y-cluster-data") {
 		t.Errorf("user-data must not stamp a LABEL mount when DataDisk is disabled:\n%s", body)
 	}
@@ -266,7 +325,7 @@ func TestRenderCloudInitUserData_NoMountWhenDataDiskDisabled(t *testing.T) {
 // (/data/yolean) + the LABEL the qemu provisioner stamps on the
 // data disk + nofail so a removed disk doesn't deadlock boot.
 func TestRenderCloudInitUserData_MountWhenDataDiskEnabled(t *testing.T) {
-	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", true)
+	body := renderCloudInitUserData("foo", "ssh-ed25519 KEY t@h\n", true, false)
 	if !strings.Contains(body, "mounts:") {
 		t.Errorf("user-data must include a mounts block when DataDisk is enabled:\n%s", body)
 	}
@@ -286,7 +345,7 @@ func TestRenderCloudInitUserData_MountWhenDataDiskEnabled(t *testing.T) {
 // user-data so the pin addition didn't accidentally drop the
 // hostname / user / sshkey wiring the qemu provisioner relies on.
 func TestRenderCloudInitUserData_KeepsCoreShape(t *testing.T) {
-	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n", false)
+	body := renderCloudInitUserData("my-cluster", "ssh-ed25519 KEY user@h\n", false, false)
 	for _, want := range []string{
 		"hostname: my-cluster",
 		"name: ystack",
@@ -486,6 +545,7 @@ func TestPerVMArtefacts(t *testing.T) {
 		"/c/n-ssh",
 		"/c/n-ssh.pub",
 		"/c/n-seed.img",
+		"/c/n-network-config.yaml",
 		"/c/n-cloud-init.yaml",
 		"/c/n-meta-data.yaml",
 		"/c/n-console.log",

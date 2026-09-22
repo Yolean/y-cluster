@@ -57,11 +57,14 @@ const (
 // running") layer on top in the per-provider Provision; they're
 // not generalisable.
 type Preflight struct {
-	HostPorts      []string
-	PortBinder     PortBinder
-	ContextName    string
-	ContextCluster string
-	KubeconfigPath string // empty -> kubectl-style env+default search
+	HostPorts []string
+	// HostBindAddress is the IPv4 address the provider binds
+	// HostPorts on. Empty means the wildcard.
+	HostBindAddress string
+	PortBinder      PortBinder
+	ContextName     string
+	ContextCluster  string
+	KubeconfigPath  string // empty -> kubectl-style env+default search
 }
 
 // Run executes every check, accumulating errors so the caller
@@ -71,7 +74,7 @@ type Preflight struct {
 func (p Preflight) Run() error {
 	var problems []string
 	for _, port := range p.HostPorts {
-		if err := checkHostPort(port, p.PortBinder); err != nil {
+		if err := checkHostPort(p.HostBindAddress, port, p.PortBinder); err != nil {
 			problems = append(problems, attributePort(err))
 		}
 	}
@@ -86,9 +89,9 @@ func (p Preflight) Run() error {
 	return fmt.Errorf("preflight checks failed:\n  - %s", strings.Join(problems, "\n  - "))
 }
 
-// hostPortDialTimeout bounds the fallback connect probe. The target
-// is loopback, so anything that hasn't answered by then isn't going
-// to.
+// hostPortDialTimeout bounds the connect probe. The target is an
+// address of this host, so anything that hasn't answered by then
+// isn't going to.
 const hostPortDialTimeout = 250 * time.Millisecond
 
 // attributePort upgrades the port-in-use outcome to name the
@@ -117,26 +120,33 @@ func attributePort(err error) string {
 // closing immediately. Race window is negligible for human-driven
 // provisions.
 //
-// The authoritative probe is against the IPv4 wildcard, because
-// that is what both providers bind: docker sets HostIP to 0.0.0.0,
-// and qemu's `hostfwd=tcp::<port>-` leaves the host address empty,
-// which slirp reads as 0.0.0.0. The network must be "tcp4": Go
-// turns a "tcp" listen on 0.0.0.0 into a dual-stack IPv6 socket,
-// and on Darwin that binds happily beside an existing IPv4-only
-// wildcard listener -- Docker Desktop's com.docker.backend holds
-// exactly such a socket, so a "tcp" probe walks straight past the
-// conflict it exists to catch. A tcp4 probe collides with both the
-// IPv4-only and the dual-stack shape.
+// The authoritative probe binds the address the provider will bind:
+// bindAddr, or the IPv4 wildcard when it is empty. docker sets HostIP
+// to 0.0.0.0, and qemu binds network.bindAddress (an empty host
+// address in `hostfwd=tcp::<port>-` is read by slirp as 0.0.0.0).
+// The network must be "tcp4": Go turns a "tcp" listen on 0.0.0.0
+// into a dual-stack IPv6 socket, and on Darwin that binds happily
+// beside an existing IPv4-only wildcard listener -- Docker Desktop's
+// com.docker.backend holds exactly such a socket, so a "tcp" probe
+// walks straight past the conflict it exists to catch. A tcp4 probe
+// collides with both the IPv4-only and the dual-stack shape.
 //
 // Go sets SO_REUSEADDR on every listener, and on BSD that lets a
-// wildcard and a loopback bind of one port coexist, so neither
-// address alone sees every conflict. A second, loopback probe
-// covers the other half: a listener on 127.0.0.1 doesn't block the
-// provider's wildcard bind, but it does take the loopback traffic
-// the cluster is reached on. Only EADDRINUSE counts there --
-// Darwin refuses every loopback bind under port 1024 whether or
-// not the port is free, because XNU skips the reserved-port check
-// for INADDR_ANY only.
+// wildcard and a specific-address bind of one port coexist, so the
+// bind probe alone does not see every conflict. The second probe
+// covers the other half, and differs by what is being bound:
+//
+//   - wildcard: a listener on 127.0.0.1 doesn't block the wildcard
+//     bind, but it takes the loopback traffic the cluster is reached
+//     on. Probed by binding loopback; only EADDRINUSE counts, since
+//     Darwin refuses every loopback bind under port 1024 whether or
+//     not the port is free (XNU skips the reserved-port check for
+//     INADDR_ANY only).
+//   - specific address: a wildcard listener that coexisted with the
+//     bind still answers on that address. Probed by connecting, NOT
+//     by binding the wildcard: on Linux a wildcard bind also collides
+//     with listeners on unrelated addresses, which are no conflict
+//     for a forward bound to one address.
 //
 // Ports below 1024 need privilege to bind on Linux (and on Darwin
 // off the wildcard), which the probe usually lacks, so "bind
@@ -145,14 +155,29 @@ func attributePort(err error) string {
 // question any user may ask -- is something accepting connections
 // there -- plus, under PortBinderSelf, an error that names the
 // privilege as the problem instead of blaming another cluster.
-func checkHostPort(port string, binder PortBinder) error {
+func checkHostPort(bindAddr, port string, binder PortBinder) error {
 	if port == "" {
 		return nil // provider auto-assigns
 	}
-	l, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", port))
+	wildcard := bindAddr == "" || bindAddr == "0.0.0.0"
+	if wildcard {
+		bindAddr = "0.0.0.0"
+	}
+	// dialAddr is where a listener conflicting with this bind answers.
+	dialAddr := bindAddr
+	if wildcard {
+		dialAddr = "127.0.0.1"
+	}
+	l, err := net.Listen("tcp4", net.JoinHostPort(bindAddr, port))
 	switch {
 	case err == nil:
 		_ = l.Close()
+		if !wildcard {
+			if hostPortAnswers(net.JoinHostPort(dialAddr, port)) {
+				return errHostPortInUse(port)
+			}
+			return nil
+		}
 		if lo, loErr := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", port)); loErr == nil {
 			_ = lo.Close()
 		} else if errors.Is(loErr, syscall.EADDRINUSE) {
@@ -161,12 +186,14 @@ func checkHostPort(port string, binder PortBinder) error {
 		return nil
 	case errors.Is(err, syscall.EADDRINUSE):
 		return errHostPortInUse(port)
+	case errors.Is(err, syscall.EADDRNOTAVAIL):
+		return fmt.Errorf("host port %s: %s is not an address of this host; set the bind address to one that is", port, bindAddr)
 	case !errors.Is(err, os.ErrPermission):
 		return fmt.Errorf("host port %s: bind probe failed: %w", port, err)
 	}
-	// A privileged port can't be bind-probed, but a wildcard
-	// listener on it still answers on loopback.
-	if hostPortAnswers(net.JoinHostPort("127.0.0.1", port)) {
+	// A privileged port can't be bind-probed, but a listener that
+	// conflicts with it still answers.
+	if hostPortAnswers(net.JoinHostPort(dialAddr, port)) {
 		return errHostPortInUse(port)
 	}
 	if binder == PortBinderSelf {

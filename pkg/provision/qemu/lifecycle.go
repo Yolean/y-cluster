@@ -119,12 +119,7 @@ func guestPoweroff(cacheDir, name string, pid int, logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
-	target := sshexec.Target{
-		Host:    "127.0.0.1",
-		Port:    cfg.SSHPort,
-		User:    "ystack",
-		KeyPath: filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"),
-	}
+	target := cfg.endpoints().sshTarget(filepath.Join(cfg.CacheDir, cfg.Name+"-ssh"))
 	// sync first so any pending writes hit disk before systemd
 	// kills off the writers. poweroff is async; the command
 	// returns immediately and shutdown propagates.
@@ -236,7 +231,17 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		return nil, fmt.Errorf("disk %s not found; re-provision", diskPath)
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	disks, err := startDisks(cfg, extraDisks)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Tap != nil {
+		if err := checkTap(*cfg.Tap, sysTapHost{}); err != nil {
+			return nil, err
+		}
+	}
+
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +252,7 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		pidFile:    pidFilePath(cfg.CacheDir, cfg.Name),
 		logger:     logger,
 		Kubeconfig: kubecfg,
-		extraDisks: extraDisks,
+		extraDisks: disks,
 	}
 
 	if err := c.startVM(ctx, diskPath, ""); err != nil {
@@ -257,6 +262,21 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		return nil, fmt.Errorf("wait for SSH: %w", err)
 	}
 	return c, nil
+}
+
+// startDisks lists the drives a restart attaches after the boot disk:
+// the provisioned data disk first, in the slot it had at provision,
+// then the caller's extras. A data disk that has gone missing is an
+// error: the guest would boot regardless and write its data to the
+// boot disk instead.
+func startDisks(cfg Config, extraDisks []string) ([]string, error) {
+	if cfg.DataDisk == "" {
+		return extraDisks, nil
+	}
+	if _, err := os.Stat(cfg.DataDisk); err != nil {
+		return nil, fmt.Errorf("data disk %s not found; the cluster was provisioned with it and must not start without it: %w", cfg.DataDisk, err)
+	}
+	return append([]string{cfg.DataDisk}, extraDisks...), nil
 }
 
 // pidFilePath is the canonical pidfile path used by Provision /

@@ -170,7 +170,7 @@ SSH into the VM (passwordless sudo as ystack):
       ystack@127.0.0.1
 
 Once you have finished poking around:
-  - Continue (y) to stop the VM, prepare-export, and write a
+  - Continue (y) to prepare-export (which stops the VM) and write a
     VirtualBox-friendly VMDK bundle to:
       $BUNDLE_DIR
   - Abort (n) to leave the cluster running. Tear down later with:
@@ -190,10 +190,9 @@ case "${answer,,}" in
     *) echo "aborting; cluster left running. Teardown with: $Y_CLUSTER teardown -c $CFG_DIR"; exit 0 ;;
 esac
 
-# === Stop + prepare-export ===
-stage "stopping cluster ($NAME)"
-"$Y_CLUSTER" stop --context="$NAME"
-
+# === prepare-export ===
+# Runs against the live cluster and stops the VM itself; a VM that
+# was stopped first is rejected.
 stage "prepare-export ($NAME)"
 "$Y_CLUSTER" prepare-export --context="$NAME"
 

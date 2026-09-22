@@ -1,7 +1,6 @@
 package qemu
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -50,23 +49,11 @@ func (c *Cluster) installK3s(ctx context.Context) error {
 // installK3sScript runs the canonical curl|sh installer with
 // INSTALL_K3S_VERSION pinned. The VM must have outbound HTTPS to
 // get.k3s.io and github.com release URLs.
-//
-// `--disable=traefik` is added because y-cluster ships Envoy
-// Gateway as the cluster ingress. Running both controllers
-// would have two consumers fighting over the host:80/:443
-// forwards.
-//
-// `--disable=local-storage` is added because y-cluster ships
-// its own local-path-provisioner (pkg/provision/localstorage)
-// with appliance-shape defaults (path /data/yolean,
-// PVC namespace_name pattern, Retain reclaim). k3s's deploy
-// controller would otherwise reconcile our config back to the
-// upstream defaults on every restart.
 func (c *Cluster) installK3sScript(ctx context.Context) error {
 	cmd := fmt.Sprintf(
 		"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=%s INSTALL_K3S_EXEC=%s sudo -E sh -",
 		shellQuote(c.cfg.K3s.Version),
-		shellQuote("--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"),
+		shellQuote(k3sServerFlags(c.cfg.endpoints())),
 	)
 	out, err := c.SSH(ctx, cmd)
 	if err != nil {
@@ -100,7 +87,7 @@ func (c *Cluster) installK3sAirgap(ctx context.Context) error {
 		fmt.Sprintf(
 			"curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=%s INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=%s sudo -E sh -",
 			shellQuote(c.cfg.K3s.Version),
-			shellQuote("--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"),
+			shellQuote(k3sServerFlags(c.cfg.endpoints())),
 		),
 	} {
 		out, err := c.SSH(ctx, step)
@@ -152,20 +139,18 @@ func (c *Cluster) cacheK3sAirgap(ctx context.Context, version string) (string, s
 	return binPath, tarPath, nil
 }
 
-// waitForK3sReady polls /etc/rancher/k3s/k3s.yaml on the VM until it
-// exists with non-empty contents. k3s's install script returns
-// before the apiserver finishes starting; this is the gate before
-// we can extract a working kubeconfig.
+// waitForK3sReady polls k3sReadyProbe in the guest until the
+// apiserver is ready or k3sReadyTimeout passes.
 func (c *Cluster) waitForK3sReady(ctx context.Context) error {
-	c.logger.Info("waiting for k3s.yaml")
+	c.logger.Info("waiting for the k3s apiserver")
 	deadline := time.Now().Add(k3sReadyTimeout)
 	for {
-		out, err := c.SSH(ctx, "sudo test -s /etc/rancher/k3s/k3s.yaml && echo ok")
-		if err == nil && strings.Contains(string(out), "ok") {
+		out, err := c.SSH(ctx, k3sReadyProbe)
+		if err == nil && strings.TrimSpace(string(out)) == "ok" {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("/etc/rancher/k3s/k3s.yaml never appeared within %s", k3sReadyTimeout)
+			return fmt.Errorf("k3s apiserver not ready within %s (last answer: %s)", k3sReadyTimeout, strings.TrimSpace(string(out)))
 		}
 		select {
 		case <-ctx.Done():
@@ -175,26 +160,21 @@ func (c *Cluster) waitForK3sReady(ctx context.Context) error {
 	}
 }
 
-// extractKubeconfig reads the k3s-generated kubeconfig from the VM
-// and rewrites the embedded server URL so the host's kubectl can
-// reach it through the QEMU port forward.
-//
-// k3s writes `server: https://127.0.0.1:6443` (the loopback inside
-// the VM). From the host, the API server is reachable at
-// 127.0.0.1:<host-mapped-port> -- we look that up via
-// Config.hostAPIPort and substitute. TLS still works because k3s
-// puts 127.0.0.1 in the cert SANs by default.
+// k3sReadyProbe runs in the guest and prints "ok" once the apiserver
+// serves /readyz. The kubeconfig file alone says nothing on a disk
+// that has booted before (start, or provision of an imported disk):
+// it is already there while k3s is still coming up, and the first
+// kubectl call after "ready" got ServiceUnavailable.
+const k3sReadyProbe = "sudo test -s /etc/rancher/k3s/k3s.yaml && sudo k3s kubectl get --raw=/readyz"
+
+// extractKubeconfig reads the k3s-generated kubeconfig from the VM,
+// rewritten so the host's kubectl reaches the apiserver.
 func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
 	out, err := c.SSH(ctx, "sudo cat /etc/rancher/k3s/k3s.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
 	}
-	hostPort := c.cfg.hostAPIPort()
-	if hostPort == "" {
-		return nil, fmt.Errorf("portForwards has no guest:6443 entry; cannot reach k3s API")
-	}
-	rewritten := bytes.ReplaceAll(out, []byte("127.0.0.1:6443"), []byte("127.0.0.1:"+hostPort))
-	return rewritten, nil
+	return rewriteKubeconfigServer(out, c.cfg.endpoints())
 }
 
 // urlEncodeK3sVersion percent-encodes the `+` separator in build
@@ -206,7 +186,7 @@ func urlEncodeK3sVersion(v string) string {
 
 // shellQuote wraps an argument in single quotes for safe inclusion
 // in a remote shell command. Embedded single quotes are escaped
-// using the standard `'\''` trick. Used for the values we pass via
+// using the standard `'\”` trick. Used for the values we pass via
 // SSH: version strings (-rc3-k3s1) and INSTALL_K3S_EXEC arguments.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

@@ -28,6 +28,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,14 +111,12 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		return nil, fmt.Errorf("kubeconfig context %q not found (or has no cluster set)", contextName)
 	}
 
-	running, err := dockerContainerRunning(ctx, clusterName)
-	if err != nil {
-		// Daemon down, permission denied, etc. Propagate rather
-		// than silently falling through to qemu — that fall-
-		// through hid real misconfiguration when this was a
-		// shell-out.
-		return nil, fmt.Errorf("probe docker for %q: %w", clusterName, err)
-	}
+	// A docker daemon that cannot be asked (down, no permission, not
+	// installed) must not hide a cluster another backend runs: qemu,
+	// multipass and hetzner hosts need no docker at all. The probe
+	// error is kept and reported if no backend claims the cluster,
+	// since the cluster may then well be a docker one.
+	running, dockerErr := dockerContainerRunning(ctx, clusterName)
 	if running {
 		return &LookupResult{
 			Backend:       BackendDocker,
@@ -126,7 +126,7 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		}, nil
 	}
 
-	if alive, sshKey, sshPort := qemuRunning(clusterName); alive {
+	if alive, sshKey, sshHost, sshPort := qemuRunning(clusterName); alive {
 		// sshPort comes from the provisioner-written state JSON
 		// (<cache>/<name>.json) so a cluster that was provisioned
 		// with a non-default sshPort is still reachable. Falling
@@ -136,9 +136,7 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		// in the sidecar; current provisions always include it.
 		// SSHUser is hardcoded because cloud-init's user-data
 		// template (pkg/provision/qemu/qemu.go renderCloudInitUserData)
-		// only ever creates `ystack`. SSHHost is hardcoded
-		// because qemu always binds host-side port forwards to
-		// 127.0.0.1.
+		// only ever creates `ystack`.
 		if sshPort == "" {
 			sshPort = "2222"
 		}
@@ -147,7 +145,7 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 			Context:     contextName,
 			ClusterName: clusterName,
 			SSHKey:      sshKey,
-			SSHHost:     "127.0.0.1",
+			SSHHost:     sshHost,
 			SSHPort:     sshPort,
 			SSHUser:     "ystack",
 		}, nil
@@ -174,6 +172,9 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 		}, nil
 	}
 
+	if dockerErr != nil {
+		return nil, fmt.Errorf("%w (cluster=%q, context=%q); docker could not be probed: %v", ErrNotFound, clusterName, contextName, dockerErr)
+	}
 	return nil, fmt.Errorf("%w (cluster=%q, context=%q)", ErrNotFound, clusterName, contextName)
 }
 
@@ -260,38 +261,39 @@ func dockerContainerRunning(ctx context.Context, name string) (bool, error) {
 // e2e tests can run an isolated cluster under t.TempDir() and
 // still have detect/ctr/crictl find it.
 //
-// Returns (true, sshKeyPath, sshPort) on a hit; sshPort is read
-// from the provisioner-written sidecar <cache>/<name>.json so
-// callers can reach a cluster that was provisioned with a
-// non-default port. sshPort is "" if the sidecar is missing or
-// has no sshPort field -- caller falls back to the qemu
-// provisioner's default.
+// Returns (true, sshKeyPath, sshHost, sshPort) on a hit. Host and
+// port come from the provisioner-written sidecar
+// <cache>/<name>.json, so a cluster provisioned with a non-default
+// sshPort or network.bindAddress stays reachable. sshPort is "" if
+// the sidecar is missing or has no sshPort field -- caller falls
+// back to the qemu provisioner's default. sshHost is always set:
+// without a recorded bind address the forward is on the wildcard.
 //
-// Returns (false, "", "") on no-hit.
-func qemuRunning(name string) (bool, string, string) {
+// Returns (false, "", "", "") on no-hit.
+func qemuRunning(name string) (bool, string, string, string) {
 	cacheDir := os.Getenv("Y_CLUSTER_QEMU_CACHE_DIR")
 	if cacheDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return false, "", ""
+			return false, "", "", ""
 		}
 		cacheDir = filepath.Join(home, ".cache", "y-cluster-qemu")
 	}
 	pidPath := filepath.Join(cacheDir, name+".pid")
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
-		return false, "", ""
+		return false, "", "", ""
 	}
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		return false, "", ""
+		return false, "", "", ""
 	}
 	if !pidAlive(pid) {
-		return false, "", ""
+		return false, "", "", ""
 	}
 	sshKey := filepath.Join(cacheDir, name+"-ssh")
-	sshPort := readQemuStateSSHPort(filepath.Join(cacheDir, name+".json"))
-	return true, sshKey, sshPort
+	sshPort, bindAddress := readQemuState(filepath.Join(cacheDir, name+".json"))
+	return true, sshKey, config.HostDialAddress(bindAddress), sshPort
 }
 
 // hetznerRunning checks the hetzner provisioner's state-sidecar
@@ -335,25 +337,34 @@ func hetznerRunning(name string) (bool, string, string, string) {
 	return true, filepath.Join(cacheDir, name+"-ssh"), s.IPv4, s.SSHUser
 }
 
-// readQemuStateSSHPort reads the `sshPort` field out of the qemu
-// provisioner's state sidecar at the given path. Returns "" on
-// any failure (missing file, bad JSON, no field) -- the caller
-// is expected to fall back to a hardcoded default in that case.
-// We only care about one field, so we don't import the qemu
-// package's full state struct (which would risk an import cycle
-// since qemu imports cluster).
-func readQemuStateSSHPort(path string) string {
+// readQemuState reads where the guest's sshd is reached out of the
+// qemu provisioner's state sidecar at the given path: the recorded
+// ssh port and forward bind address in user mode, the guest's own
+// address and port 22 in tap mode. Returns empty strings on any
+// failure (missing file, bad JSON, no field); callers fall back to
+// defaults. The qemu package's state struct is not imported because
+// qemu imports this package.
+func readQemuState(path string) (sshPort, bindAddress string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	var s struct {
-		SSHPort string `json:"sshPort"`
+		SSHPort     string `json:"sshPort"`
+		BindAddress string `json:"bindAddress"`
+		Tap         *struct {
+			GuestAddress string `json:"guestAddress"`
+		} `json:"tap"`
 	}
 	if err := json.Unmarshal(data, &s); err != nil {
-		return ""
+		return "", ""
 	}
-	return s.SSHPort
+	if s.Tap != nil {
+		if ip, _, err := net.ParseCIDR(s.Tap.GuestAddress); err == nil {
+			return "22", ip.String()
+		}
+	}
+	return s.SSHPort, s.BindAddress
 }
 
 // pidAlive is the stdlib equivalent of `kill -0 <pid>`.
