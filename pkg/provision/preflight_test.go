@@ -39,9 +39,10 @@ func TestPreflight_PortInUse(t *testing.T) {
 	}
 }
 
-// TestPreflight_WildcardListenerInUse is the ystack 8944
-// regression: a host-local `y-cluster serve` holds *:8944, the
-// provision then dies on the daemon's "address already in use".
+// TestPreflight_WildcardListenerInUse: a host process holds a
+// wildcard listener on a port the config forwards (seen in ystack
+// with *:8944), and provision would die late on the daemon's
+// "address already in use".
 // A loopback probe misses it -- SO_REUSEADDR lets 127.0.0.1:port
 // bind alongside the wildcard on BSD -- so the check has to probe
 // the wildcard, which is what the provider binds anyway. Both
