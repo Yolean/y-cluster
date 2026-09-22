@@ -1,6 +1,0 @@
-# yaml-language-server: $schema=../../../pkg/serve/schema/y-cluster-serve.schema.json
-port: __PORT__
-type: y-kustomize-local
-sources:
-- dir: ../sources/a
-- dir: ../sources/b
