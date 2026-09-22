@@ -30,17 +30,40 @@ func TestGateway_PreservesExplicitClassName(t *testing.T) {
 // TestGateway_SkipLeavesClassNameAlone: when Skip is set, the
 // defaulter doesn't fill ClassName -- the rendered config / debug
 // logs make the operator's intent (no install at all) obvious.
+//
+// Exercised through each provider's ApplyDefaults, which is what a
+// loaded config goes through. applyCommonDefaults alone honours Skip;
+// the tag-driven pass that runs before it does not, and used to fill
+// ClassName from a tag default regardless.
 func TestGateway_SkipLeavesClassNameAlone(t *testing.T) {
-	c := &CommonConfig{Gateway: GatewayConfig{Skip: true}}
-	c.applyCommonDefaults()
-	if c.Gateway.ClassName != "" {
-		t.Fatalf("Skip:true should leave ClassName empty, got %q", c.Gateway.ClassName)
-	}
-	// Skip also keeps Resources empty so a downstream consumer
-	// reading the rendered config can tell "operator didn't ask
-	// for an install" from "operator asked, defaults applied".
-	if c.Gateway.Resources != (GatewayResources{}) {
-		t.Fatalf("Skip:true should leave Resources zero, got %+v", c.Gateway.Resources)
+	skipped := CommonConfig{Gateway: GatewayConfig{Skip: true}}
+	for name, defaulted := range map[string]func() GatewayConfig{
+		"qemu": func() GatewayConfig {
+			c := &QEMUConfig{CommonConfig: skipped}
+			c.ApplyDefaults()
+			return c.Gateway
+		},
+		"docker": func() GatewayConfig {
+			c := &DockerConfig{CommonConfig: skipped}
+			c.ApplyDefaults()
+			return c.Gateway
+		},
+		"multipass": func() GatewayConfig {
+			c := &MultipassConfig{CommonConfig: skipped}
+			c.ApplyDefaults()
+			return c.Gateway
+		},
+	} {
+		got := defaulted()
+		if got.ClassName != "" {
+			t.Errorf("%s: Skip:true should leave ClassName empty, got %q", name, got.ClassName)
+		}
+		// Skip also keeps Resources empty so a downstream consumer
+		// reading the rendered config can tell "operator didn't ask
+		// for an install" from "operator asked, defaults applied".
+		if got.Resources != (GatewayResources{}) {
+			t.Errorf("%s: Skip:true should leave Resources zero, got %+v", name, got.Resources)
+		}
 	}
 }
 

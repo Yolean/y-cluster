@@ -17,15 +17,15 @@ import (
 //
 // Heuristic, top to bottom:
 //
-//	1. multipass CLI present + daemon reachable -> multipass
-//	2. Linux + /dev/kvm + qemu-system-x86_64    -> qemu
-//	3. docker CLI present + `docker info` OK    -> docker
+//  1. multipass CLI present + daemon reachable -> multipass
+//  2. Linux + /dev/kvm + qemu-system-x86_64    -> qemu
+//  3. docker CLI present + `docker info` OK    -> docker
 //
 // multipass wins ahead of qemu/docker because:
 //
 //   - On macOS, multipass is the only path to a real VM; the qemu
 //     provisioner errors out without /dev/kvm.
-//   - On Linux, multipass isn't installed by default — the user has
+//   - On Linux, multipass isn't installed by default -- the user has
 //     explicitly chosen it, so honouring that choice is the least
 //     surprising thing.
 //

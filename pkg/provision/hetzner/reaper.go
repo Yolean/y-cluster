@@ -146,15 +146,15 @@ func installReaper(ctx context.Context, cfg installReaperOpts, logger *zap.Logge
 }
 
 // renderReaperManifest substitutes the template placeholders. The
-// expires-at annotation is computed here from `now` (injected for
-// testability) so the manifest itself carries the earliest possible
-// firing time; a pod retry restarts the full sleep and can only
-// push the real firing later.
+// deadline is computed here from `now` (injected for testability) and
+// goes into the manifest twice: as the expires-at annotation for
+// people, and as epoch seconds for the script, which sleeps until
+// then.
 func renderReaperManifest(cfg installReaperOpts, now time.Time) string {
 	return strings.NewReplacer(
 		"{{IMAGE}}", reaperImage,
 		"{{NAMESPACE}}", reaperNamespace,
-		"{{SLEEP_SECONDS}}", strconv.FormatInt(int64(cfg.MaxRun.Seconds()), 10),
+		"{{EXPIRES_EPOCH}}", strconv.FormatInt(now.Add(cfg.MaxRun).Unix(), 10),
 		"{{MAX_RUN}}", cfg.MaxRun.String(),
 		"{{ON_EXPIRY}}", cfg.OnExpiry,
 		"{{EXPIRES_AT}}", now.Add(cfg.MaxRun).UTC().Format(time.RFC3339),

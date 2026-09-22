@@ -1,9 +1,9 @@
 # y-cluster
 
-Single Go binary for local Kubernetes cluster lifecycle, image
-management, and declarative convergence. Replaces a stack of
-shell scripts that previously drove ystack and checkit's local
-clusters.
+Single Go binary for Kubernetes cluster lifecycle on a developer
+machine or a rented host, image management, and declarative
+convergence. Replaces a stack of shell scripts that previously drove
+ystack and checkit's local clusters.
 
 ## What it does
 
@@ -11,41 +11,62 @@ clusters.
 $ y-cluster --help        # full subcommand list
 ```
 
+Providers, picked by `provider:` in `y-cluster-provision.yaml` (or
+discovered when omitted: multipass, then qemu, then docker):
+
+| provider | cluster node | where |
+|---|---|---|
+| `qemu` | k3s in a KVM VM | Linux with `/dev/kvm`; the only provider that exports appliances |
+| `docker` | k3s in a container | anywhere a docker daemon runs; what CI uses |
+| `multipass` | k3s in a Multipass VM | macOS and Linux |
+| `hetzner` | k3s on a Hetzner Cloud server | paid; tears itself down in-cluster when `lifetime` expires |
+
 Subcommand groups:
 
-- **provision / teardown / export / import** — bring up a local
-  k3s cluster (qemu VM or k3s-in-docker), tear it down, or move
-  the disk between hosts as a VMware appliance.
-- **yconverge** — apply a kustomize base with ordering by CUE
+- **provision / teardown** -- bring a k3s cluster up with Envoy
+  Gateway and local-path storage installed, or remove it. `teardown`
+  without `-c` lists the clusters this host knows about.
+- **stop / start / pause / resume** -- keep the disk, drop the
+  compute. `stop` works on every provider; the rest are qemu-only
+  (`start` also handles hetzner).
+- **prepare-export / export / import, manifests add / replace / rm**
+  -- the appliance path: ship a qemu cluster's disk as qcow2, raw,
+  vmdk, ova or a GCE image tarball, with its `/data/yolean` as a
+  first-boot seed and with staged manifests that apply on the
+  customer's first boot rather than on the build cluster. See
+  [APPLIANCE_MAINTENANCE.md](APPLIANCE_MAINTENANCE.md).
+- **yconverge** -- apply a kustomize base with ordering by CUE
   imports and post-apply checks. Symlink the binary as
   `kubectl-yconverge` to use it as a kubectl plugin.
-- **detect / ctr / crictl** — discover the local cluster's
+- **detect / ctr / crictl** -- discover the local cluster's
   backend by kubeconfig context and run `ctr` or `crictl` on the
   node through the right transport (Docker daemon API for the
   docker provisioner, SSH for qemu). Replaces ystack's
   `y-cluster-local-{detect,ctr,crictl}`.
-- **images list / cache / load** — extract image refs from a
-  YAML stream, pull a single ref into a local OCI cache, or
-  stream an OCI archive into the cluster node's containerd. The
+- **images list / cache / load / push / remote** -- extract image
+  refs from a YAML stream, pull a single ref into a local OCI cache,
+  or stream an OCI archive into the cluster node's containerd. The
   airgap path for both system images (handled inside provision)
-  and arbitrary user-built images.
-- **cache info / purge** — inspect or wipe y-cluster's shared
+  and arbitrary user-built images. `push` and `remote list / stats`
+  maintain the object-storage image cache the hetzner provider
+  pre-loads from.
+- **gateway state / hostnames / clear-dns-hint-ip / example, echo
+  deploy / render, localstorage render** -- inspect what the bundled
+  Envoy Gateway has reconciled (`hostnames --csv` feeds TLS
+  automation), install a small test workload behind it, or print
+  the manifests y-cluster applies so they can be reviewed or applied
+  by hand.
+- **cache info / purge** -- inspect or wipe y-cluster's shared
   download cache (k3s airgap bundles, image OCI layouts).
-- **lifetime status / reap / extend / arm / disarm / gcp-flags** —
+- **lifetime status / reap / extend / arm / disarm / gcp-flags** --
   cost-control auto-expiry. A `lifetime.maxRun` in the config gives
   the cluster a wall-clock budget counted from when it starts; on
   expiry a local cluster runs its `onExpiry` action (stop by
   default) via a host timer, and a GCP appliance is deleted by GCP
   itself (`gcp-flags` emits the `--max-run-duration` flags). See the
   "lifetime" idea below.
-- **serve / serve ensure / serve stop / serve logs** — a
-  lightweight HTTP server that exposes config assets to the
-  cluster: kustomize-built Secrets named
-  `y-kustomize.{group}.{name}` become `/v1/{group}/{name}/{key}`
-  URLs. Replaces the y-kustomize service in ystack.
-
 Every subcommand has its own `--help` with the flags and
-context. The README is intentionally short — when something is
+context. The README is intentionally short -- when something is
 discoverable from `y-cluster <cmd> --help`, that's where it
 lives.
 
@@ -54,34 +75,24 @@ lives.
 **lifetime: the budget is counted from start, and the trigger lives
 where the cost is.** `lifetime.maxRun` is a wall-clock budget that
 begins when the cluster *starts* (re-anchored on every `y-cluster
-start`), not when it was provisioned — an appliance disk may boot
+start`), not when it was provisioned -- an appliance disk may boot
 days after it was built. Locally the host *is* the cost, so a host
 timer fires `y-cluster lifetime reap`, which stops the cluster (or
 the configured `onExpiry` action). On a GCP appliance the host
 mustn't be the trigger (it may be offline), so `lifetime gcp-flags`
 hands the duration to GCP's native `--max-run-duration`, and GCP
-deletes the instance on its own — the attached data disk survives.
+deletes the instance on its own -- the attached data disk survives.
 `reap` re-checks the persisted deadline and re-arms if it isn't due,
 so `lifetime extend 2h` is safe and a stale timer is harmless.
 
 **yconverge: ordering vs checks come from different places.**
-CUE imports in `yconverge.cue` declare ordering — each import is
+CUE imports in `yconverge.cue` declare ordering -- each import is
 a *separate* yconverge invocation that runs its own apply and
 checks before yours. Kustomize tree traversal collects checks
 across the whole base, so an overlay's checks include the base's.
 The two mechanisms are deliberately separate:
 *ordering across modules* uses CUE; *checking after one apply*
 uses traversal. `y-cluster yconverge --help` has the rule.
-
-**serve: the URL is derived from the Secret name.** A Secret
-called `y-kustomize.kafka.setup-topic-job` with a data key
-`base-for-annotations.yaml` is served at
-`/v1/kafka/setup-topic-job/base-for-annotations.yaml`. This is
-true whether the Secret comes from `kustomize build` of a local
-source (`type: y-kustomize-local`) or a Kubernetes informer
-(`type: y-kustomize-incluster`). The two modes are
-interchangeable; switch by changing `type:` in
-`y-cluster-serve.yaml`.
 
 **qemu: two network modes, and only one of them shows workloads who
 is calling.** `network.mode: user` (default) is qemu user-mode

@@ -62,7 +62,7 @@ func Kwok(t *testing.T) *Cluster {
 // run both leave the host clean.
 //
 // Each backend's teardown is a best-effort `docker rm -f` (or
-// equivalent) — failures are intentionally swallowed because
+// equivalent) -- failures are intentionally swallowed because
 // TestMain runs after the test framework can no longer report
 // them, and a leftover container is preferable to obscuring a
 // real test failure.
@@ -80,7 +80,7 @@ func setupKwok() {
 	}
 
 	// Best-effort cleanup of a previous run that crashed before
-	// TeardownAll could fire. Ignore errors — `rm -f` of a
+	// TeardownAll could fire. Ignore errors -- `rm -f` of a
 	// nonexistent container is fine.
 	_ = exec.CommandContext(ctx, "docker", "rm", "-f", kwokContainerName).Run()
 
@@ -129,7 +129,7 @@ users:
 
 	// Wait until the apiserver is reachable AND the bootstrap
 	// namespaces exist. The cheaper `kubectl get svc` answers
-	// "No resources found" within ~500ms — but kwok's namespace
+	// "No resources found" within ~500ms -- but kwok's namespace
 	// bootstrap takes longer; SSA against `default` returns 404
 	// in the gap. Polling `kubectl get namespace default`
 	// closes that race.

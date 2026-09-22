@@ -1,8 +1,8 @@
 // schemagen generates JSON Schema files for two distinct surfaces:
 //
 //   - Provision-config schemas under pkg/provision/schema/: one
-//     per provisioner config struct (qemu, docker, multipass) plus
-//     a portable common.schema.json reflected from CommonConfig.
+//     per provider registered in pkg/provision/config plus a
+//     portable common.schema.json reflected from CommonConfig.
 //
 //   - Output schemas alongside the Go type that produces them
 //     (e.g. pkg/gateway/state.schema.json next to gateway.State).
@@ -19,14 +19,14 @@
 // schemagen also runs a collision check: it walks each provider
 // struct's *own* (non-embedded) yaml field names and fails if the
 // same name appears in more than one provider. CommonConfig fields
-// are exempt — they're shared by design. The check stops a future
+// are exempt -- they're shared by design. The check stops a future
 // per-provider field from accidentally shadowing or colliding with
 // a name that should have been promoted to common.
 //
-// Run via `go generate ./pkg/provision/...`. CI runs the same
-// command and fails if the working tree differs afterwards (drift
-// gate), so the generator output and the source struct tags can't
-// disagree.
+// Run via `go generate ./pkg/provision/...`. The package's tests
+// regenerate in memory and fail when a committed file differs, so
+// `go test ./...` catches a struct tag changed without regenerating.
+// CI's generate-drift job runs `go generate ./...` on top of that.
 package main
 
 import (
@@ -70,47 +70,72 @@ func main() {
 	}
 }
 
+// run writes every generated file into the repository.
 func run() error {
 	root, err := repoRoot()
 	if err != nil {
 		return fmt.Errorf("locate repo root: %w", err)
 	}
-
-	pinPath := filepath.Join(root, "pkg", "provision", "config", "k3s.yaml")
-	pin, err := readPin(pinPath)
+	files, err := generate(root)
 	if err != nil {
-		return fmt.Errorf("read pin %s: %w", pinPath, err)
-	}
-
-	schemaDir := filepath.Join(root, "pkg", "provision", "schema")
-	if err := os.MkdirAll(schemaDir, 0o755); err != nil {
 		return err
 	}
-
-	providers := []providerTarget{
-		{"qemu.schema.json", config.ProviderQEMU, &config.QEMUConfig{}},
-		{"docker.schema.json", config.ProviderDocker, &config.DockerConfig{}},
-		{"multipass.schema.json", config.ProviderMultipass, &config.MultipassConfig{}},
-		{"hetzner.schema.json", config.ProviderHetzner, &config.HetznerConfig{}},
+	paths := make([]string, 0, len(files))
+	for rel := range files {
+		paths = append(paths, rel)
 	}
-
-	if err := checkCollisions(providers); err != nil {
-		return fmt.Errorf("provider field collision: %w", err)
-	}
-
-	for _, t := range providers {
-		out := filepath.Join(schemaDir, t.filename)
-		if err := writeProviderSchema(out, t, pin); err != nil {
-			return fmt.Errorf("generate %s: %w", t.filename, err)
+	sort.Strings(paths)
+	for _, rel := range paths {
+		out := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(out, files[rel], 0o644); err != nil {
+			return err
 		}
 		fmt.Printf("wrote %s\n", out)
 	}
+	return nil
+}
 
-	commonOut := filepath.Join(schemaDir, "common.schema.json")
-	if err := writeCommonSchema(commonOut, pin); err != nil {
-		return fmt.Errorf("generate common.schema.json: %w", err)
+// schemaDir is where the provision-config schemas live, relative to
+// the repository root. Every *.schema.json in it is generated.
+const schemaDir = "pkg/provision/schema"
+
+// generate renders every generated file, keyed by its path relative
+// to the repository root. It reads the k3s pin under root and writes
+// nothing, so the same function backs `go generate` and the test that
+// fails when the committed files are stale.
+func generate(root string) (map[string][]byte, error) {
+	pinPath := filepath.Join(root, "pkg", "provision", "config", "k3s.yaml")
+	pin, err := readPin(pinPath)
+	if err != nil {
+		return nil, fmt.Errorf("read pin %s: %w", pinPath, err)
 	}
-	fmt.Printf("wrote %s\n", commonOut)
+
+	// One schema per registered provider, <provider>.schema.json.
+	var providers []providerTarget
+	for _, name := range config.AllProviders {
+		providers = append(providers, providerTarget{name + ".schema.json", name, config.NewProviderConfig(name)})
+	}
+	if err := checkCollisions(providers); err != nil {
+		return nil, fmt.Errorf("provider field collision: %w", err)
+	}
+
+	files := map[string][]byte{}
+	for _, t := range providers {
+		data, err := providerSchema(t, pin)
+		if err != nil {
+			return nil, fmt.Errorf("generate %s: %w", t.filename, err)
+		}
+		files[schemaDir+"/"+t.filename] = data
+	}
+
+	data, err := commonSchema(pin)
+	if err != nil {
+		return nil, fmt.Errorf("generate common.schema.json: %w", err)
+	}
+	files[schemaDir+"/common.schema.json"] = data
 
 	// Output schemas: not provider-config schemas, but other
 	// stable JSON shapes y-cluster produces for downstream
@@ -118,7 +143,7 @@ func run() error {
 	// produces them, NOT under pkg/provision/schema/ (which is
 	// for input/config schemas). Add new outputs below as more
 	// y-cluster commands publish stable JSON contracts.
-	gatewayStateOut := filepath.Join(root, "pkg", "gateway", "state.schema.json")
+	//
 	// schemaVersion is a top-level field on State; pin it to
 	// the SOURCE version constant via an enum-of-one on the
 	// generated schema. A future SchemaVersion bump means
@@ -127,14 +152,15 @@ func run() error {
 	// version of the schema doc (which can be served from a
 	// versioned URL once we need it -- the canonical URL stays
 	// unversioned).
-	if err := writeOutputSchema(gatewayStateOut, &gateway.State{}, gateway.SchemaID,
+	data, err = outputSchema(&gateway.State{}, gateway.SchemaID,
 		enumPin{DefName: "State", PropName: "schemaVersion", Values: []string{gateway.SchemaVersion}},
-	); err != nil {
-		return fmt.Errorf("generate %s: %w", gatewayStateOut, err)
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate gateway state schema: %w", err)
 	}
-	fmt.Printf("wrote %s\n", gatewayStateOut)
+	files["pkg/gateway/state.schema.json"] = data
 
-	return nil
+	return files, nil
 }
 
 // enumPin is one (definition, property, values) tuple for the
@@ -147,9 +173,8 @@ type enumPin struct {
 	Values   []string
 }
 
-// writeOutputSchema reflects a non-provider Go struct into a
-// standalone JSON Schema file. Differs from writeProviderSchema
-// in two ways:
+// outputSchema reflects a non-provider Go struct into a standalone
+// JSON Schema. Differs from providerSchema in two ways:
 //
 //   - Uses the `json` struct tag for property names, since the
 //     output is JSON (not YAML), and consumers parse the JSON
@@ -167,7 +192,7 @@ type enumPin struct {
 // schema-version stamping (single-value enum so consumers
 // validate the snapshot's declared version against the schema
 // they hold).
-func writeOutputSchema(outPath string, sample any, schemaID string, enumPins ...enumPin) error {
+func outputSchema(sample any, schemaID string, enumPins ...enumPin) ([]byte, error) {
 	r := &jsonschema.Reflector{
 		AllowAdditionalProperties: false,
 		DoNotReference:            false,
@@ -180,22 +205,22 @@ func writeOutputSchema(outPath string, sample any, schemaID string, enumPins ...
 	schema := r.Reflect(sample)
 	data, err := json.MarshalIndent(schema, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Replace the reflector's auto-generated $id with our stable
 	// one. invopop emits a github.com/-prefixed URL by default;
 	// we want the schema reachable by a URL operators control.
 	data, err = setSchemaID(data, schemaID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, pin := range enumPins {
 		data, err = injectFieldEnum(data, pin.DefName, pin.PropName, pin.Values)
 		if err != nil {
-			return fmt.Errorf("inject enum on %s.%s: %w", pin.DefName, pin.PropName, err)
+			return nil, fmt.Errorf("inject enum on %s.%s: %w", pin.DefName, pin.PropName, err)
 		}
 	}
-	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+	return append(data, '\n'), nil
 }
 
 // injectFieldEnum sets `enum` on the named property of the named
@@ -243,7 +268,7 @@ func setSchemaID(data []byte, schemaID string) ([]byte, error) {
 // they're shared by design and surface in every provider via
 // `yaml:",inline"`.
 func checkCollisions(providers []providerTarget) error {
-	seen := map[string]string{} // yaml name → first provider that declared it
+	seen := map[string]string{} // yaml name -> first provider that declared it
 	for _, p := range providers {
 		for _, name := range ownYAMLNames(reflect.TypeOf(p.sample).Elem()) {
 			if prev, ok := seen[name]; ok {
@@ -288,22 +313,22 @@ func yamlName(f reflect.StructField) string {
 	return strings.SplitN(tag, ",", 2)[0]
 }
 
-func writeProviderSchema(outPath string, t providerTarget, pin pinFile) error {
+func providerSchema(t providerTarget, pin pinFile) ([]byte, error) {
 	data, err := reflectSchema(t.sample, pin)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data, err = narrowProviderToConst(data, t.provider)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+	return append(data, '\n'), nil
 }
 
-func writeCommonSchema(outPath string, pin pinFile) error {
+func commonSchema(pin pinFile) ([]byte, error) {
 	data, err := reflectSchema(&config.CommonConfig{}, pin)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// `provider` is required in the per-provider schemas (and
 	// const-narrowed there), but optional in the common schema:
@@ -313,9 +338,9 @@ func writeCommonSchema(outPath string, pin pinFile) error {
 	// portable config as invalid.
 	data, err = dropRequired(data, "CommonConfig", "provider")
 	if err != nil {
-		return fmt.Errorf("drop CommonConfig.provider from required: %w", err)
+		return nil, fmt.Errorf("drop CommonConfig.provider from required: %w", err)
 	}
-	return os.WriteFile(outPath, append(data, '\n'), 0o644)
+	return append(data, '\n'), nil
 }
 
 // dropRequired removes a property from the `required` list of the
@@ -381,15 +406,14 @@ func reflectSchema(sample any, pin pinFile) ([]byte, error) {
 	// Pin substitution. The placeholder matches the literal text
 	// invopop wrote from the struct tag (`"default": "__K3S_TAG__"`).
 	// `__K3S_TAG__` is the GitHub-release form of the version (with
-	// `+k3sN` build-metadata separator). The container image is no
-	// longer a config field — the docker provisioner derives it
-	// from the version at runtime — so no `__K3S_IMAGE__`
-	// substitution here.
+	// `+k3sN` build-metadata separator). The container image is not
+	// a config field: the docker provisioner derives it from the
+	// version at runtime.
 	data = bytes.ReplaceAll(data, []byte(`"__K3S_TAG__"`), []byte(jsonString(pin.Version)))
 
 	// Inject the provider enum into the embedded CommonConfig's
-	// schema. invopop has no idea what values are legal — that
-	// list lives in config.AllProviders — so we add the enum here
+	// schema. invopop has no idea what values are legal -- that
+	// list lives in config.AllProviders -- so we add the enum here
 	// instead of hand-writing it in a struct tag we'd then have to
 	// keep in sync.
 	data, err = injectProviderEnum(data, config.AllProviders)
@@ -404,7 +428,7 @@ func reflectSchema(sample any, pin pinFile) ([]byte, error) {
 // constraint to every `provider` property whose surrounding object
 // also declares `"type": "string"`. The reflector emits the
 // property without an enum because the tag deliberately omits
-// `enum=...` literals — schemagen owns the value list via
+// `enum=...` literals -- schemagen owns the value list via
 // config.AllProviders so the source of truth is one place.
 func injectProviderEnum(data []byte, providers []string) ([]byte, error) {
 	var doc map[string]any

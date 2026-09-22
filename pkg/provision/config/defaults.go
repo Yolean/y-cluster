@@ -2,6 +2,7 @@ package config
 
 import (
 	_ "embed"
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -28,10 +29,15 @@ type pinFile struct {
 	} `yaml:"mirror"`
 }
 
-// k3sPin parses the embedded pin file once at package init.
+// k3sPin parses the embedded pin file once at package init. The file
+// is compiled in, so a parse failure is a build defect and panics
+// instead of surfacing later as "k3s.version is empty" in some
+// operator's provision.
 var k3sPin = func() pinFile {
 	var p pinFile
-	_ = yaml.Unmarshal(k3sYAML, &p)
+	if err := yaml.Unmarshal(k3sYAML, &p); err != nil {
+		panic(fmt.Sprintf("pkg/provision/config/k3s.yaml: %v", err))
+	}
 	return p
 }()
 
@@ -92,8 +98,8 @@ func DockerTag(v string) string { return dockerTag(v) }
 // string field whose `jsonschema:"default=..."` tag carries a value.
 // Recurses into nested structs. The function intentionally limits
 // itself to string fields; numeric fields in y-cluster configs are
-// declared as strings (matching the historical qemu shape) so we
-// don't have to mix types here.
+// declared as strings (qemu and docker take them as command line
+// text) so we don't have to mix types here.
 //
 // Tag values starting with `__...__` are treated as placeholders and
 // skipped: those fields are filled by callers who know how to

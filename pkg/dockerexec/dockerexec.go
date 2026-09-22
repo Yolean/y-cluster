@@ -6,10 +6,10 @@
 // docker". Same daemon socket as the docker CLI, just with
 // machine-readable errors:
 //
-//   cerrdefs.IsNotFound        → container missing
-//   cerrdefs.IsConflict        → name in use
-//   cerrdefs.IsPermissionDenied → socket perms / rootless misconfig
-//   net.OpError                → daemon down (no such file/socket)
+//	cerrdefs.IsNotFound        -> container missing
+//	cerrdefs.IsConflict        -> name in use
+//	cerrdefs.IsPermissionDenied -> socket perms / rootless misconfig
+//	net.OpError                -> daemon down (no such file/socket)
 //
 // We share the wrapper between the docker provisioner (which
 // runs/removes the container) and pkg/cluster (which exec's
@@ -18,6 +18,7 @@
 package dockerexec
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -124,10 +125,8 @@ func Logs(ctx context.Context, cli *client.Client, name string, tail string) ([]
 }
 
 // Exec runs cmd inside the container with stdin/stdout/stderr
-// passthrough — the same shape exec.Cmd has, so callers that
-// previously shelled out to `docker exec` switch with minimal
-// friction. Returns the exec's exit code via *ExitError when
-// non-zero so callers can categorise.
+// passthrough, the same shape exec.Cmd has. Returns the exec's exit
+// code via *ExitError when non-zero so callers can categorise.
 func Exec(ctx context.Context, cli *client.Client, name string, cmd []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	create, err := cli.ExecCreate(ctx, name, client.ExecCreateOptions{
 		Cmd:          cmd,
@@ -144,32 +143,43 @@ func Exec(ctx context.Context, cli *client.Client, name string, cmd []string, st
 	}
 	defer att.Close()
 
+	// The attach connection takes no context. Closing it is what
+	// unblocks both copies below when ctx ends.
+	stop := context.AfterFunc(ctx, att.Close)
+	defer stop()
+
 	// Pump stdin (if any) and demux stdout/stderr in parallel.
-	// stdin returns when the writer side closes, so we tear it
-	// down explicitly via CloseWrite once the caller-side reader
-	// EOFs.
-	errCh := make(chan error, 2)
+	stdinErr := make(chan error, 1)
 	if stdin != nil {
 		go func() {
 			_, copyErr := io.Copy(att.Conn, stdin)
+			// Tell the process its input ended; commands like
+			// `ctr image import -` wait for that.
 			_ = att.CloseWrite()
-			errCh <- copyErr
+			stdinErr <- copyErr
 		}()
-	} else {
-		errCh <- nil
 	}
-	go func() {
-		errCh <- demuxTo(att.Reader, stdout, stderr)
-	}()
 
-	var firstErr error
-	for i := 0; i < 2; i++ {
-		if e := <-errCh; e != nil && firstErr == nil {
-			firstErr = e
-		}
+	// The output side ending means the process is gone, and that
+	// decides when Exec returns. The stdin copy is not waited for: it
+	// may be blocked in a Read on the caller's reader (a terminal, a
+	// pipe nobody closes) that a process which exited without
+	// draining its input will never cause to return.
+	outErr := demuxTo(att.Reader, stdout, stderr)
+	if ctx.Err() != nil {
+		return fmt.Errorf("exec %s: %w", name, ctx.Err())
 	}
-	if firstErr != nil {
-		return fmt.Errorf("exec stream %s: %w", name, firstErr)
+	if outErr != nil {
+		return fmt.Errorf("exec stream %s: %w", name, outErr)
+	}
+	select {
+	case err := <-stdinErr:
+		// Finished before the process did: a failure to read the
+		// caller's input is the caller's to know about.
+		if err != nil {
+			return fmt.Errorf("exec stdin %s: %w", name, err)
+		}
+	default:
 	}
 
 	// Inspect the exec to surface the remote exit code.
@@ -196,13 +206,13 @@ func (e *ExitError) Error() string {
 }
 
 func demux(rc io.Reader) ([]byte, error) {
-	var stdout, stderr writableBuffer
+	var stdout, stderr bytes.Buffer
 	if err := demuxTo(rc, &stdout, &stderr); err != nil {
 		return nil, err
 	}
-	// Mirror the previous CombinedOutput semantics: stdout +
-	// stderr concatenated.
-	out := append(stdout.b, stderr.b...)
+	// stdout followed by stderr, NOT interleaved as a terminal would
+	// show them: the daemon multiplexes the two streams.
+	out := append(stdout.Bytes(), stderr.Bytes()...)
 	return out, nil
 }
 
@@ -215,14 +225,4 @@ func demuxTo(rc io.Reader, stdout, stderr io.Writer) error {
 	}
 	_, err := stdcopy.StdCopy(stdout, stderr, rc)
 	return err
-}
-
-// writableBuffer is a tiny io.Writer-bytes.Buffer hybrid used by
-// demux to avoid pulling bytes.Buffer into the docs of the
-// public API — kept private so callers can't hold onto it.
-type writableBuffer struct{ b []byte }
-
-func (w *writableBuffer) Write(p []byte) (int, error) {
-	w.b = append(w.b, p...)
-	return len(p), nil
 }

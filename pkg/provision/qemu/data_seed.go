@@ -1,19 +1,20 @@
 package qemu
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 // Embedded assets that travel with the appliance disk and run
@@ -63,6 +64,24 @@ type dataSeedMeta struct {
 // /var/lib/y-cluster/) so it travels with the appliance and is
 // available even when the customer mounts an empty drive at
 // /data/yolean (which obscures the boot disk's copy).
+// ErrNoDataDir reports that the guest disk has no /data/yolean
+// directory, so there is nothing to seed.
+var ErrNoDataDir = errors.New("guest disk has no /data/yolean")
+
+// tarOutError classifies a virt-tar-out failure by what libguestfs
+// wrote to stderr. A missing source directory reads
+//
+//	libguestfs: error: tar_out: stat: /data/yolean: No such file or directory
+//
+// and is the only failure that means "nothing to seed". Anything else
+// is returned as it is.
+func tarOutError(stderr string, err error) error {
+	if strings.Contains(stderr, "/data/yolean: No such file or directory") {
+		return fmt.Errorf("%w (virt-tar-out: %v)", ErrNoDataDir, err)
+	}
+	return fmt.Errorf("virt-tar-out: %w", err)
+}
+
 func extractDataYolean(ctx context.Context, qcow2Path, outPath string) (string, error) {
 	out, err := os.Create(outPath)
 	if err != nil {
@@ -76,7 +95,8 @@ func extractDataYolean(ctx context.Context, qcow2Path, outPath string) (string, 
 	// virt-tar-out -a <disk> /data/yolean -  -> stdout
 	tarOut := exec.CommandContext(ctx, "virt-tar-out",
 		"-a", qcow2Path, "/data/yolean", "-")
-	tarOut.Stderr = os.Stderr
+	var tarErrOut bytes.Buffer
+	tarOut.Stderr = io.MultiWriter(os.Stderr, &tarErrOut)
 	tarPipe, err := tarOut.StdoutPipe()
 	if err != nil {
 		return "", fmt.Errorf("virt-tar-out pipe: %w", err)
@@ -93,7 +113,7 @@ func extractDataYolean(ctx context.Context, qcow2Path, outPath string) (string, 
 	}
 	if err := tarOut.Run(); err != nil {
 		_ = zstd.Wait()
-		return "", fmt.Errorf("virt-tar-out: %w", err)
+		return "", tarOutError(tarErrOut.String(), err)
 	}
 	if err := zstd.Wait(); err != nil {
 		return "", fmt.Errorf("zstd: %w", err)
@@ -136,12 +156,13 @@ type SeedAssets struct {
 // will copy into the appliance via virt-customize. The caller MUST
 // `os.RemoveAll(s.TmpDir)` to clean up.
 //
-// Returns (nil, nil) if the qcow2 doesn't have a /data/yolean dir
-// at all -- e.g., a build cluster that never ran any workload that
-// uses the bundled local-path. In that case PrepareExport SHOULD
-// proceed without seed assets; the appliance will simply have no
-// data-seed.tar.zst, the systemd unit's ConditionPathExists fires,
-// and the unit no-ops at boot.
+// Returns an error wrapping ErrNoDataDir if the qcow2 doesn't have a
+// /data/yolean dir at all -- e.g., a build cluster that never ran any
+// workload that uses the bundled local-path. That is the one failure
+// PrepareExport proceeds past: the appliance then has no
+// data-seed.tar.zst and no seed unit, so nothing gates k3s at boot.
+// Every other error (libguestfs, zstd, disk full, cancellation) means
+// the snapshot is missing or partial and must not ship.
 func BuildSeedAssets(ctx context.Context, qcow2Path, applianceName string) (*SeedAssets, error) {
 	tmpDir, err := os.MkdirTemp("", "y-cluster-seed-")
 	if err != nil {
@@ -152,11 +173,6 @@ func BuildSeedAssets(ctx context.Context, qcow2Path, applianceName string) (*See
 	sha, err := extractDataYolean(ctx, qcow2Path, tarPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		// virt-tar-out fails when the source path doesn't exist
-		// in the guest. We treat that as "no /data/yolean to
-		// seed", not an error worth aborting prepare-export over.
-		// PrepareExport's logger surfaces a Warn so the operator
-		// sees we skipped seed creation.
 		return nil, fmt.Errorf("extract /data/yolean: %w", err)
 	}
 
@@ -239,15 +255,3 @@ func virtCustomizeArgsForSeed(s *SeedAssets) []string {
 		"--run-command", "systemctl enable y-cluster-data-seed.service",
 	}
 }
-
-// applianceNameFromConfig is a small adapter so PrepareExport doesn't
-// hard-code the field. Keeps the dataSeedMeta struct decoupled from
-// Config's own evolution.
-func applianceNameFromConfig(cfg Config) string {
-	return cfg.Name
-}
-
-// silenceUnused references the logger import so a future build that
-// drops the seed feature's only Warn doesn't fail with "imported and
-// not used". Tiny cost, makes the import survive intermediate edits.
-var _ = zap.NewNop

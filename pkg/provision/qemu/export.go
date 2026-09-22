@@ -58,9 +58,8 @@ const (
 
 // VMDKSubformatDefault is the subformat used when --vmdk-subformat
 // is not set. streamOptimized is what VMware ESXi expects out of
-// the box; we keep it as the default so the historical "y-cluster
-// export --format=vmdk" shape still produces an ESXi-importable
-// disk.
+// the box, so a plain `y-cluster export --format=vmdk` produces an
+// ESXi-importable disk.
 const VMDKSubformatDefault = "streamOptimized"
 
 // AllVMDKSubformats lists every VMDK subformat qemu-img accepts.
@@ -460,7 +459,7 @@ ystack user has passwordless sudo.
 	KUBECONFIG=k3s.yaml kubectl get nodes
 
 The default boot command above does not forward 6443 -- add
-` + "`hostfwd=tcp::6443-:6443`" + ` to the netdev to expose the
+`+"`hostfwd=tcp::6443-:6443`"+` to the netdev to expose the
 apiserver to the host.
 
 ## Persistent storage
@@ -468,11 +467,11 @@ apiserver to the host.
 The appliance ships y-cluster's bundled local-path-provisioner
 (replaces k3s's stock local-storage). Stateful workloads with
 PersistentVolumeClaims against the default StorageClass
-` + "`local-path`" + ` end up under ` + "`/data/yolean/`" + ` on
-the appliance disk, named ` + "`<namespace>_<pvc-name>`" + `
-(e.g. ` + "`/data/yolean/appliance-stateful_data-versitygw-0/`" + `).
-The reclaim policy is ` + "`Retain`" + ` -- a stray
-` + "`kubectl delete pvc`" + ` does NOT wipe the data; the
+`+"`local-path`"+` end up under `+"`/data/yolean/`"+` on
+the appliance disk, named `+"`<namespace>_<pvc-name>`"+`
+(e.g. `+"`/data/yolean/appliance-stateful_data-versitygw-0/`"+`).
+The reclaim policy is `+"`Retain`"+` -- a stray
+`+"`kubectl delete pvc`"+` does NOT wipe the data; the
 directory persists and the next PVC of the same
 namespace+name picks it back up.
 
@@ -500,13 +499,13 @@ virtual disk to the VM and mount it at /data/yolean:
        sudo mount /data/yolean
        sudo systemctl start k3s
 
-4. Existing PVs (named ` + "`<ns>_<pvc-name>`" + `) are now on
+4. Existing PVs (named `+"`<ns>_<pvc-name>`"+`) are now on
    the new disk; PV bindings are unchanged. New PVCs land on
    the same path on the new disk.
 
 ### Custom storage path or pattern
 
-The y-cluster-provision.yaml ` + "`storage`" + ` block overrides
+The y-cluster-provision.yaml `+"`storage`"+` block overrides
 all three knobs (path / pathPattern / reclaimPolicy):
 
     storage:
@@ -514,7 +513,7 @@ all three knobs (path / pathPattern / reclaimPolicy):
       pathPattern: "{{ .PVC.Namespace }}/{{ .PVC.Name }}-{{ .PVName }}"
       reclaimPolicy: Delete
 
-(.PVName expands to ` + "`pvc-<uuid>`" + ` -- the upstream
+(.PVName expands to `+"`pvc-<uuid>`"+` -- the upstream
 local-path-provisioner shape, useful when you want unique
 per-PV directories that survive PVC delete+recreate without
 inheriting the previous PV's data.)

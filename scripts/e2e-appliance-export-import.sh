@@ -102,7 +102,11 @@ IMP_SSH_PORT="${IMP_SSH_PORT:-2230}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 Y_CLUSTER="${Y_CLUSTER:-$REPO_ROOT/dist/y-cluster}"
 CACHE_DIR="${CACHE_DIR:-$HOME/.cache/y-cluster-qemu}"
-EXPORT_DIR=$(mktemp -d -p /tmp e2e-export.XXXXXX)
+# The bundle is several GB and stays behind for inspection. /tmp is
+# a RAM-backed tmpfs on most distros, so it is the fallback only.
+mkdir -p "$REPO_ROOT/dist"
+EXPORT_DIR=$(mktemp -d -p "$REPO_ROOT/dist" e2e-export.XXXXXX 2>/dev/null \
+    || mktemp -d -p /tmp e2e-export.XXXXXX)
 CFG_DIR=$(mktemp -d -p /tmp e2e-config.XXXXXX)
 
 stage() { printf '\n=== %s ===\n' "$*"; }

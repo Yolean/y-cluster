@@ -1,11 +1,11 @@
 package qemu
 
 import (
-	"bytes"
 	"fmt"
 	"path/filepath"
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -71,19 +71,14 @@ func (c Config) SSHCommand() string {
 	return fmt.Sprintf("ssh -p %s -i %s %s@%s", e.SSHPort, filepath.Join(c.CacheDir, c.Name+"-ssh"), guestUser, e.SSHHost)
 }
 
-// guestAPIServer is the server address k3s writes into its own
-// kubeconfig: the apiserver as seen from inside the guest.
-const guestAPIServer = "127.0.0.1:6443"
-
-// rewriteKubeconfigServer points a kubeconfig read from the guest at
-// the host-side apiserver address. TLS validates against that
-// address because k3s lists 127.0.0.1 among its serving cert SANs by
-// default and k3sServerFlags adds any other APIHost.
-func rewriteKubeconfigServer(raw []byte, e endpoints) ([]byte, error) {
+// apiAddress is the apiserver address for the host's kubeconfig. TLS
+// validates against it because k3s lists 127.0.0.1 among its serving
+// cert SANs by default and k3sServerFlags adds any other APIHost.
+func (e endpoints) apiAddress() (string, error) {
 	if e.APIPort == "" {
-		return nil, fmt.Errorf("portForwards has no guest:6443 entry; cannot reach k3s API")
+		return "", fmt.Errorf("portForwards has no guest:6443 entry; cannot reach k3s API")
 	}
-	return bytes.ReplaceAll(raw, []byte(guestAPIServer), []byte(e.APIHost+":"+e.APIPort)), nil
+	return e.APIHost + ":" + e.APIPort, nil
 }
 
 // netdevArg renders qemu's -netdev value. User mode: one hostfwd for
@@ -104,24 +99,15 @@ func netdevArg(cfg Config) string {
 	return netdev
 }
 
-// k3sServerFlags is the INSTALL_K3S_EXEC value.
-//
-// traefik is disabled because y-cluster ships Envoy Gateway as the
-// cluster ingress; two controllers would fight over the :80/:443
-// forwards. local-storage is disabled because y-cluster ships its own
-// local-path-provisioner (pkg/provision/localstorage) and k3s's deploy
-// controller would reconcile that config back to upstream defaults on
-// every restart.
-//
-// The kubeconfig written on the host names the apiserver by APIHost.
-// k3s only puts 127.0.0.1 and the node's own addresses in its serving
-// cert, so any other host address has to be added as a SAN.
+// k3sServerFlags is the INSTALL_K3S_EXEC value. The kubeconfig
+// written on the host names the apiserver by APIHost. k3s only puts
+// 127.0.0.1 and the node's own addresses in its serving cert, so any
+// other host address has to be added as a SAN.
 func k3sServerFlags(e endpoints) string {
-	flags := "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"
-	if e.APIHost != "127.0.0.1" {
-		flags += " --tls-san=" + e.APIHost
+	if e.APIHost == "127.0.0.1" {
+		return k3s.ServerFlags()
 	}
-	return flags
+	return k3s.ServerFlags("--tls-san=" + e.APIHost)
 }
 
 const netdevID = "net0"

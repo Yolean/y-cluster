@@ -1,7 +1,10 @@
 package yconverge
 
 import (
+	"bytes"
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,7 +63,7 @@ func TestCheckRunner_ExecFailure(t *testing.T) {
 }
 
 func TestCheckRunner_ExecRetries(t *testing.T) {
-	// Create a file that the command checks — first calls fail, last succeeds
+	// Create a file that the command checks -- first calls fail, last succeeds
 	dir := t.TempDir()
 	runner := &CheckRunner{
 		Context:   "test",
@@ -185,5 +188,66 @@ func TestCheckError_Format(t *testing.T) {
 	got := err.Error()
 	if got != "check 2 (app ready): context deadline exceeded" {
 		t.Fatalf("unexpected error string: %q", got)
+	}
+}
+
+// A command that hangs must not outlive the timeout the check was
+// given. Before the per-attempt deadline it ran under the parent
+// context only, and the timeout was compared between attempts.
+func TestCheckRunner_ExecHangingCommandHonoursTimeout(t *testing.T) {
+	runner := &CheckRunner{Context: "test", Namespace: "default", Logger: testLogger(t)}
+	start := time.Now()
+	err := runner.RunAll(context.Background(), []Check{{
+		Kind:    "exec",
+		Command: "sleep 60",
+		Timeout: "1s",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "timed out after 1s") {
+		t.Fatalf("want a timeout, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("hanging command held the check for %s", elapsed)
+	}
+}
+
+// "exit status 1" alone says nothing; the failing command's own
+// output is the diagnosis.
+func TestCheckRunner_ExecFailureCarriesOutput(t *testing.T) {
+	runner := &CheckRunner{Context: "test", Namespace: "default", Logger: testLogger(t)}
+	err := runner.RunAll(context.Background(), []Check{{
+		Kind:    "exec",
+		Command: "echo 'pod db-0 is not ready' >&2; exit 3",
+		Timeout: "1s",
+	}})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	for _, want := range []string{"exit status 3", "pod db-0 is not ready"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+}
+
+// The passing attempt's output is shown once; failed attempts before
+// it are not.
+func TestCheckRunner_ExecSuccessOutputIsShownOnce(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	var out bytes.Buffer
+	runner := &CheckRunner{Context: "test", Namespace: "default", Logger: testLogger(t), Stdout: &out}
+	err := runner.RunAll(context.Background(), []Check{{
+		Kind:    "exec",
+		Command: "if test -f " + marker + "; then echo ready; else touch " + marker + "; echo not-yet; exit 1; fi",
+		Timeout: "10s",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "ready\n") {
+		t.Errorf("passing attempt's output missing: %q", got)
+	}
+	if strings.Contains(got, "not-yet") {
+		t.Errorf("a failed attempt's output leaked into progress: %q", got)
 	}
 }

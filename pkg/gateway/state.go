@@ -173,11 +173,11 @@ type GatewayClass struct {
 // for HTTPS-readiness assessment and enough listener status for
 // "did envoy-gateway program this?" answers.
 type Gateway struct {
-	Namespace        string           `json:"namespace"`
-	Name             string           `json:"name"`
-	GatewayClassName string           `json:"gatewayClassName"`
-	Listeners        []Listener       `json:"listeners"`
-	Status           GatewayStatus    `json:"status"`
+	Namespace        string        `json:"namespace"`
+	Name             string        `json:"name"`
+	GatewayClassName string        `json:"gatewayClassName"`
+	Listeners        []Listener    `json:"listeners"`
+	Status           GatewayStatus `json:"status"`
 }
 
 // Listener is the spec-side listener config. TLS and AllowedRoutes
@@ -219,12 +219,12 @@ type ListenerStatus struct {
 // backendRefs without forcing y-cluster to track the full
 // upstream rule schema.
 type HTTPRoute struct {
-	Namespace   string          `json:"namespace"`
-	Name        string          `json:"name"`
-	ParentRefs  json.RawMessage `json:"parentRefs,omitempty"`
-	Hostnames   []string        `json:"hostnames,omitempty"`
-	Rules       json.RawMessage `json:"rules,omitempty"`
-	Status      RouteStatus     `json:"status"`
+	Namespace  string          `json:"namespace"`
+	Name       string          `json:"name"`
+	ParentRefs json.RawMessage `json:"parentRefs,omitempty"`
+	Hostnames  []string        `json:"hostnames,omitempty"`
+	Rules      json.RawMessage `json:"rules,omitempty"`
+	Status     RouteStatus     `json:"status"`
 }
 
 // GRPCRoute mirrors HTTPRoute for the gRPC kind.
@@ -246,9 +246,9 @@ type RouteStatus struct {
 // RouteParentStatus is one parent's reconciliation record on a
 // route.
 type RouteParentStatus struct {
-	ParentRef    json.RawMessage `json:"parentRef,omitempty"`
-	ControllerName string         `json:"controllerName,omitempty"`
-	Conditions   []Condition     `json:"conditions,omitempty"`
+	ParentRef      json.RawMessage `json:"parentRef,omitempty"`
+	ControllerName string          `json:"controllerName,omitempty"`
+	Conditions     []Condition     `json:"conditions,omitempty"`
 }
 
 // ClientTrafficPolicy mirrors envoy-gateway's
@@ -465,11 +465,15 @@ func ClearDNSHintIPAnnotation(ctx context.Context, kubectlContext, gatewayClassN
 func runKubectl(ctx context.Context, kubectlContext string, args ...string) ([]byte, error) {
 	full := append([]string{"--context=" + kubectlContext}, args...)
 	cmd := exec.CommandContext(ctx, "kubectl", full...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("kubectl %s: %s: %w", strings.Join(args, " "), out, err)
+	// stdout and stderr are kept apart: callers parse stdout as JSON,
+	// and kubectl writes warnings (deprecated API versions, auth
+	// plugin notices) to stderr on otherwise successful calls.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("kubectl %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()+stdout.String()), err)
 	}
-	return out, nil
+	return stdout.Bytes(), nil
 }
 
 // kubectlGetJSON runs `kubectl get <kinds> -A -o json` and

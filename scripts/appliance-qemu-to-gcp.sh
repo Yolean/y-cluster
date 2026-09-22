@@ -352,8 +352,7 @@ do_teardown() {
     stage "teardown complete"
 
     # Surface the preservation contract at the moment the operator
-    # is about to step away. Previously this only appeared in the
-    # build-flow success block, where it was less actionable.
+    # is about to step away; that is when it can be acted on.
     if [[ $delete_data_disk -eq 0 && -n "$disk" ]]; then
         cat <<EOF
 

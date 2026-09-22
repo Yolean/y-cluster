@@ -4,9 +4,8 @@
 //
 // Implemented on top of the typed File schema (schema.go) +
 // sigs.k8s.io/yaml, NOT k8s.io/client-go/tools/clientcmd. The
-// kubeconfig file format is small enough that hand-rolling lets us
-// drop client-go from y-cluster's binary; the Manager's behaviour is
-// otherwise identical to the previous clientcmd-backed version.
+// kubeconfig file format is small enough that hand-rolling keeps
+// client-go out of y-cluster's binary.
 package kubeconfig
 
 import (
@@ -57,22 +56,30 @@ func FromEnv(contextName, clusterName string, logger *zap.Logger) (*Manager, err
 // entries matching this manager's names. Safe to call before
 // provision -- missing entries are a no-op.
 func (m *Manager) CleanupStale() {
-	cfg, err := Load(m.Path)
-	if err != nil {
-		// If the file is unreadable for any reason other than
-		// "doesn't exist" we'd silently corrupt state by
-		// over-writing it; log and bail. Match the previous
-		// shell-out's "ignore errors" mood without going so far
-		// as to clobber.
-		m.logger.Warn("kubeconfig load for cleanup failed",
-			zap.String("path", m.Path), zap.Error(err))
-		return
+	if _, err := os.Stat(m.Path); os.IsNotExist(err) {
+		return // no kubeconfig, nothing of ours in it
 	}
-	cfg.removeContext(m.Context)
-	cfg.removeCluster(m.ClusterName)
-	cfg.removeUser(m.ClusterName)
-	if err := cfg.Save(m.Path); err != nil {
-		m.logger.Warn("kubeconfig write after cleanup failed",
+	err := withFileLock(m.Path, func() error {
+		cfg, err := Load(m.Path)
+		if err != nil {
+			// Unreadable for a reason other than "doesn't exist":
+			// writing anything back would replace the operator's
+			// file with our idea of it.
+			return fmt.Errorf("load: %w", err)
+		}
+		before := len(cfg.Contexts) + len(cfg.Clusters) + len(cfg.Users)
+		cfg.removeContext(m.Context)
+		cfg.removeCluster(m.ClusterName)
+		cfg.removeUser(m.ClusterName)
+		if len(cfg.Contexts)+len(cfg.Clusters)+len(cfg.Users) == before {
+			// Nothing of ours in there. Leave the file alone, and
+			// do not create one that did not exist.
+			return nil
+		}
+		return cfg.Save(m.Path)
+	})
+	if err != nil {
+		m.logger.Warn("kubeconfig cleanup failed",
 			zap.String("path", m.Path), zap.Error(err))
 	}
 }
@@ -92,23 +99,15 @@ func (m *Manager) Import(rawKubeconfig []byte) error {
 	}
 	incoming.renameDefaults(m.Context, m.ClusterName)
 
-	existing, err := Load(m.Path)
-	if err != nil {
-		return fmt.Errorf("load existing %s: %w", m.Path, err)
-	}
-	existing.MergeFrom(incoming)
-	if err := existing.Save(m.Path); err != nil {
-		return fmt.Errorf("write %s: %w", m.Path, err)
-	}
-	return nil
+	return withFileLock(m.Path, func() error {
+		existing, err := Load(m.Path)
+		if err != nil {
+			return fmt.Errorf("load existing %s: %w", m.Path, err)
+		}
+		existing.MergeFrom(incoming)
+		if err := existing.Save(m.Path); err != nil {
+			return fmt.Errorf("write %s: %w", m.Path, err)
+		}
+		return nil
+	})
 }
-
-// CleanupTeardown removes the context. The previous version
-// also worked around clientcmd writing `null` for empty list
-// fields (kubie chokes on that); the schema-based Save here
-// always emits initialised-empty slices as `[]`, so the
-// post-write fix is no longer needed.
-func (m *Manager) CleanupTeardown() {
-	m.CleanupStale()
-}
-

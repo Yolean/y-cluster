@@ -7,7 +7,6 @@
 package qemu
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/cache"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
@@ -36,7 +36,7 @@ var _ provision.Cluster = (*Cluster)(nil)
 
 // PortForward maps a host port to a guest port.
 type PortForward struct {
-	Host  string // host port (empty = auto)
+	Host  string // host port
 	Guest string // guest port
 }
 
@@ -200,16 +200,8 @@ func CheckPrerequisites() error {
 
 // IsRunning checks if a VM with this config is already running.
 func (c Config) IsRunning() (bool, int) {
-	pidFile := filepath.Join(c.CacheDir, c.Name+".pid")
-	data, err := os.ReadFile(pidFile)
+	pid, err := readPidFile(pidFilePath(c.CacheDir, c.Name))
 	if err != nil {
-		return false, 0
-	}
-	var pid int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		return false, 0
-	}
-	if !pidAlive(pid) {
 		return false, 0
 	}
 	return true, pid
@@ -227,7 +219,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		HostBindAddress: cfg.BindAddress,
 		PortBinder:      provision.PortBinderSelf,
 		ContextName:     cfg.Context,
-		ContextCluster:  clusterName(cfg.Name),
+		ContextCluster:  cfg.Name,
 		KubeconfigPath:  cfg.Kubeconfig,
 	}
 	if err := pf.Run(); err != nil {
@@ -239,8 +231,8 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		}
 	}
 
-	// Initialize kubeconfig manager early — validates KUBECONFIG env
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
+	// Initialize kubeconfig manager early -- validates KUBECONFIG env
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -281,12 +273,12 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	//     extract the kubeconfig context. Re-installing k3s
 	//     here would clobber the appliance's pre-baked state.
 	//
-	// The staged-disk branch closes the import->boot deadlock
-	// (provision used to error "disk already exists; run start"
-	// while start errored "no kubeconfig context"). After a
-	// successful staged-disk provision, the kubeconfig is
-	// populated and subsequent stop/start cycles take the
-	// existing-cluster path.
+	// Without the staged-disk branch an imported disk could not
+	// be booted at all: provision would refuse an existing disk
+	// and start would refuse a cluster without a kubeconfig
+	// context. After a successful staged-disk provision the
+	// kubeconfig is populated and subsequent stop/start cycles
+	// take the existing-cluster path.
 	diskPath := filepath.Join(cfg.CacheDir, cfg.Name+".qcow2")
 	stagedDisk := false
 	if _, err := os.Stat(diskPath); err == nil {
@@ -390,7 +382,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// Stage /etc/rancher/k3s/registries.yaml before installing k3s
 	// so containerd reads it on first start. Skipped when the user
 	// hasn't configured any mirrors or auth.
-	if err := c.writeRegistries(ctx); err != nil {
+	if err := registries.WriteToNode(ctx, c.NodeExec, c.cfg.Registries, c.logger); err != nil {
 		return nil, fmt.Errorf("write registries: %w", err)
 	}
 
@@ -473,23 +465,7 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		logger = zap.NewNop()
 	}
 
-	// Graceful guest shutdown first, same as Stop: SIGTERM on the
-	// qemu process is a hard power-off, and the guest's ext4
-	// commit interval means writes from the last few seconds never
-	// reach disk. That silently truncated recent data on the
-	// operator-preserved DataDisk (the disk-reuse contract) and
-	// left keepDisk=true disks dirty for the export flow. SSH
-	// failures fall through to the signal ladder within seconds.
-	pidFile := filepath.Join(cfg.CacheDir, cfg.Name+".pid")
-	if pid, err := readPidFile(pidFile); err == nil {
-		if err := guestPoweroff(cfg.CacheDir, cfg.Name, pid, logger); err != nil {
-			logger.Warn("graceful guest shutdown failed; falling back to qemu signals",
-				zap.Error(err))
-		} else if !pidAlive(pid) {
-			_ = os.Remove(pidFile)
-		}
-	}
-	if err := stopVM(pidFile, logger); err != nil {
+	if err := shutdownVM(cfg.CacheDir, cfg.Name, logger); err != nil {
 		// The VM is still alive after SIGKILL. Don't continue with
 		// disk delete -- the operator needs to know the previous
 		// process is still bound to its port forwards.
@@ -497,9 +473,9 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 	}
 
 	// Without a kubeconfig path there is no context to remove.
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err == nil {
-		kubecfg.CleanupTeardown()
+		kubecfg.CleanupStale()
 	}
 
 	// Handle per-VM artefacts. keepDisk preserves everything (for
@@ -613,23 +589,18 @@ func stopVM(pidFile string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	pid, err := readPidFile(pidFile)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case errors.Is(err, errStalePidfile):
+		// Nothing of ours is running. Remove the file so the next
+		// provision starts clean, and leave whatever process may
+		// hold the number now alone.
+		_ = os.Remove(pidFile)
+		return nil
+	case err != nil:
 		return fmt.Errorf("read %s: %w", pidFile, err)
-	}
-	var pid int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		// Corrupt pidfile; nothing actionable. Remove it so the
-		// next provision starts clean.
-		_ = os.Remove(pidFile)
-		return nil
-	}
-	if !pidAlive(pid) {
-		_ = os.Remove(pidFile)
-		return nil
 	}
 
 	logger.Info("stopping VM", zap.Int("pid", pid))
@@ -694,34 +665,6 @@ func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader)
 	return sshexec.Exec(ctx, c.target(), command, stdin)
 }
 
-// writeRegistries renders the configured registries.yaml and
-// stages it on the VM at registries.Path. No-op when the config
-// has no mirrors and no auth (the empty case shouldn't write a
-// file at all -- containerd then uses its default behaviour).
-func (c *Cluster) writeRegistries(ctx context.Context) error {
-	body, err := registries.Marshal(c.cfg.Registries)
-	if err != nil {
-		return err
-	}
-	if body == nil {
-		return nil
-	}
-	c.logger.Info("writing registries.yaml",
-		zap.String("path", registries.Path),
-		zap.Int("mirrors", len(c.cfg.Registries.Mirrors)),
-		zap.Int("configs", len(c.cfg.Registries.Configs)),
-	)
-	// install -d creates the dir with the right mode if missing;
-	// tee writes the file as root with 0600 since it may carry
-	// credentials.
-	cmd := "sudo install -d -m 0755 /etc/rancher/k3s && sudo install -m 0600 /dev/stdin " + registries.Path
-	out, err := c.NodeExec(ctx, cmd, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("write %s: %s: %w", registries.Path, out, err)
-	}
-	return nil
-}
-
 // DiskPath returns the path to the VM's disk image.
 func (c *Cluster) DiskPath() string {
 	return filepath.Join(c.cfg.CacheDir, c.cfg.Name+".qcow2")
@@ -760,12 +703,6 @@ func Import(inputPath, diskPath string) error {
 	return nil
 }
 
-// ImportVMDK is the deprecated alias for Import retained for any
-// out-of-tree caller pinned to the old name. Prefer Import.
-func ImportVMDK(vmdkPath, diskPath string) error {
-	return Import(vmdkPath, diskPath)
-}
-
 // importFormatFromExt maps a file extension to the qemu-img `-f`
 // argument. Centralised so the supported-set is in one place and a
 // new format becomes a one-line table update.
@@ -785,20 +722,24 @@ func importFormatFromExt(path string) (string, error) {
 
 const ubuntuVersion = "noble"
 
-// clusterName derives the kubeconfig cluster entry name from the VM name.
-// e.g. "ystack-qemu" → "ystack-qemu"
-func clusterName(vmName string) string {
-	return vmName
+func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
+	return EnsureCloudImage(ctx, c.cfg.CacheDir, c.logger)
 }
 
-func (c *Cluster) ensureCloudImage(ctx context.Context) (string, error) {
-	imgPath := filepath.Join(c.cfg.CacheDir, fmt.Sprintf("ubuntu-%s-server-cloudimg-amd64.img", ubuntuVersion))
+// EnsureCloudImage returns the path of the Ubuntu cloud image in
+// cacheDir, downloading it first if it is not there. New VM disks
+// are created with this file as their backing file, so it has to
+// stay in place for as long as a disk made from it is in use; that
+// is why it lives with the disks rather than in the purgeable
+// download cache.
+func EnsureCloudImage(ctx context.Context, cacheDir string, logger *zap.Logger) (string, error) {
+	imgPath := filepath.Join(cacheDir, fmt.Sprintf("ubuntu-%s-server-cloudimg-amd64.img", ubuntuVersion))
 	if _, err := os.Stat(imgPath); err == nil {
 		return imgPath, nil
 	}
-	c.logger.Info("downloading cloud image", zap.String("version", ubuntuVersion))
+	logger.Info("downloading cloud image", zap.String("version", ubuntuVersion))
 	url := fmt.Sprintf("https://cloud-images.ubuntu.com/%s/current/%s-server-cloudimg-amd64.img", ubuntuVersion, ubuntuVersion)
-	if err := downloadFile(ctx, url, imgPath); err != nil {
+	if err := cache.Download(ctx, url, imgPath); err != nil {
 		return "", fmt.Errorf("download cloud image: %w", err)
 	}
 	return imgPath, nil
@@ -985,10 +926,10 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 // sshWaitTimeout bounds waitForSSH. Cold-cache first boots are
 // dominated by cloud-init: 5-15 minutes observed when the qcow2,
 // seed image and host page cache are all cold, while warm-cache
-// boots take well under a minute. The prior 120s aborted cold
-// boots while qemu kept running, leaving a "VM already running"
-// trap for the next provision. See the specs repo,
-// ISSUE_QEMU_PROVISION_SSH_TIMEOUT.md.
+// boots take well under a minute. A timeout shorter than a cold
+// boot aborts provision while qemu keeps running, which leaves a
+// "VM already running" trap for the next provision. See the specs
+// repo, ISSUE_QEMU_PROVISION_SSH_TIMEOUT.md.
 const sshWaitTimeout = 600 * time.Second
 
 // sshWaitHeartbeat spaces the progress log lines during the wait

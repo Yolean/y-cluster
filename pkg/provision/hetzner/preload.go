@@ -5,12 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/images"
-	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
 // preloadFromS3 wires the operator-side S3 config (cluster-yaml
@@ -33,18 +31,12 @@ func (c *Cluster) preloadFromS3(ctx context.Context) error {
 		Region:    c.cfg.ImageCache.Region,
 		IndexKey:  c.cfg.ImageCache.IndexKey,
 	}
-	target := sshexec.Target{
-		Host:    c.state.IPv4,
-		Port:    "22",
-		User:    c.cfg.SSHUser,
-		KeyPath: filepath.Join(c.cacheDir, c.cfg.Context+"-ssh"),
-	}
 	run := func(ctx context.Context, cmd string, stdin []byte) ([]byte, error) {
 		var r io.Reader
 		if len(stdin) > 0 {
 			r = bytes.NewReader(stdin)
 		}
-		return sshexec.Exec(ctx, target, cmd, r)
+		return c.NodeExec(ctx, cmd, r)
 	}
 	c.logger.Info("pre-loading images from S3",
 		zap.String("bucket", s3.Bucket),

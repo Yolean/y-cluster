@@ -69,8 +69,8 @@ func (DefaultManifestExister) Exists(ctx context.Context, ref string) (bool, err
 // ResolveImage decides which container image the docker provisioner
 // should run for the given k3s version. The y-cluster mirror
 // (config.MirrorImage) is preferred. When the mirror has no
-// manifest yet — typical when testing a freshly released k3s
-// version before the mirror workflow has copied it — ResolveImage
+// manifest yet -- typical when testing a freshly released k3s
+// version before the mirror workflow has copied it -- ResolveImage
 // falls back to the upstream rancher/k3s image
 // (config.UpstreamImage) and logs a warning.
 //

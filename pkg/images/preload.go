@@ -134,15 +134,15 @@ func presignEntry(ctx context.Context, mc *minio.Client, bucket string, entry In
 // BuildPreloadScript emits the bash snippet the cluster node runs
 // for one IndexEntry. The script:
 //
-//   1. Creates a per-image tmpdir under /tmp/y-cluster-preload/.
-//   2. curls each layout file (manifests + blobs) into its
-//      relative position. The materialised tmpdir is a valid
-//      OCI v1 image layout regardless of whether blobs came from
-//      the per-image prefix (v1 entry) or the shared bucket-level
-//      prefix (v2 entry) -- the OCI-relative paths are identical.
-//   3. tars the layout and pipes through `sudo k3s ctr -n k8s.io
-//      image import -`.
-//   4. Cleans up via `trap`.
+//  1. Creates a per-image tmpdir under /tmp/y-cluster-preload/.
+//  2. curls each layout file (manifests + blobs) into its
+//     relative position. The materialised tmpdir is a valid
+//     OCI v1 image layout regardless of whether blobs came from
+//     the per-image prefix (v1 entry) or the shared bucket-level
+//     prefix (v2 entry) -- the OCI-relative paths are identical.
+//  3. tars the layout and pipes through `sudo k3s ctr -n k8s.io
+//     image import -`.
+//  4. Cleans up via `trap`.
 //
 // `set -euo pipefail` makes the first failed curl abort the whole
 // script with a non-zero exit, surfaced through SSH to the
@@ -176,7 +176,7 @@ func BuildPreloadScript(entry IndexEntry, urls map[string]string) string {
 			continue
 		}
 		// One mkdir per directory prefix is cheaper than -p on
-		// each curl, but `mkdir -p $(dirname …)` is portable and
+		// each curl, but `mkdir -p $(dirname ...)` is portable and
 		// the overhead is irrelevant here. Quote the URL so any
 		// signed-query-string special chars survive the shell.
 		b.WriteString("mkdir -p \"$LAYOUT/")

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"go.uber.org/zap"
 
@@ -129,8 +130,15 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 
 	// Resolve dependency order from all CUE files in the kustomize
 	// tree. An overlay (e.g. backend/qa) inherits dependencies from
-	// its base (e.g. backend/base/yconverge.cue imports db). The
-	// traversal must succeed: if it fails (corrupt kustomization,
+	// its base (e.g. backend/base/yconverge.cue imports db): the
+	// base's IMPORTS become steps, the base itself does not. It is
+	// part of the target and is applied once, as the target builds
+	// it. Applied by itself first it would go in unpatched, and for
+	// an overlay that sets the namespace or a name prefix (the
+	// site-apply-namespaced -> ../site-apply shape) that means
+	// resources under the wrong name or in the wrong namespace.
+	//
+	// The traversal must succeed: if it fails (corrupt kustomization,
 	// permission denied, symlink cycle) the apply might still
 	// succeed but no checks would be discovered, leaving the apply
 	// silently unverified. Treat traversal errors as fatal.
@@ -150,13 +158,16 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				return nil, fmt.Errorf("resolve deps from %s: %w", cueDir, depErr)
 			}
 			for _, s := range depSteps {
+				if s == cueDir && cueDir != absDir {
+					continue // in the target's own tree, see above
+				}
 				if !visited[s] {
 					visited[s] = true
 					steps = append(steps, s)
 				}
 			}
 		}
-		if !contains(steps, absDir) {
+		if !slices.Contains(steps, absDir) {
 			steps = append(steps, absDir)
 		}
 	} else {
@@ -183,10 +194,10 @@ func Run(ctx context.Context, opts Options, logger *zap.Logger) (*Result, error)
 				KustomizeDir: step,
 				DryRun:       opts.DryRun,
 				SkipChecks:   opts.SkipChecks,
-				// Q14: --checks-only must propagate so callers can
-				// verify a whole chain without applying anywhere.
-				// Earlier this field was dropped, so deps re-applied
-				// even when the user only wanted a health check.
+				// --checks-only must propagate so callers can verify
+				// a whole chain without applying anywhere. A dep that
+				// did not get it would be re-applied by what the user
+				// asked for as a health check.
 				ChecksOnly: opts.ChecksOnly,
 				// Selector propagates so a `-l app=foo` run on a
 				// target with deps filters every dep's apply by the

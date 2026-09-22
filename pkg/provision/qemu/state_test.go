@@ -135,7 +135,7 @@ func TestLoadState_VersionMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for stale version")
 	}
-	if !contains(err.Error(), "unsupported state version 99") {
+	if !strings.Contains(err.Error(), "unsupported state version 99") {
 		t.Fatalf("want version error, got %v", err)
 	}
 }
@@ -165,13 +165,4 @@ func TestRemoveState_Idempotent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "x.json")); !os.IsNotExist(err) {
 		t.Fatal("file should have been removed")
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

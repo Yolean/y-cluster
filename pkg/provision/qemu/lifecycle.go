@@ -2,6 +2,7 @@ package qemu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,13 @@ func Pause(cacheDir, name string, logger *zap.Logger) error {
 
 // Resume sends SIGCONT to a paused qemu process. No-op when the
 // process isn't paused.
+//
+// A lifetime deadline that has passed is why the VM was paused
+// (lifetime.onExpiry: pause), and resuming it is the operator asking
+// for more time: the VM gets a fresh budget, as Start gives a VM that
+// expiry stopped. With the expired deadline left in place the next
+// reap would pause it again at once. A deadline still ahead (the
+// operator paused by hand) stays as it is.
 func Resume(cacheDir, name string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -47,44 +55,70 @@ func Resume(cacheDir, name string, logger *zap.Logger) error {
 		return err
 	}
 	logger.Info("resuming qemu VM", zap.String("name", name), zap.Int("pid", pid))
-	return pidSignal(pid, syscall.SIGCONT)
+	if err := pidSignal(pid, syscall.SIGCONT); err != nil {
+		return err
+	}
+	ls, err := loadLifetime(cacheDir, name)
+	if err != nil {
+		logger.Warn("could not read lifetime state on resume", zap.Error(err))
+		return nil
+	}
+	if !ls.Expired() {
+		return nil
+	}
+	deadline, err := armLifetime(cacheDir, name)
+	if err != nil {
+		logger.Warn("could not re-arm lifetime deadline on resume", zap.Error(err))
+		return nil
+	}
+	logger.Info("lifetime armed", zap.Time("expiresAt", deadline))
+	return nil
 }
 
-// Stop gracefully shuts down a running qemu VM. Order:
-//
-//  1. Try to issue `sudo sync; sudo poweroff` over SSH so the
-//     guest's systemd-shutdown sequence flushes k3s/containerd
-//     state cleanly. This was the root cause of "exec format
-//     error" crash loops on the imported side of the appliance
-//     round-trip: qemu's SIGTERM exit (~200ms) drops the guest
-//     pagecache mid-write and containerd's overlayfs snapshot
-//     files end up zero-byte.
-//  2. Wait up to gracefulShutdownGrace for qemu to exit on its
-//     own (the guest's poweroff propagates back through qemu).
-//  3. Fall back to stopVM's existing SIGTERM -> SIGKILL ladder
-//     for the cases where SSH is unreachable (sshd not up yet,
-//     network broken, key changed) or the guest hangs.
-//
-// Disk and state sidecar are preserved so Start can resume.
-// The kubeconfig context is left intact -- consumers who want
-// to "permanently" stop should use Teardown.
+// Stop shuts down a running qemu VM. Disk and state sidecar are
+// preserved so Start can resume. The kubeconfig context is left
+// intact -- consumers who want to "permanently" stop should use
+// Teardown.
 func Stop(cacheDir, name string, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	logger.Info("stopping qemu VM", zap.String("name", name))
+	return shutdownVM(cacheDir, name, logger)
+}
 
+// shutdownVM ends the VM's qemu process as gracefully as the VM
+// allows. Stop and Teardown share it: both leave disks behind that
+// someone boots again (Start, teardown --keep-disk, the DataDisk).
+//
+//  1. SIGCONT. A paused VM (the pause verb, or lifetime.onExpiry:
+//     pause) runs nothing: its guest cannot act on a poweroff, and
+//     qemu does not handle SIGTERM until it is continued, which
+//     would leave SIGKILL as the only step below that works.
+//  2. `sudo sync; sudo poweroff` over SSH so the guest's
+//     systemd-shutdown sequence flushes k3s/containerd state and the
+//     filesystems. qemu's SIGTERM exit (~200ms) is a hard power-off:
+//     it drops the guest pagecache mid-write, which showed up as
+//     zero-byte overlayfs snapshot files ("exec format error" crash
+//     loops on the imported side of the appliance round-trip) and as
+//     silently truncated recent writes on a preserved DataDisk.
+//  3. Wait up to gracefulShutdownGrace for qemu to exit on its own
+//     (the guest's poweroff propagates back through qemu).
+//  4. stopVM's SIGTERM -> SIGKILL ladder for when SSH is unreachable
+//     (sshd not up yet, network broken, key changed) or the guest
+//     hangs.
+func shutdownVM(cacheDir, name string, logger *zap.Logger) error {
 	pidFile := pidFilePath(cacheDir, name)
 	pid, err := readPidFile(pidFile)
 	if err != nil {
-		// No live cluster -- nothing to do. stopVM is idempotent
-		// and handles a missing/stale pidfile by returning nil.
+		// No live VM. stopVM is what knows how to treat a missing,
+		// stale or unreadable pidfile.
 		return stopVM(pidFile, logger)
 	}
 
-	// Best-effort graceful guest shutdown via ssh. Failures here
-	// are logged but not fatal; we always fall through to the
-	// signal ladder below.
+	if err := pidSignal(pid, syscall.SIGCONT); err != nil {
+		logger.Warn("SIGCONT failed", zap.Int("pid", pid), zap.Error(err))
+	}
 	if err := guestPoweroff(cacheDir, name, pid, logger); err != nil {
 		logger.Warn("graceful guest shutdown failed; falling back to qemu signals",
 			zap.Error(err))
@@ -92,7 +126,6 @@ func Stop(cacheDir, name string, logger *zap.Logger) error {
 		_ = os.Remove(pidFile)
 		return nil
 	}
-
 	return stopVM(pidFile, logger)
 }
 
@@ -241,7 +274,7 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		}
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -286,9 +319,16 @@ func pidFilePath(cacheDir, name string) string {
 	return filepath.Join(cacheDir, name+".pid")
 }
 
-// readPidFile parses the qemu pid out of pidFile and verifies the
-// process is alive. Returns os.ErrNotExist when the file isn't
-// there so callers can branch on errors.Is.
+// errStalePidfile marks a pidfile that does not name a running VM:
+// unparseable, the pid is gone, or the pid now belongs to some other
+// process.
+var errStalePidfile = errors.New("stale pidfile")
+
+// readPidFile returns the pid of the running qemu that owns pidFile.
+// It is the only place a pid from disk is trusted; see vmAlive for
+// what that takes. Errors: os.ErrNotExist when there is no pidfile,
+// errStalePidfile when it names no running VM, anything else is a
+// read failure.
 func readPidFile(pidFile string) (int, error) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -296,10 +336,10 @@ func readPidFile(pidFile string) (int, error) {
 	}
 	var pid int
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil {
-		return 0, fmt.Errorf("parse %s: %w", pidFile, err)
+		return 0, fmt.Errorf("%w: parse %s: %v", errStalePidfile, pidFile, err)
 	}
-	if !pidAlive(pid) {
-		return 0, fmt.Errorf("%s: pid %d not alive (cluster stopped?)", pidFile, pid)
+	if !vmAlive(pid, pidFile) {
+		return 0, fmt.Errorf("%w: %s: pid %d is not a running qemu started with this pidfile (cluster stopped?)", errStalePidfile, pidFile, pid)
 	}
 	return pid, nil
 }

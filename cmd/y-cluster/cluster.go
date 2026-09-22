@@ -17,11 +17,11 @@ import (
 //   - With no positional arg, prints the detected backend (one
 //     of: docker, qemu, multipass) on stdout.
 //   - With a positional arg matching the detected backend, prints
-//     "up" and exits 0. Any other arg exits non-zero — the bash
+//     "up" and exits 0. Any other arg exits non-zero -- the bash
 //     equivalent script returned 1 to signal "the asked-about
 //     provider isn't running".
 //
-// --context defaults to "local" — the convention shared with
+// --context defaults to "local" -- the convention shared with
 // ystack and y-cluster's CommonConfig.Context default.
 func detectCmd() *cobra.Command {
 	var contextName string
@@ -30,8 +30,8 @@ func detectCmd() *cobra.Command {
 		Short: "Detect which provisioner serves the cluster behind the kubeconfig context",
 		Long: `Reads the kubeconfig cluster name for --context (default "local") and
 probes each supported backend (docker, qemu, multipass) to find
-which one is running. Prints the backend on stdout, or — when
-called with a positional argument equal to the detected backend —
+which one is running. Prints the backend on stdout, or -- when
+called with a positional argument equal to the detected backend -- 
 prints "up" and exits 0. Any other positional value exits non-zero.
 
 Replaces ystack's y-cluster-local-detect.`,
@@ -88,7 +88,7 @@ func nodeBinaryCmd(name string, run nodeRunFn) *cobra.Command {
   qemu      backend: ssh ystack@<network.bindAddress> sudo k3s ` + name + ` <args>
   multipass backend: multipass exec <vm> -- sudo k3s ` + name + ` <args>
 
-stdin / stdout / stderr are passthrough — pipes work end to end.
+stdin / stdout / stderr are passthrough -- pipes work end to end.
 --context defaults to "local". Use -- to forward flags that
 ` + name + ` itself accepts (e.g. y-cluster ` + name + ` -- --help).`,
 		// We want every positional we get (including unknown

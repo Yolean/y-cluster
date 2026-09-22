@@ -4,10 +4,10 @@
 // # Common vs provider-specific fields
 //
 // Every provider config struct embeds CommonConfig (in this file).
-// The shared fields — provider discriminator, instance name,
-// kubeconfig context, memory, cpus, k3s install settings — keep
+// The shared fields -- provider discriminator, instance name,
+// kubeconfig context, memory, cpus, k3s install settings -- keep
 // their YAML keys identical across providers so a user can switch
-// provider: qemu → provider: docker without renaming anything else
+// provider: qemu -> provider: docker without renaming anything else
 // in the file.
 //
 // Provider-specific fields live on the per-provider struct (qemu.go,
@@ -30,11 +30,14 @@
 //     keys is portable across providers
 package config
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // Provider IDs. Single source of truth for both the per-provider
 // `Validate()` checks and the `enum` constraint on
-// CommonConfig.Provider — schemagen reads AllProviders to build
+// CommonConfig.Provider -- schemagen reads AllProviders to build
 // the enum, and per-provider schema post-processing replaces it
 // with a const constraint.
 const (
@@ -44,10 +47,53 @@ const (
 	ProviderHetzner   = "hetzner"
 )
 
+// ProviderConfig is one provider's y-cluster-provision.yaml, as
+// LoadProvision returns it. The concrete types differ in their own
+// fields; what every one of them has comes through Common.
+type ProviderConfig interface {
+	// Common returns the fields every provider shares. All provider
+	// config types get it by embedding CommonConfig.
+	Common() *CommonConfig
+	SetDir(dir string)
+	ApplyDefaults()
+	Validate() error
+}
+
+// Common implements ProviderConfig for every type that embeds
+// CommonConfig.
+func (c *CommonConfig) Common() *CommonConfig { return c }
+
+// providerConfigs is where a provider is registered: its name and a
+// constructor for its config type. LoadProvision dispatches through
+// it, and AllProviders and schemagen's list of schemas derive from
+// it, so a provider is either known to all of them or to none.
+var providerConfigs = map[string]func() ProviderConfig{
+	ProviderQEMU:      func() ProviderConfig { return &QEMUConfig{} },
+	ProviderDocker:    func() ProviderConfig { return &DockerConfig{} },
+	ProviderMultipass: func() ProviderConfig { return &MultipassConfig{} },
+	ProviderHetzner:   func() ProviderConfig { return &HetznerConfig{} },
+}
+
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
 // supported values.
-var AllProviders = []string{ProviderDocker, ProviderHetzner, ProviderMultipass, ProviderQEMU}
+var AllProviders = func() []string {
+	names := make([]string, 0, len(providerConfigs))
+	for name := range providerConfigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}()
+
+// NewProviderConfig returns an empty config of the named provider's
+// type, or nil for a name that is not registered.
+func NewProviderConfig(provider string) ProviderConfig {
+	if newConfig, ok := providerConfigs[provider]; ok {
+		return newConfig()
+	}
+	return nil
+}
 
 // CommonConfig is the portable subset of `y-cluster-provision.yaml`.
 // Every provider config embeds it via `yaml:",inline"` so the keys
@@ -84,9 +130,8 @@ type CommonConfig struct {
 // instance start; locally the deadline is recomputed on each
 // `y-cluster start`.
 //
-// MaxRun empty (or "0") disables the whole feature -- a cluster
-// with no lifetime runs until manually stopped, the historical
-// behaviour.
+// MaxRun empty (or "0") disables the whole feature: a cluster
+// with no lifetime runs until manually stopped.
 type LifetimeConfig struct {
 	// MaxRun is the wall-clock budget as a Go duration string
 	// (e.g. "8h", "90m", "24h"). Empty disables. Validated to
@@ -113,12 +158,6 @@ const (
 // AllOnExpiry is the canonical OnExpiry value list, used by
 // validation error messages.
 var AllOnExpiry = []string{OnExpiryStop, OnExpiryPause, OnExpiryTeardown}
-
-// LifetimePolicy returns the configured lifetime. Promoted to every
-// provider config via CommonConfig embedding, so a caller holding an
-// `any` from LoadProvision can read the budget without switching on
-// the concrete provider type.
-func (c CommonConfig) LifetimePolicy() LifetimeConfig { return c.Lifetime }
 
 // Enabled reports whether a lifetime budget is configured.
 func (l LifetimeConfig) Enabled() bool {
@@ -218,8 +257,11 @@ type GatewayConfig struct {
 	// consumers that hardcoded that name in pre-v0.4 cluster
 	// configs (the ystack gateway-v4 surface, for one).
 	//
-	// Ignored when Skip is true.
-	ClassName string `yaml:"className,omitempty" json:"className,omitempty" jsonschema:"default=y-cluster,description=GatewayClass name. Consumer Gateway resources reference this via gatewayClassName. Ignored when skip is true."`
+	// Ignored when Skip is true. The default is applied in
+	// applyGatewayDefaults and deliberately not as a tag default:
+	// the tag pass knows nothing about Skip and would fill it in
+	// for a config that asked for no install at all.
+	ClassName string `yaml:"className,omitempty" json:"className,omitempty" jsonschema:"description=GatewayClass name. Default y-cluster. Consumer Gateway resources reference this via gatewayClassName. Ignored and left empty when skip is true."`
 
 	// Resources tunes resource requests on the EG controller pod
 	// and the per-Gateway envoy proxy pod. Defaults target a
@@ -290,7 +332,7 @@ func (c CommonConfig) EffectiveGatewayClassName() string {
 // providers: qemu uses it for SLIRP -netdev hostfwd, docker uses
 // it for container PortBindings.
 type PortForward struct {
-	Host  string `yaml:"host"  json:"host"  jsonschema:"description=Host port. Empty string lets the provider pick (qemu: SLIRP-assigned; docker: docker-assigned)."`
+	Host  string `yaml:"host"  json:"host"  jsonschema:"description=Host port. docker: an empty string lets docker pick one. qemu: required; qemu rejects a forward without a host port."`
 	Guest string `yaml:"guest" json:"guest" jsonschema:"description=Guest port to forward to."`
 }
 
@@ -332,7 +374,7 @@ func (c CommonConfig) HostAPIPort() string {
 }
 
 // K3sConfig controls the k3s install. The container image is
-// **not** a config field — it's derived from Version at runtime
+// **not** a config field -- it's derived from Version at runtime
 // (MirrorImage / UpstreamImage in defaults.go) so a Version bump
 // is the only edit required to switch k3s versions. The docker
 // provisioner additionally probes the mirror at provision time and
@@ -345,7 +387,7 @@ func (c CommonConfig) HostAPIPort() string {
 // flows to: GHA mirror, schema default, runtime default.
 type K3sConfig struct {
 	Version string `yaml:"version,omitempty" json:"version,omitempty" jsonschema:"default=__K3S_TAG__,description=k3s release version e.g. vX.Y.Z+k3sN."`
-	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap pre-loads images on the node; script downloads via get.k3s.io. qemu only."`
+	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and images from the host cache to the node; script lets the node download via get.k3s.io. Default airgap on qemu and script on multipass; hetzner accepts script only; docker runs the k3s image and ignores this."`
 }
 
 // applyCommonDefaults fills defaults that the reflective tag-default
@@ -405,7 +447,49 @@ func (c *CommonConfig) validateCommon(expected string) error {
 	if err := c.Lifetime.validate(); err != nil {
 		return err
 	}
+	// Memory and CPUs are strings because providers pass them on as
+	// text, but every provider needs a whole number: qemu -m / -smp,
+	// docker's byte and nano-cpu arithmetic, multipass --memory NM.
+	if _, err := positiveInt(c.Memory); err != nil {
+		return errInvalid("memory %q must be a positive whole number of MB", c.Memory)
+	}
+	if _, err := positiveInt(c.CPUs); err != nil {
+		return errInvalid("cpus %q must be a positive whole number", c.CPUs)
+	}
+	switch c.Storage.ReclaimPolicy {
+	case "Retain", "Delete":
+	default:
+		return errInvalid("storage.reclaimPolicy must be Retain or Delete, got %q", c.Storage.ReclaimPolicy)
+	}
+	return c.validatePortForwards()
+}
+
+// validatePortForwards checks the forwards as far as every provider
+// agrees. An empty host port is left to the provider: docker assigns
+// one, qemu cannot.
+func (c *CommonConfig) validatePortForwards() error {
+	seenHost := map[string]bool{}
+	for i, pf := range c.PortForwards {
+		if !validPort(pf.Guest) {
+			return errInvalid("portForwards[%d].guest %q must be a port number (1-65535)", i, pf.Guest)
+		}
+		if pf.Host == "" {
+			continue
+		}
+		if !validPort(pf.Host) {
+			return errInvalid("portForwards[%d].host %q must be a port number (1-65535)", i, pf.Host)
+		}
+		if seenHost[pf.Host] {
+			return errInvalid("portForwards: host port %s is forwarded twice", pf.Host)
+		}
+		seenHost[pf.Host] = true
+	}
 	return nil
+}
+
+func validPort(s string) bool {
+	n, err := positiveInt(s)
+	return err == nil && n <= 65535
 }
 
 // validate enforces the lifetime invariants. A disabled lifetime

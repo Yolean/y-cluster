@@ -89,7 +89,7 @@ spec:
 }
 
 // TestListYAML_NonPodKindsIgnored guards against accidentally
-// pulling out images from places that aren't a real PodSpec —
+// pulling out images from places that aren't a real PodSpec --
 // e.g. a ConfigMap that mentions an image name in its body.
 func TestListYAML_NonPodKindsIgnored(t *testing.T) {
 	got := mustList(t, `apiVersion: v1

@@ -43,7 +43,7 @@ func TestQemu_Lifetime(t *testing.T) {
 	cfg := e2eQEMURuntime()
 	cfg.Name = "y-cluster-e2e-lifetime"
 	cfg.Context = "y-cluster-e2e-lifetime"
-	cfg.CacheDir = t.TempDir()
+	cfg.CacheDir = e2eQEMUCacheDir(t)
 	cfg.Memory = "4096"
 	cfg.CPUs = "2"
 	cfg.SSHPort = "2227"

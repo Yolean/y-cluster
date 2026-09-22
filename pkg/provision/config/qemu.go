@@ -187,8 +187,16 @@ func (c *QEMUConfig) validateUserNetwork() error {
 	if err := c.requireHostAPIPort(); err != nil {
 		return err
 	}
-	if c.SSHPort == "" {
-		return errInvalid("sshPort must not be empty after defaults")
+	if !validPort(c.SSHPort) {
+		return errInvalid("sshPort %q must be a port number (1-65535)", c.SSHPort)
+	}
+	for i, pf := range c.PortForwards {
+		if pf.Host == "" {
+			return errInvalid("portForwards[%d].host is empty; qemu cannot assign a host port itself, name one", i)
+		}
+		if pf.Host == c.SSHPort {
+			return errInvalid("portForwards[%d].host %s is also sshPort", i, pf.Host)
+		}
 	}
 	if !isIPv4Literal(c.Network.BindAddress) {
 		return errInvalid("network.bindAddress must be an IPv4 address such as 127.0.0.1 or 0.0.0.0, got %q", c.Network.BindAddress)

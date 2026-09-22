@@ -88,12 +88,12 @@ func fetchGatewayClass(ctx context.Context, kubectlContext string) (*GatewayClas
 type rawGateway struct {
 	Metadata rawMetadata `json:"metadata"`
 	Spec     struct {
-		GatewayClassName string         `json:"gatewayClassName"`
-		Listeners        []rawListener  `json:"listeners"`
+		GatewayClassName string        `json:"gatewayClassName"`
+		Listeners        []rawListener `json:"listeners"`
 	} `json:"spec"`
 	Status struct {
-		Conditions []rawCondition         `json:"conditions"`
-		Listeners  []rawListenerStatus    `json:"listeners"`
+		Conditions []rawCondition      `json:"conditions"`
+		Listeners  []rawListenerStatus `json:"listeners"`
 	} `json:"status"`
 }
 
@@ -268,7 +268,7 @@ func fetchGRPCRoutes(ctx context.Context, kubectlContext string, out *State) err
 // === Envoy Gateway extension policies ===
 
 type rawPolicy struct {
-	Metadata rawMetadata `json:"metadata"`
+	Metadata rawMetadata     `json:"metadata"`
 	Spec     json.RawMessage `json:"spec"`
 	Status   struct {
 		Ancestors []rawPolicyAncestorStatus `json:"ancestors"`

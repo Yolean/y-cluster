@@ -2,7 +2,7 @@
 // Multipass-managed Ubuntu VM. Multipass uses the system's native
 // hypervisor (Hyperkit / QEMU+HVF on macOS, QEMU+KVM on Linux) and
 // integrates with the host network stack so the VM gets its own
-// host-routable IP — no port forwarding, no host loopback tunnels.
+// host-routable IP -- no port forwarding, no host loopback tunnels.
 //
 // macOS is the primary target: the qemu provisioner needs /dev/kvm
 // (Linux only) and the docker provisioner trades the real-Linux-kernel
@@ -11,7 +11,6 @@
 package multipass
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -26,6 +25,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
+	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 )
@@ -163,7 +163,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	c.vmIP = ip
 	logger.Info("multipass VM up", zap.String("name", cfg.Name), zap.String("ip", ip))
 
-	if err := c.writeRegistries(ctx); err != nil {
+	if err := registries.WriteToNode(ctx, c.NodeExec, c.cfg.Registries, c.logger); err != nil {
 		return nil, fmt.Errorf("write registries: %w", err)
 	}
 
@@ -279,7 +279,7 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 
 	kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger)
 	if err == nil {
-		kubecfg.CleanupTeardown()
+		kubecfg.CleanupStale()
 	}
 	return nil
 }
@@ -380,30 +380,6 @@ func (c *Cluster) waitForVMIP(ctx context.Context) (string, error) {
 	}
 }
 
-// writeRegistries renders the configured registries.yaml and
-// stages it in the VM at registries.Path. Empty config is a no-op
-// (containerd then falls back to its defaults).
-func (c *Cluster) writeRegistries(ctx context.Context) error {
-	body, err := registries.Marshal(c.cfg.Registries)
-	if err != nil {
-		return err
-	}
-	if body == nil {
-		return nil
-	}
-	c.logger.Info("writing registries.yaml",
-		zap.String("path", registries.Path),
-		zap.Int("mirrors", len(c.cfg.Registries.Mirrors)),
-		zap.Int("configs", len(c.cfg.Registries.Configs)),
-	)
-	cmd := "sudo install -d -m 0755 /etc/rancher/k3s && sudo install -m 0600 /dev/stdin " + registries.Path
-	out, err := c.NodeExec(ctx, cmd, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("write %s: %s: %w", registries.Path, out, err)
-	}
-	return nil
-}
-
 // extractKubeconfig reads the k3s-generated kubeconfig and rewrites
 // the embedded server URL to point at the VM's IP. k3s's installer
 // sets `server: https://127.0.0.1:6443` (loopback inside the VM);
@@ -411,12 +387,8 @@ func (c *Cluster) writeRegistries(ctx context.Context) error {
 // forward in this topology. The tls-san we passed in INSTALL_K3S_EXEC
 // puts the VM IP in the apiserver cert so the rewrite verifies.
 func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
-	out, err := c.NodeExec(ctx, "sudo cat /etc/rancher/k3s/k3s.yaml", nil)
-	if err != nil {
-		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
-	}
 	if c.vmIP == "" {
 		return nil, fmt.Errorf("VM IP not resolved before extracting kubeconfig")
 	}
-	return bytes.ReplaceAll(out, []byte("127.0.0.1:6443"), []byte(c.vmIP+":6443")), nil
+	return k3s.ReadKubeconfig(ctx, c.NodeExec, c.vmIP+":6443")
 }

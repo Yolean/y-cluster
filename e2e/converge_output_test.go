@@ -26,24 +26,24 @@ import (
 // stdout (you can't capture os.Stdout from inside the test binary
 // because pkg/yconverge writes there directly). Three assertions:
 //
-//   1. The plain-apply step (no label) produces
-//      "configmap/<name> created" -- the verb kubectl client-side
-//      apply emits on first run.
-//   2. The serverside-force step's resource produces
-//      "configmap/<name> serverside-applied" -- distinct verb
-//      because that step uses --server-side.
-//   3. "No resources found" must NOT appear: kubectl delete
-//      prints that to stdout when the replace-mode selector
-//      matches nothing (a fresh cluster, no replace label in the
-//      fixture), and the wrapper's stdout-suppress list catches
-//      it so a default yconverge run doesn't surface that noise.
+//  1. The plain-apply step (no label) produces
+//     "configmap/<name> created" -- the verb kubectl client-side
+//     apply emits on first run.
+//  2. The serverside-force step's resource produces
+//     "configmap/<name> serverside-applied" -- distinct verb
+//     because that step uses --server-side.
+//  3. "No resources found" must NOT appear: kubectl delete
+//     prints that to stdout when the replace-mode selector
+//     matches nothing (a fresh cluster, no replace label in the
+//     fixture), and the wrapper's stdout-suppress list catches
+//     it so a default yconverge run doesn't surface that noise.
 //
 // If any assertion fails, the wrapper has regressed: either the
 // per-resource lines are being captured-and-dropped, or the
 // suppression for empty-selector-match lines has loosened.
 func TestConvergeMode_OutputForwardsKubectlLines(t *testing.T) {
 	setupCluster(t)
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "k")
 	plainName := "convergeout-plain"

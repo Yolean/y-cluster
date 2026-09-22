@@ -22,7 +22,7 @@ import (
 // cache` later resolves.
 //
 // Synthetic images are sub-KB and don't depend on the network
-// being available — useful when cluster tests need to push
+// being available -- useful when cluster tests need to push
 // something but shouldn't pull busybox / nginx every run.
 func PushFixtureImage(t *testing.T, reg *Registry, repo, tag string) (digestRef string, manifestDigest v1.Hash) {
 	t.Helper()
