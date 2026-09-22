@@ -3,3 +3,8 @@
 
 # operator-local defaults sourced by the appliance scripts
 .env
+
+# go build ./cmd/<name> at the repo root writes the binary here
+/y-cluster
+/schemagen
+/kustomize-traverse
