@@ -24,9 +24,9 @@ const stateVersion = 1
 // disk already has the cluster-init user and SSH keys).
 //
 // Decoupled from Config: Config is a runtime struct, this is the
-// on-disk shape. Kubeconfig (env-derived) and Registries / Gateway
-// (cluster-state, not launch-state) are deliberately omitted --
-// they live inside the cluster on the qcow2 disk now.
+// on-disk shape. Every Config field is either carried here or named
+// with its reason in configFieldsNotPersisted (state_test.go); the
+// round-trip test fails for a field that is neither.
 type savedState struct {
 	Version      int           `json:"version"`
 	Name         string        `json:"name"`
@@ -39,10 +39,23 @@ type savedState struct {
 	CacheDir     string        `json:"cacheDir"`
 	K3s          K3s           `json:"k3s"`
 
-	// Lifetime fields are additive (added after stateVersion 1)
-	// and all omitempty, so an old sidecar without them decodes
-	// cleanly to "no lifetime" and an old binary ignores them.
-	// They are NOT a reason to bump stateVersion.
+	// BindAddress is absent from sidecars written before the option
+	// existed; those VMs had their forwards on the wildcard, which is
+	// what an empty value still renders.
+	BindAddress string `json:"bindAddress,omitempty"`
+
+	// Tap is present for network.mode tap and absent for user mode.
+	Tap *TapNetwork `json:"tap,omitempty"`
+
+	// DataDisk is launch state: a start that does not attach it
+	// boots with /data/yolean on the boot disk (the fstab entry is
+	// nofail), silently splitting the cluster's data.
+	DataDisk string `json:"dataDisk,omitempty"`
+
+	// The fields below are optional and omitempty, so a sidecar
+	// written without them decodes to their zero value and a binary
+	// that does not know them ignores them. Fields of that kind do
+	// not need a stateVersion bump.
 	//
 	// Lifetime/OnExpiry are the policy copied from config at
 	// provision; ExpiresAt is the absolute deadline, anchored to
@@ -72,9 +85,12 @@ func saveState(cfg Config) error {
 		CPUs:         cfg.CPUs,
 		SSHPort:      cfg.SSHPort,
 		PortForwards: cfg.PortForwards,
+		BindAddress:  cfg.BindAddress,
+		Tap:          cfg.Tap,
 		Context:      cfg.Context,
 		CacheDir:     cfg.CacheDir,
 		K3s:          cfg.K3s,
+		DataDisk:     cfg.DataDisk,
 		Lifetime:     cfg.Lifetime,
 		OnExpiry:     cfg.OnExpiry,
 	}
@@ -137,10 +153,13 @@ func loadState(cacheDir, name string) (Config, error) {
 		CPUs:         s.CPUs,
 		SSHPort:      s.SSHPort,
 		PortForwards: s.PortForwards,
+		BindAddress:  s.BindAddress,
+		Tap:          s.Tap,
 		Context:      s.Context,
 		CacheDir:     s.CacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),
 		K3s:          s.K3s,
+		DataDisk:     s.DataDisk,
 		Lifetime:     s.Lifetime,
 		OnExpiry:     s.OnExpiry,
 	}, nil

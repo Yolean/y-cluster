@@ -126,7 +126,7 @@ func (c *Cluster) MergeKubeconfig(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	mgr, err := kubeconfig.New(c.cfg.Context, c.cfg.Context, c.logger)
+	mgr, err := kubeconfig.FromEnv(c.cfg.Context, c.cfg.Context, c.logger)
 	if err != nil {
 		return fmt.Errorf("kubeconfig manager: %w", err)
 	}

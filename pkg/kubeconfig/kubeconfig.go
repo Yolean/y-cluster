@@ -18,7 +18,7 @@ import (
 
 // Manager handles kubeconfig operations for a single cluster context.
 type Manager struct {
-	// Path is the kubeconfig file path (from KUBECONFIG env).
+	// Path is the kubeconfig file path.
 	Path string
 	// Context is the kubectl context name (e.g. "local").
 	Context string
@@ -28,12 +28,13 @@ type Manager struct {
 	logger *zap.Logger
 }
 
-// New creates a Manager from the KUBECONFIG environment variable.
-// Returns an error if KUBECONFIG is not set.
-func New(contextName, clusterName string, logger *zap.Logger) (*Manager, error) {
-	path := os.Getenv("KUBECONFIG")
+// New creates a Manager for the kubeconfig file at path. An empty
+// path is an error rather than a fallback to the environment, so a
+// caller (or a test) that did not name a file can never modify the
+// operator's real kubeconfig.
+func New(path, contextName, clusterName string, logger *zap.Logger) (*Manager, error) {
 	if path == "" {
-		return nil, fmt.Errorf("KUBECONFIG env must be set")
+		return nil, fmt.Errorf("kubeconfig path is empty; set KUBECONFIG")
 	}
 	if logger == nil {
 		logger = zap.NewNop()
@@ -44,6 +45,12 @@ func New(contextName, clusterName string, logger *zap.Logger) (*Manager, error) 
 		ClusterName: clusterName,
 		logger:      logger,
 	}, nil
+}
+
+// FromEnv is New with the path taken from $KUBECONFIG, for
+// provisioners whose config carries no kubeconfig path of its own.
+func FromEnv(contextName, clusterName string, logger *zap.Logger) (*Manager, error) {
+	return New(os.Getenv("KUBECONFIG"), contextName, clusterName, logger)
 }
 
 // CleanupStale removes any existing context, cluster, and user

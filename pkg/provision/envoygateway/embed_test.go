@@ -3,6 +3,8 @@ package envoygateway
 import (
 	"strings"
 	"testing"
+
+	"sigs.k8s.io/yaml"
 )
 
 // TestGatewayClassYAML_NoHintIP guards the cloud / no-host-routing
@@ -134,5 +136,28 @@ func TestControllerResourcesPatch_RequestsOnly(t *testing.T) {
 	}
 	if strings.Contains(got, "image:") {
 		t.Errorf("patch must not claim image (would fight upstream owner):\n%s", got)
+	}
+}
+
+// Workloads seeing the real client address rests on this field; see
+// EnvoyProxyYAML. Parsed rather than substring-matched so the field
+// cannot silently move to a path Envoy Gateway ignores.
+func TestEnvoyProxyYAML_ExternalTrafficPolicyLocal(t *testing.T) {
+	var cr struct {
+		Spec struct {
+			Provider struct {
+				Kubernetes struct {
+					EnvoyService struct {
+						ExternalTrafficPolicy string `json:"externalTrafficPolicy"`
+					} `json:"envoyService"`
+				} `json:"kubernetes"`
+			} `json:"provider"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi"), &cr); err != nil {
+		t.Fatal(err)
+	}
+	if got := cr.Spec.Provider.Kubernetes.EnvoyService.ExternalTrafficPolicy; got != "Local" {
+		t.Fatalf("spec.provider.kubernetes.envoyService.externalTrafficPolicy = %q, want Local", got)
 	}
 }

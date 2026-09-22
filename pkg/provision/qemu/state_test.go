@@ -3,58 +3,123 @@ package qemu
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestSaveLoadState_Roundtrip(t *testing.T) {
+// configFieldsNotPersisted names every Config field the sidecar
+// deliberately leaves out, with the reason. loadState must return
+// the zero value for them, except Kubeconfig which it re-reads from
+// the environment.
+var configFieldsNotPersisted = map[string]string{
+	"Kubeconfig":   "environmental; re-resolved from $KUBECONFIG on load",
+	"Registries":   "cluster state; written into the guest at provision",
+	"Gateway":      "cluster state; installed into the cluster at provision",
+	"Storage":      "cluster state; installed into the cluster at provision",
+	"DataDiskSize": "only used to create a missing data disk at provision",
+}
+
+// fillNonZero sets every string reachable from v to a distinct
+// non-zero value, recursing into structs and giving slices of
+// structs one filled element.
+func fillNonZero(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("x-" + path)
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			fillNonZero(t, v.Field(i), path+"."+v.Type().Field(i).Name)
+		}
+	case reflect.Slice:
+		elem := reflect.New(v.Type().Elem()).Elem()
+		fillNonZero(t, elem, path+"[0]")
+		v.Set(reflect.Append(v, elem))
+	case reflect.Ptr:
+		v.Set(reflect.New(v.Type().Elem()))
+		fillNonZero(t, v.Elem(), path)
+	case reflect.Map, reflect.Interface:
+		// Left at zero. A persisted field of this kind fails the
+		// round trip below, which is the prompt to teach this
+		// helper about it.
+	default:
+		t.Fatalf("fillNonZero: unhandled kind %s at %s", v.Kind(), path)
+	}
+}
+
+// TestSaveLoadState_RoundtripCoversEveryConfigField is the guard
+// against a Config field that start silently loses: a field added to
+// Config has to be persisted or listed in configFieldsNotPersisted.
+func TestSaveLoadState_RoundtripCoversEveryConfigField(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("KUBECONFIG", "/path/to/kubeconfig")
 
-	cfg := Config{
-		Name:     "y-cluster-test",
-		DiskSize: "20G",
-		Memory:   "8192",
-		CPUs:     "4",
-		SSHPort:  "2222",
-		PortForwards: []PortForward{
-			{Host: "26443", Guest: "6443"},
-			{Host: "8080", Guest: "80"},
-		},
-		Context:    "local",
-		CacheDir:   dir,
-		Kubeconfig: "/path/to/kubeconfig",
-		K3s:        K3s{Version: "v1.35.4+k3s1", Install: "airgap"},
-	}
+	var cfg Config
+	fillNonZero(t, reflect.ValueOf(&cfg).Elem(), "Config")
+	cfg.CacheDir = dir
 	if err := saveState(cfg); err != nil {
 		t.Fatalf("saveState: %v", err)
 	}
-
 	got, err := loadState(dir, cfg.Name)
 	if err != nil {
 		t.Fatalf("loadState: %v", err)
 	}
-	for _, c := range []struct{ name, got, want string }{
-		{"Name", got.Name, cfg.Name},
-		{"DiskSize", got.DiskSize, cfg.DiskSize},
-		{"Memory", got.Memory, cfg.Memory},
-		{"CPUs", got.CPUs, cfg.CPUs},
-		{"SSHPort", got.SSHPort, cfg.SSHPort},
-		{"Context", got.Context, cfg.Context},
-		{"CacheDir", got.CacheDir, cfg.CacheDir},
-		{"K3s.Version", got.K3s.Version, cfg.K3s.Version},
-		{"K3s.Install", got.K3s.Install, cfg.K3s.Install},
-		{"Kubeconfig", got.Kubeconfig, "/path/to/kubeconfig"},
-	} {
-		if c.got != c.want {
-			t.Errorf("%s: got %q, want %q", c.name, c.got, c.want)
+
+	want, have := reflect.ValueOf(cfg), reflect.ValueOf(got)
+	for i := 0; i < want.NumField(); i++ {
+		name := want.Type().Field(i).Name
+		w, h := want.Field(i).Interface(), have.Field(i).Interface()
+		if _, skip := configFieldsNotPersisted[name]; skip {
+			if name == "Kubeconfig" {
+				if h != "/path/to/kubeconfig" {
+					t.Errorf("Kubeconfig: got %v, want the $KUBECONFIG value", h)
+				}
+				continue
+			}
+			if !reflect.ValueOf(h).IsZero() {
+				t.Errorf("%s is listed as not persisted but came back as %v", name, h)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(w, h) {
+			t.Errorf("Config.%s does not survive stop/start: saved %v, loaded %v.\n"+
+				"Persist it in savedState (saveState AND loadState), or add it to configFieldsNotPersisted with the reason.", name, w, h)
 		}
 	}
-	if len(got.PortForwards) != 2 {
-		t.Fatalf("PortForwards length: got %d, want 2", len(got.PortForwards))
+	for name := range configFieldsNotPersisted {
+		if _, ok := want.Type().FieldByName(name); !ok {
+			t.Errorf("configFieldsNotPersisted names %q, which is not a Config field", name)
+		}
 	}
-	if got.PortForwards[0] != cfg.PortForwards[0] || got.PortForwards[1] != cfg.PortForwards[1] {
-		t.Fatalf("PortForwards mismatch: got %v, want %v", got.PortForwards, cfg.PortForwards)
+}
+
+func TestStartDisks(t *testing.T) {
+	dataDisk := filepath.Join(t.TempDir(), "data.qcow2")
+	if err := os.WriteFile(dataDisk, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
+
+	t.Run("no data disk: extras only", func(t *testing.T) {
+		got, err := startDisks(Config{}, []string{"/x.qcow2"})
+		if err != nil || !reflect.DeepEqual(got, []string{"/x.qcow2"}) {
+			t.Fatalf("got %v, %v", got, err)
+		}
+	})
+	t.Run("data disk keeps its provision-time slot, before extras", func(t *testing.T) {
+		got, err := startDisks(Config{DataDisk: dataDisk}, []string{"/x.qcow2"})
+		if err != nil || !reflect.DeepEqual(got, []string{dataDisk, "/x.qcow2"}) {
+			t.Fatalf("got %v, %v", got, err)
+		}
+	})
+	t.Run("missing data disk refuses to start", func(t *testing.T) {
+		_, err := startDisks(Config{DataDisk: filepath.Join(t.TempDir(), "gone.qcow2")}, nil)
+		if err == nil || !strings.Contains(err.Error(), "must not start without it") {
+			t.Fatalf("want a refusal, got %v", err)
+		}
+	})
 }
 
 // TestLoadState_VersionMismatch covers the forward-compat guard:

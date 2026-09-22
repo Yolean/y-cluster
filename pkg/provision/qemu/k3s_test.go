@@ -25,38 +25,15 @@ func TestURLEncodeK3sVersion(t *testing.T) {
 
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"plain":     "'plain'",
-		"with sp":   "'with sp'",
-		"a'b":       `'a'\''b'`,
+		"plain":                       "'plain'",
+		"with sp":                     "'with sp'",
+		"a'b":                         `'a'\''b'`,
 		"--write-kubeconfig-mode=644": "'--write-kubeconfig-mode=644'",
 	}
 	for in, want := range cases {
 		if got := shellQuote(in); got != want {
 			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-func TestHostAPIPort(t *testing.T) {
-	c := Config{PortForwards: []PortForward{
-		{Host: "8443", Guest: "443"},
-		{Host: "26443", Guest: "6443"},
-		{Host: "8080", Guest: "80"},
-	}}
-	if got := c.hostAPIPort(); got != "26443" {
-		t.Fatalf("hostAPIPort: %q", got)
-	}
-
-	empty := Config{}
-	if got := empty.hostAPIPort(); got != "" {
-		t.Fatalf("empty hostAPIPort: %q", got)
-	}
-
-	withoutAPI := Config{PortForwards: []PortForward{
-		{Host: "80", Guest: "80"},
-	}}
-	if got := withoutAPI.hostAPIPort(); got != "" {
-		t.Fatalf("missing 6443: %q", got)
 	}
 }
 
@@ -102,26 +79,12 @@ func TestDownloadFile_Non200(t *testing.T) {
 	}
 }
 
-// TestExtractKubeconfig_RewriteServerURL exercises the URL rewrite
-// without an actual VM. We can't call the real Cluster.extractKubeconfig
-// (which SSHes in), but the same byte-replace logic is the part we
-// care about preserving across refactors -- spelled out here.
-func TestExtractKubeconfig_RewriteServerURL(t *testing.T) {
-	// Sample kubeconfig snippet as k3s writes it.
-	raw := []byte(strings.Join([]string{
-		"apiVersion: v1",
-		"clusters:",
-		"- cluster:",
-		"    server: https://127.0.0.1:6443",
-		"  name: default",
-		"",
-	}, "\n"))
-	hostPort := "26443"
-	got := strings.ReplaceAll(string(raw), "127.0.0.1:6443", "127.0.0.1:"+hostPort)
-	if !strings.Contains(got, "127.0.0.1:26443") {
-		t.Fatalf("rewrite missing: %q", got)
-	}
-	if strings.Contains(got, "127.0.0.1:6443") {
-		t.Fatalf("original port still present: %q", got)
+// "k3s ready" has to mean the apiserver answers, also on a disk whose
+// kubeconfig file already exists from an earlier boot.
+func TestK3sReadyProbe_AsksTheAPIServer(t *testing.T) {
+	for _, want := range []string{"test -s /etc/rancher/k3s/k3s.yaml", "k3s kubectl get --raw=/readyz"} {
+		if !strings.Contains(k3sReadyProbe, want) {
+			t.Errorf("probe lacks %q: %s", want, k3sReadyProbe)
+		}
 	}
 }

@@ -9,6 +9,7 @@ package qemu
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -52,13 +53,19 @@ type Config struct {
 	CPUs         string
 	SSHPort      string
 	PortForwards []PortForward
-	Context      string
-	CacheDir     string
-	Kubeconfig   string
-	K3s          K3s
-	Registries   config.Registries
-	Gateway      config.GatewayConfig
-	Storage      config.StorageConfig
+	// BindAddress is the IPv4 address the ssh and port forwards
+	// listen on. Empty only for state written before the option
+	// existed, when qemu bound the wildcard.
+	BindAddress string
+	// Tap is set in network.mode tap and nil in user mode.
+	Tap        *TapNetwork
+	Context    string
+	CacheDir   string
+	Kubeconfig string
+	K3s        K3s
+	Registries config.Registries
+	Gateway    config.GatewayConfig
+	Storage    config.StorageConfig
 
 	// DataDisk is the operator-owned external qcow2 attached as a
 	// labeled `y-cluster-data` volume at /data/yolean. Empty means
@@ -100,35 +107,6 @@ func preflightHostPorts(c Config) []string {
 		}
 	}
 	return ports
-}
-
-// hostAPIPort scans the configured port forwards and returns the
-// host-side port that maps to guest 6443. Empty string means no
-// such forward is configured -- in which case Provision can't
-// reach the k3s API from the host and aborts.
-func (c Config) hostAPIPort() string {
-	for _, pf := range c.PortForwards {
-		if pf.Guest == "6443" {
-			return pf.Host
-		}
-	}
-	return ""
-}
-
-// hostRoutableIP returns the host-side IP at which the host reaches
-// the cluster's HTTP ingress. Same derivation as
-// config.CommonConfig.HostRoutableIP -- duplicated here because the
-// runtime Config already carries a translated PortForwards slice
-// and would otherwise need a back-reference to the on-disk config.
-// Empty string means no host-side override; the call site uses it
-// as the DNSHintIP option, which an empty value omits.
-func (c Config) hostRoutableIP() string {
-	for _, pf := range c.PortForwards {
-		if pf.Guest == "80" {
-			return "127.0.0.1"
-		}
-	}
-	return ""
 }
 
 // FromConfig translates the on-disk QEMUConfig (already
@@ -173,6 +151,8 @@ func FromConfig(c *config.QEMUConfig) Config {
 		CPUs:         c.CPUs,
 		SSHPort:      c.SSHPort,
 		PortForwards: pfs,
+		BindAddress:  c.Network.BindAddress,
+		Tap:          tapFromConfig(c),
 		Context:      c.Context,
 		CacheDir:     cacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),
@@ -243,18 +223,24 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// silently clobber). Fail with the full list of conflicts so
 	// the user fixes them in one config edit, not three.
 	pf := provision.Preflight{
-		HostPorts:      preflightHostPorts(cfg),
-		PortBinder:     provision.PortBinderSelf,
-		ContextName:    cfg.Context,
-		ContextCluster: clusterName(cfg.Name),
-		KubeconfigPath: cfg.Kubeconfig,
+		HostPorts:       preflightHostPorts(cfg),
+		HostBindAddress: cfg.BindAddress,
+		PortBinder:      provision.PortBinderSelf,
+		ContextName:     cfg.Context,
+		ContextCluster:  clusterName(cfg.Name),
+		KubeconfigPath:  cfg.Kubeconfig,
 	}
 	if err := pf.Run(); err != nil {
 		return nil, err
 	}
+	if cfg.Tap != nil {
+		if err := checkTap(*cfg.Tap, sysTapHost{}); err != nil {
+			return nil, err
+		}
+	}
 
 	// Initialize kubeconfig manager early — validates KUBECONFIG env
-	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +396,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 
 	// Install k3s. Method (script vs airgap) and version come from
 	// the user's QEMUConfig.K3s (defaulted by the config package).
-	if cfg.hostAPIPort() == "" {
+	if cfg.endpoints().APIPort == "" {
 		return nil, fmt.Errorf("portForwards must include a guest:6443 entry to reach k3s from the host")
 	}
 	if err := c.installK3s(ctx); err != nil {
@@ -455,7 +441,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:          cfg.Context,
 			GatewayClassName:     cfg.Gateway.ClassName,
-			DNSHintIP:            cfg.hostRoutableIP(),
+			DNSHintIP:            cfg.endpoints().IngressIP,
 			Logger:               logger,
 			ControllerCPURequest: cfg.Gateway.Resources.Controller.CPU,
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
@@ -510,8 +496,8 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		return err
 	}
 
-	// Clean kubeconfig — remove context and fix null→[] for kubie
-	kubecfg, err := kubeconfig.New(cfg.Context, clusterName(cfg.Name), logger)
+	// Without a kubeconfig path there is no context to remove.
+	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, clusterName(cfg.Name), logger)
 	if err == nil {
 		kubecfg.CleanupTeardown()
 	}
@@ -594,6 +580,7 @@ func perVMArtefacts(cacheDir, name string) []string {
 		prefix + "-ssh",
 		prefix + "-ssh.pub",
 		prefix + "-seed.img",
+		prefix + "-network-config.yaml",
 		prefix + "-cloud-init.yaml",
 		prefix + "-meta-data.yaml",
 		prefix + "-console.log",
@@ -682,14 +669,17 @@ func waitForExit(pid int, timeout time.Duration) bool {
 	return !pidAlive(pid)
 }
 
+// target is the guest's ssh endpoint.
+func (c *Cluster) target() sshexec.Target { return c.cfg.endpoints().sshTarget(c.sshKey) }
+
 // SSH runs a command on the VM via SSH.
 func (c *Cluster) SSH(ctx context.Context, command string) ([]byte, error) {
-	return sshExec(ctx, c.sshKey, c.cfg.SSHPort, command)
+	return sshexec.Exec(ctx, c.target(), command, nil)
 }
 
 // SCP copies a local file to the VM.
 func (c *Cluster) SCP(ctx context.Context, localPath, remotePath string) error {
-	return scpTo(ctx, c.sshKey, c.cfg.SSHPort, localPath, remotePath)
+	return sshexec.SCP(ctx, c.target(), localPath, remotePath)
 }
 
 // Context returns the kubectl context name the provisioner wrote
@@ -701,7 +691,7 @@ func (c *Cluster) Context() string { return c.cfg.Context }
 // tarballs into `ctr image import` on the node). Implements
 // provision.Cluster.
 func (c *Cluster) NodeExec(ctx context.Context, command string, stdin io.Reader) ([]byte, error) {
-	return sshExecStdin(ctx, c.sshKey, c.cfg.SSHPort, command, stdin)
+	return sshexec.Exec(ctx, c.target(), command, stdin)
 }
 
 // writeRegistries renders the configured registries.yaml and
@@ -865,7 +855,7 @@ func (c *Cluster) ensureSSHKey() error {
 // on hosts that don't provide them. The "no SSH banner" failure
 // mode on Hetzner was cloud-init blocking sshd's network ordering;
 // this pin prevents the recurrence.
-func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel bool) string {
+func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel, staticNetwork bool) string {
 	// Mount block. When the operator has configured a DataDisk
 	// for this VM, the labeled qcow2 is attached as an extra
 	// virtio drive and the kernel needs a fstab entry to mount
@@ -877,6 +867,23 @@ func renderCloudInitUserData(hostname, sshPubKey string, mountDataLabel bool) st
 	if mountDataLabel {
 		mounts = `mounts:
   - [ "LABEL=` + DataDiskLabel + `", "/data/yolean", "ext4", "defaults,nofail", "0", "2" ]
+`
+	}
+	// A start after the first boot runs without the seed image, so
+	// cloud-init finds no datasource, treats the VM as a new instance
+	// and re-renders the network config as its fallback: DHCP on the
+	// first NIC. Under user-mode networking slirp answers that and
+	// nothing changes. On a tap device nothing answers, and the static
+	// address from the seed's network-config would be gone after the
+	// first stop/start. With network config disabled from the first
+	// boot's config stage on, the netplan rendered in its earlier
+	// local stage stays as it is.
+	keepNetwork := ""
+	if staticNetwork {
+		keepNetwork = `  - path: /etc/cloud/cloud.cfg.d/99-y-cluster-keep-network-config.cfg
+    permissions: '0644'
+    content: |
+      network: {config: disabled}
 `
 	}
 	return fmt.Sprintf(`#cloud-config
@@ -897,7 +904,7 @@ package_update: false
       # that don't provide them. NoCloud covers the qemu seed; None lets
       # cloud-init proceed when no NoCloud source is present.
       datasource_list: [NoCloud, None]
-`, hostname, strings.TrimSpace(sshPubKey), mounts)
+%s`, hostname, strings.TrimSpace(sshPubKey), mounts, keepNetwork)
 }
 
 func (c *Cluster) createCloudInitSeed() (string, error) {
@@ -906,7 +913,7 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 		return "", fmt.Errorf("read SSH public key: %w", err)
 	}
 
-	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "")
+	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "", c.cfg.Tap != nil)
 
 	// Name-prefix the cloud-init source so two concurrent provisions
 	// in the same cacheDir don't race on the file. Per-VM artifacts
@@ -936,7 +943,17 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 	}
 
 	seedPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-seed.img")
-	cmd := exec.Command("cloud-localds", seedPath, cloudInitPath, metaDataPath)
+	args := []string{seedPath, cloudInitPath, metaDataPath}
+	if c.cfg.Tap != nil {
+		// Without a network-config cloud-init falls back to DHCP,
+		// which nothing answers on a tap device.
+		networkConfigPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-network-config.yaml")
+		if err := os.WriteFile(networkConfigPath, []byte(renderNetworkConfig(*c.cfg.Tap)), 0o644); err != nil {
+			return "", err
+		}
+		args = append([]string{"--network-config=" + networkConfigPath}, args...)
+	}
+	cmd := exec.Command("cloud-localds", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloud-localds: %s: %w", out, err)
 	}
@@ -957,28 +974,7 @@ func (c *Cluster) startVM(ctx context.Context, diskPath, seedPath string) error 
 		zap.String("ssh-port", c.cfg.SSHPort),
 	)
 	consolePath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-console.log")
-	args := []string{
-		"-name", c.cfg.Name,
-		"-machine", "accel=kvm",
-		"-cpu", "host",
-		"-smp", c.cfg.CPUs,
-		"-m", c.cfg.Memory,
-		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", diskPath),
-	}
-	if seedPath != "" {
-		args = append(args, "-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", seedPath))
-	}
-	for _, d := range c.extraDisks {
-		args = append(args, "-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", d))
-	}
-	args = append(args,
-		"-netdev", c.buildNetdev(),
-		"-device", "virtio-net-pci,netdev=net0",
-		"-serial", "file:"+consolePath,
-		"-display", "none",
-		"-daemonize",
-		"-pidfile", c.pidFile,
-	)
+	args := vmArgs(c.cfg, vmDisks{Boot: diskPath, Seed: seedPath, Extra: c.extraDisks}, consolePath, c.pidFile)
 	cmd := exec.CommandContext(ctx, "qemu-system-x86_64", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("start VM: %s: %w", out, err)
@@ -999,6 +995,35 @@ const sshWaitTimeout = 600 * time.Second
 // so a slow cloud-init doesn't read as a hang.
 const sshWaitHeartbeat = 30 * time.Second
 
+// sshTimeoutError explains an ssh wait that ran out. In tap mode a
+// wrong static network config is indistinguishable from a slow boot
+// while waiting, so the end of the console log goes into the error:
+// it shows whether the guest came up and which address it took.
+func sshTimeoutError(cfg Config, consolePath string) error {
+	msg := fmt.Sprintf("SSH not available after %s; first boots can spend minutes in cloud-init -- see console log %s", sshWaitTimeout, consolePath)
+	if cfg.Tap == nil {
+		return errors.New(msg)
+	}
+	e := cfg.endpoints()
+	msg += fmt.Sprintf("\nnetwork.mode tap: tried %s:%s. Check that the host routes %s via %s and that the guest took the address. Console tail:\n%s",
+		e.SSHHost, e.SSHPort, cfg.Tap.GuestAddress, cfg.Tap.Ifname, tailFile(consolePath, 40))
+	return errors.New(msg)
+}
+
+// tailFile returns the last n lines of path, or a note when it
+// cannot be read.
+func tailFile(path string, n int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("(cannot read %s: %v)", path, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (c *Cluster) waitForSSH(ctx context.Context) error {
 	consolePath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-console.log")
 	c.logger.Info("waiting for SSH",
@@ -1008,12 +1033,12 @@ func (c *Cluster) waitForSSH(ctx context.Context) error {
 	deadline := start.Add(sshWaitTimeout)
 	nextHeartbeat := start.Add(sshWaitHeartbeat)
 	for {
-		if _, err := sshExec(ctx, c.sshKey, c.cfg.SSHPort, "true"); err == nil {
+		if _, err := c.SSH(ctx, "true"); err == nil {
 			return nil
 		}
 		now := time.Now()
 		if now.After(deadline) {
-			return fmt.Errorf("SSH not available after %s; first boots can spend minutes in cloud-init -- see console log %s", sshWaitTimeout, consolePath)
+			return sshTimeoutError(c.cfg, consolePath)
 		}
 		if now.After(nextHeartbeat) {
 			c.logger.Info("waiting for SSH",
@@ -1026,40 +1051,5 @@ func (c *Cluster) waitForSSH(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
-	}
-}
-
-func (c *Cluster) buildNetdev() string {
-	netdev := fmt.Sprintf("user,id=net0,hostfwd=tcp::%s-:22", c.cfg.SSHPort)
-	for _, pf := range c.cfg.PortForwards {
-		netdev += fmt.Sprintf(",hostfwd=tcp::%s-:%s", pf.Host, pf.Guest)
-	}
-	return netdev
-}
-
-func sshExec(ctx context.Context, keyPath, port, command string) ([]byte, error) {
-	return sshexec.Exec(ctx, sshTarget(keyPath, port), command, nil)
-}
-
-// sshExecStdin is the same as sshExec but pipes stdin into the
-// remote process. Callers that don't need stdin pass nil; callers
-// that do (image load streaming a tar archive) supply an io.Reader.
-func sshExecStdin(ctx context.Context, keyPath, port, command string, stdin io.Reader) ([]byte, error) {
-	return sshexec.Exec(ctx, sshTarget(keyPath, port), command, stdin)
-}
-
-func scpTo(ctx context.Context, keyPath, port, localPath, remotePath string) error {
-	return sshexec.SCP(ctx, sshTarget(keyPath, port), localPath, remotePath)
-}
-
-// sshTarget builds the sshexec.Target the qemu provisioner uses.
-// User and host are fixed by the cloud-init template (`ystack`)
-// and the host-side port forward (`127.0.0.1:<sshPort>`).
-func sshTarget(keyPath, port string) sshexec.Target {
-	return sshexec.Target{
-		Host:    "127.0.0.1",
-		Port:    port,
-		User:    "ystack",
-		KeyPath: keyPath,
 	}
 }

@@ -8,6 +8,7 @@ require (
 	github.com/google/go-containerregistry v0.21.5
 	github.com/hetznercloud/hcloud-go/v2 v2.39.0
 	github.com/invopop/jsonschema v0.14.0
+	github.com/minio/minio-go/v7 v7.1.0
 	github.com/moby/moby/api v1.54.2
 	github.com/moby/moby/client v0.4.1
 	github.com/pkg/sftp v1.13.10
@@ -57,7 +58,6 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.1.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
