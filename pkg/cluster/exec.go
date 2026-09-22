@@ -61,6 +61,8 @@ func execOnNode(ctx context.Context, lr *LookupResult, containerArgv []string, v
 		}, vmCommand, stdin, stdout, stderr)
 	case BackendMultipass:
 		return multipassexec.ExecStream(ctx, lr.MultipassName, vmCommand, stdin, stdout, stderr)
+	case BackendGlesys:
+		return fmt.Errorf("the glesys node runs Talos Linux, which has no shell; use `talosctl --talosconfig ~/.cache/y-cluster-glesys/%s-talosconfig -n %s` for node access", lr.ClusterName, lr.SSHHost)
 	default:
 		return fmt.Errorf("unsupported backend %q", lr.Backend)
 	}

@@ -80,9 +80,7 @@ var providerConfigs = map[string]func() ProviderConfig{
 // have landed ahead of their provisioner. Their configs load and
 // validate, and get a schema; the CLI's verbs refuse them by name. A
 // provider leaves this set in the change that adds its provisioner.
-var configOnly = map[string]bool{
-	ProviderGlesys: true,
-}
+var configOnly = map[string]bool{}
 
 // ConfigOnly reports whether provider is registered without a
 // provisioner.

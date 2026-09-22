@@ -46,7 +46,7 @@
           "type": "string"
         },
         "dataCenter": {
-          "default": "Stockholm",
+          "default": "Falkenberg",
           "description": "GleSYS datacenter for the server. server/allowedarguments lists the current values.",
           "type": "string"
         },
@@ -95,7 +95,7 @@
         },
         "serverDisk": {
           "default": "30G",
-          "description": "Server disk as a [num][KMGT] string. Holds k3s state",
+          "description": "Server disk as a [num][KMGT] string. Holds Talos state and pulled images.",
           "type": "string"
         },
         "storage": {
@@ -103,8 +103,8 @@
           "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
         },
         "template": {
-          "default": "ubuntu-24-04",
-          "description": "GleSYS OS template. An Ubuntu cloud image; k3s is installed at first boot via cloudconfig.",
+          "default": "Talos 1.14",
+          "description": "GleSYS OS template. A Talos Linux release; the Talos machine config is delivered as the server's cloudconfig.",
           "type": "string"
         }
       },

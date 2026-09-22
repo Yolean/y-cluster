@@ -222,10 +222,13 @@ func TestProvisionCmd_UnknownProviderError(t *testing.T) {
 	}
 }
 
-// A config-only provider (config.ConfigOnly) gets its config
-// validated like any other, and then a refusal that says which of
-// the two the problem is: the file, or this build.
-func TestProvisionCmd_ConfigOnlyProvider(t *testing.T) {
+// The glesys verbs need credentials before they touch anything. A
+// valid config without them is refused by name of the variable, and
+// an invalid config is refused for what is wrong with it first.
+func TestProvisionCmd_GlesysNeedsCredentials(t *testing.T) {
+	t.Setenv("GLESYS_PROJECT", "")
+	t.Setenv("GLESYS_API_KEY", "")
+	t.Setenv("Y_CLUSTER_GLESYS_CACHE_DIR", t.TempDir())
 	for _, verb := range []string{"provision", "teardown"} {
 		dir := t.TempDir()
 		writeFile(t, filepath.Join(dir, "y-cluster-provision.yaml"), "provider: glesys\ncontext: qa-glesys\n")
@@ -235,8 +238,8 @@ func TestProvisionCmd_ConfigOnlyProvider(t *testing.T) {
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
 		err := cmd.Execute()
-		if err == nil || !strings.Contains(err.Error(), "config is valid") || !strings.Contains(err.Error(), "no provisioner") {
-			t.Errorf("%s: want a no-provisioner refusal of a valid config, got %v", verb, err)
+		if err == nil || !strings.Contains(err.Error(), "GLESYS_PROJECT") {
+			t.Errorf("%s: want a refusal naming the unset credential, got %v", verb, err)
 		}
 
 		writeFile(t, filepath.Join(dir, "y-cluster-provision.yaml"), "provider: glesys\ncontext: qa-glesys\nplatform: VMware\n")
