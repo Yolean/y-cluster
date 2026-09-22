@@ -5,8 +5,8 @@
 #   unit tests (no build tags) + go vet
 #   golangci-lint, if installed (CI installs it; dev machines opt in)
 #   lint of every shell script, if shellcheck is installed
-#   y-cluster binary build + serve smoke test (the same script
-#   the release pipeline runs against the published archive)
+#   y-cluster binary build + smoke test (the same script the
+#   release pipeline runs against the published archive)
 #
 # If Docker is reachable:
 #   e2e tests against a kwok container in Docker
@@ -59,11 +59,11 @@ else
 fi
 
 echo
-echo "==> serve smoke test against built binary"
+echo "==> smoke test against built binary"
 bin=$(mktemp -d)/y-cluster
 trap 'rm -rf "$(dirname "$bin")"' EXIT
 go build -o "$bin" ./cmd/y-cluster
-Y_CLUSTER_BIN="$bin" bash scripts/e2e-serve-against-binary.sh
+Y_CLUSTER_BIN="$bin" bash scripts/e2e-binary-smoke.sh
 
 if ! docker info >/dev/null 2>&1; then
   echo
@@ -72,13 +72,19 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 tags="e2e,docker"
+timeout=20m
 if [ -e /dev/kvm ] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
   tags+=",kvm"
+  # Every qemu test provisions a VM: the set runs for about an hour
+  # and writes several GB of disk images per test under TMPDIR. /tmp
+  # is a RAM-backed tmpfs on most distros; /var/tmp is on disk.
+  timeout=120m
+  export TMPDIR="${TMPDIR:-/var/tmp}"
 fi
 
 echo
 echo "==> e2e (-tags=$tags)"
-go test -tags "$tags" -count=1 -timeout=20m ./e2e/
+go test -tags "$tags" -count=1 -timeout="$timeout" ./e2e/
 
 if [[ "$tags" == *kvm* ]]; then
   echo

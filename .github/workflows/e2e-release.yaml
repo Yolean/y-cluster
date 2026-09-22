@@ -25,7 +25,7 @@ on:
         required: true
 
 jobs:
-  serve:
+  smoke:
     # Only run on:
     #   - workflow_dispatch (manual re-run against any tag)
     #   - workflow_run completion that was a successful CI on a tag
@@ -81,8 +81,8 @@ jobs:
           mv "$asset" y-cluster
           ./y-cluster --version
 
-      - name: Run serve e2e against the release binary
+      - name: Run the binary smoke test against the release binary
         shell: bash
         env:
           Y_CLUSTER_BIN: ./y-cluster
-        run: ./scripts/e2e-serve-against-binary.sh
+        run: ./scripts/e2e-binary-smoke.sh

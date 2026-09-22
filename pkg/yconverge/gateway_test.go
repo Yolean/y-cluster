@@ -1,6 +1,9 @@
 package yconverge
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -241,5 +244,60 @@ func TestPickGatewayAddress_ClassNoMatch(t *testing.T) {
 	}{{Type: "IPAddress", Value: "10.0.0.1"}}
 	if got := pickGatewayAddress(items, "wrong-class"); got != "" {
 		t.Errorf("got %q, want empty (no class match)", got)
+	}
+}
+
+// kubectl run --rm only cleans up when kubectl gets to the end. A
+// probe whose kubectl fails (or is killed at the deadline) has to be
+// deleted by us, or a retry loop leaves one pod per attempt.
+func TestRunGatewayProbe_DeletesPodWhenRunFails(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "kubectl.log")
+	// One log line per invocation; curl's -w template has newlines.
+	fakeKubectlOnPATH(t, `echo "$*" | tr '\n' ' ' >> `+log+`; echo >> `+log+`
+case "$*" in
+  *" run "*) echo "error: timed out waiting for the condition" >&2; exit 1 ;;
+esac`)
+
+	err := runGatewayProbe(context.Background(), "ctx", gatewayProbeOpts{
+		URL:     "http://app.example.test/",
+		Resolve: "10.0.0.1",
+	})
+	if err == nil {
+		t.Fatal("expected the probe to fail")
+	}
+	data, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want a run followed by a delete, got:\n%s\n(probe error: %v)", data, err)
+	}
+	runFields := strings.Fields(lines[0])
+	podName := ""
+	for i, f := range runFields {
+		if f == "run" && i+1 < len(runFields) {
+			podName = runFields[i+1]
+		}
+	}
+	if !strings.HasPrefix(podName, "yconverge-probe-") {
+		t.Fatalf("could not find the probe pod name in: %s", lines[0])
+	}
+	for _, want := range []string{"--context=ctx", "delete pod " + podName, "--ignore-not-found"} {
+		if !strings.Contains(lines[1], want) {
+			t.Errorf("cleanup call lacks %q: %s", want, lines[1])
+		}
+	}
+}
+
+// A redirect check against a response without a Location header
+// fails; the header is matched as the empty string.
+func TestValidateGatewayProbeResult_MissingLocationFails(t *testing.T) {
+	err := validateGatewayProbeResult(
+		gatewayProbeOpts{ExpectCodes: []int{302}, ExpectLocation: `^https://login\.`},
+		&gatewayProbeResult{HTTPCode: 302, Location: ""},
+	)
+	if err == nil {
+		t.Fatal("a 302 without Location must not satisfy expectLocation")
 	}
 }

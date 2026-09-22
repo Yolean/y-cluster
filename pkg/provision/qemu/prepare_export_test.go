@@ -31,7 +31,7 @@ func stubPrepareExportTools(t *testing.T) {
 		t.Skip("PATH stub helper is /bin/sh-only")
 	}
 	dir := t.TempDir()
-	for _, name := range []string{"virt-customize", "kubectl"} {
+	for _, name := range []string{"virt-customize", "kubectl", "zstd"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -335,5 +335,26 @@ func TestPrepareExport_PreconditionsBeforeKernelCheck(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "unreadable") {
 		t.Errorf("kernel check fired before the precondition: %v", err)
+	}
+}
+
+// zstd compresses the data seed in the offline phase. Finding out it
+// is missing only there would leave the VM stopped and the seed
+// unbuilt, so it is a precondition like the other tools.
+func TestPrepareExport_MissingZstd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH stub helper is /bin/sh-only")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"virt-customize", "kubectl"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+
+	err := PrepareExport(context.Background(), t.TempDir(), "any", nil)
+	if err == nil || !strings.Contains(err.Error(), "zstd not found") {
+		t.Fatalf("want the zstd precondition, got %v", err)
 	}
 }

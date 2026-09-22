@@ -10,15 +10,15 @@ const EGControllerName = "gateway.envoyproxy.io/gatewayclass-controller"
 // DNSHintIPAnnotation publishes the host-side IP at which the
 // developer's machine reaches the cluster's HTTP ingress, so
 // consumer tooling (ystack's y-k8s-ingress-hosts, etc.) can rewrite
-// /etc/hosts without depending on user-supplied config or the
-// previous OVERRIDE_IP env-var chain.
+// /etc/hosts without depending on user-supplied config or
+// environment variables.
 //
 // Lives on the GatewayClass because that resource exists at
 // provision time, is cluster-scoped, and is the natural lookup
 // point from any Gateway resource (consumers walk Gateway ->
 // gatewayClassName -> GatewayClass to find it). Absent annotation
-// = no host-side override; consumers fall back to whatever they
-// did before.
+// = no host-side override; consumers resolve the address their
+// own way.
 const DNSHintIPAnnotation = "yolean.se/dns-hint-ip"
 
 // GatewayClassYAML renders the default GatewayClass manifest with
@@ -144,4 +144,3 @@ func ControllerResourcesPatch(cpuRequest, memRequest string) []byte {
             memory: %s
 `, cpuRequest, memRequest))
 }
-

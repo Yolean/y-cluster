@@ -3,7 +3,7 @@
 // Package cluster is the shared e2e harness. Tests call Kwok(t)
 // (or, when added later, Docker / QEMU constructors) to get a
 // running Kubernetes API and the kubeconfig metadata they need to
-// drive it. Everything here is gated by `//go:build e2e` — the
+// drive it. Everything here is gated by `//go:build e2e` -- the
 // package is invisible to `go test ./...`.
 //
 // kwok is the default cheap backend: a fake apiserver in a single
@@ -15,8 +15,8 @@
 package cluster
 
 // Backend identifies which runtime is serving the Kubernetes API
-// to the test. Tests rarely need to switch on this — the harness
-// returns a *Cluster whose Context()/Kubeconfig() are uniform —
+// to the test. Tests rarely need to switch on this -- the harness
+// returns a *Cluster whose Context()/Kubeconfig() are uniform --
 // but it's exposed so a test can document what it covered, and so
 // CI matrix logs can attribute results to a backend.
 type Backend string

@@ -1,6 +1,7 @@
 package kubeconfig
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,10 +22,8 @@ import (
 //   - clusters / contexts / users: the three named lists kubectl
 //     references; entries point at each other by name
 //
-// `extensions`, `preferences`, and the auth-provider / exec
-// stanzas the kubeconfig schema technically supports are passed
-// through as raw JSON so a kubeconfig that uses them isn't lost
-// when we round-trip through Load / Save.
+// Everything else in the file survives a Load / Save round trip
+// untouched; see unknown.go.
 type File struct {
 	APIVersion     string         `json:"apiVersion,omitempty"`
 	Kind           string         `json:"kind,omitempty"`
@@ -33,6 +32,8 @@ type File struct {
 	Contexts       []NamedContext `json:"contexts"`
 	Users          []NamedUser    `json:"users"`
 	Preferences    map[string]any `json:"preferences,omitempty"`
+
+	unknown map[string]json.RawMessage
 }
 
 // NamedCluster holds a single entry in `clusters:`.
@@ -49,6 +50,8 @@ type Cluster struct {
 	CertificateAuthority     string `json:"certificate-authority,omitempty"`
 	CertificateAuthorityData string `json:"certificate-authority-data,omitempty"`
 	InsecureSkipTLSVerify    bool   `json:"insecure-skip-tls-verify,omitempty"`
+
+	unknown map[string]json.RawMessage
 }
 
 // NamedContext is one entry in `contexts:`.
@@ -63,6 +66,8 @@ type Context struct {
 	Cluster   string `json:"cluster,omitempty"`
 	User      string `json:"user,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+
+	unknown map[string]json.RawMessage
 }
 
 // NamedUser is one entry in `users:`.
@@ -71,10 +76,9 @@ type NamedUser struct {
 	User User   `json:"user"`
 }
 
-// User holds auth material. We carry both file-path and inline-data
-// variants for cert/key, plus token/tokenFile, plus the most common
-// extension blocks (auth-provider, exec) as raw JSON so they
-// round-trip cleanly without us having to enumerate every field.
+// User holds auth material: both file-path and inline-data variants
+// for cert/key, token/tokenFile, and the auth-provider / exec blocks
+// as generic maps.
 type User struct {
 	Token                 string         `json:"token,omitempty"`
 	TokenFile             string         `json:"tokenFile,omitempty"`
@@ -87,6 +91,8 @@ type User struct {
 	Impersonate           string         `json:"as,omitempty"`
 	AuthProvider          map[string]any `json:"auth-provider,omitempty"`
 	Exec                  map[string]any `json:"exec,omitempty"`
+
+	unknown map[string]json.RawMessage
 }
 
 // Load reads the kubeconfig at path and returns the parsed File.
@@ -148,7 +154,8 @@ func emptyFile() *File {
 }
 
 // Save writes f to path with 0600 permissions, matching what
-// kubectl writes for a freshly-imported kubeconfig.
+// kubectl writes for a freshly-imported kubeconfig. The write is
+// atomic; see writeFileAtomic.
 func (f *File) Save(path string) error {
 	// Ensure empty slices serialise as `[]` for kubie, not `null`
 	// (sigs.k8s.io/yaml writes nil slices as `null`, but
@@ -166,7 +173,7 @@ func (f *File) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal kubeconfig: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	return writeFileAtomic(path, data)
 }
 
 // findContext returns the index of the named context, or -1.

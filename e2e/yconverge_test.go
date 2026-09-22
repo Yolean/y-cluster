@@ -1,6 +1,6 @@
 //go:build e2e
 
-// Package e2e tests yconverge against a real cluster (kwok in Docker).
+// The yconverge tests run against a real apiserver (kwok in Docker).
 //
 // Test bases model a three-tier application:
 //   - e2e-db:       database config and service (foundation)
@@ -47,6 +47,7 @@ func testdataDir(t *testing.T) string {
 func TestMain(m *testing.M) {
 	code := m.Run()
 	cluster.TeardownAll()
+	removeBuiltBinary()
 	os.Exit(code)
 }
 
@@ -100,7 +101,7 @@ func TestOrdering_TransitiveChain(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// frontend → backend → db
+	// frontend -> backend -> db
 	result, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
 		KustomizeDir: filepath.Join(td, "e2e-frontend/base"),
@@ -168,7 +169,7 @@ func TestCustomization_QaOverlayAggregatesBaseChecks(t *testing.T) {
 	setupCluster(t)
 	td := testdataDir(t)
 
-	// db/qa has no yconverge.cue — checks come from db/base via traversal
+	// db/qa has no yconverge.cue -- checks come from db/base via traversal
 	_, err := yconverge.Run(context.Background(), yconverge.Options{
 		Context:      contextName,
 		KustomizeDir: filepath.Join(td, "e2e-db/qa"),
@@ -193,6 +194,10 @@ func TestCustomization_BackendQaResolvesDbDependency(t *testing.T) {
 	dbIdx := indexOfDir(result.Steps, "e2e-db")
 	if dbIdx < 0 {
 		t.Fatalf("db dependency not resolved from qa overlay: %v", result.Steps)
+	}
+	// The base is part of the overlay, not a step before it.
+	if len(result.Steps) != 2 {
+		t.Fatalf("want the db dependency and the overlay, got %v", result.Steps)
 	}
 }
 

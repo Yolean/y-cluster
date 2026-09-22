@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Yolean/y-cluster/pkg/cluster"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
@@ -166,5 +167,57 @@ func TestDownstreamContract_ProvisionConfigs(t *testing.T) {
 				t.Errorf("dataDisk resolved to %q, want %q (relative to the config dir)", got, abs)
 			}
 		})
+	}
+}
+
+// A provider is registered in three places that the compiler cannot
+// tie together: its config type (config.AllProviders), the CLI's
+// adapters (providers), and the runtime backend that detect, ctr,
+// stop and friends resolve a kubeconfig context to
+// (cluster.AllBackends). One that is missing from any of them loads
+// and validates and then cannot be provisioned, or can be provisioned
+// and then not be found.
+func TestProviders_RegisteredEverywhere(t *testing.T) {
+	backends := map[string]bool{}
+	for _, b := range cluster.AllBackends {
+		backends[string(b)] = true
+	}
+	for _, name := range config.AllProviders {
+		ops, ok := providers[name]
+		if !ok {
+			t.Errorf("provider %q has a config type but no entry in the CLI's providers table", name)
+			continue
+		}
+		if ops.provision == nil || ops.teardown == nil || ops.hostPorts == nil || ops.stop == nil {
+			t.Errorf("provider %q: incomplete providerOps %+v", name, ops)
+		}
+		if !backends[name] {
+			t.Errorf("provider %q is not in cluster.AllBackends, so a cluster it provisions cannot be looked up", name)
+		}
+		if config.NewProviderConfig(name).Common() == nil {
+			t.Errorf("provider %q: config type does not embed CommonConfig", name)
+		}
+	}
+	for name := range providers {
+		if config.NewProviderConfig(name) == nil {
+			t.Errorf("providers table has %q, which has no config type", name)
+		}
+	}
+}
+
+// The inventory record is what `teardown` without -c lists and what
+// preflight blames a port conflict on.
+func TestProviders_HostPorts(t *testing.T) {
+	forwards := []config.PortForward{{Host: "6443", Guest: "6443"}, {Host: "", Guest: "8080"}}
+	q := &config.QEMUConfig{CommonConfig: config.CommonConfig{PortForwards: forwards}, SSHPort: "2222"}
+	if got := providers[config.ProviderQEMU].hostPorts(q); strings.Join(got, ",") != "6443,2222" {
+		t.Errorf("qemu binds its forwards and the ssh port: %v", got)
+	}
+	d := &config.DockerConfig{CommonConfig: config.CommonConfig{PortForwards: forwards}}
+	if got := providers[config.ProviderDocker].hostPorts(d); strings.Join(got, ",") != "6443" {
+		t.Errorf("docker: a forward without a host port is assigned by docker and not recorded: %v", got)
+	}
+	if got := providers[config.ProviderHetzner].hostPorts(&config.HetznerConfig{}); len(got) != 0 {
+		t.Errorf("a remote server binds nothing on this host: %v", got)
 	}
 }

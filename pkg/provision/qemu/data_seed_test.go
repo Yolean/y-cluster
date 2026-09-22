@@ -1,6 +1,7 @@
 package qemu
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -365,5 +366,276 @@ func TestWriteSeedMeta_RoundTrip(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("meta missing %q:\n%s", want, data)
 		}
+	}
+}
+
+// Only a guest without /data/yolean may ship without a seed. The
+// stderr text is what libguestfs 1.5x prints for that case.
+func TestTarOutError(t *testing.T) {
+	exit1 := errors.New("exit status 1")
+
+	missing := tarOutError("*stdin*:0: libguestfs: error: tar_out: stat: /data/yolean: No such file or directory\n", exit1)
+	if !errors.Is(missing, ErrNoDataDir) {
+		t.Errorf("missing source dir must classify as ErrNoDataDir: %v", missing)
+	}
+
+	for name, stderr := range map[string]string{
+		"supermin":      "libguestfs: error: /usr/bin/supermin exited with error status 1.\n",
+		"other path":    "libguestfs: error: tar_out: stat: /data: No such file or directory\n",
+		"no diagnostic": "",
+	} {
+		got := tarOutError(stderr, exit1)
+		if errors.Is(got, ErrNoDataDir) {
+			t.Errorf("%s: must not be treated as \"nothing to seed\": %v", name, got)
+		}
+		if !errors.Is(got, exit1) {
+			t.Errorf("%s: cause lost: %v", name, got)
+		}
+	}
+}
+
+// printedRecipe returns the shell commands the conflict message
+// prints under one resolution label, minus what only makes sense on
+// the appliance: sudo, and the unit restart (the tests rerun the
+// script instead). What the customer is told to type is what runs.
+func printedRecipe(t *testing.T, stderr, label string) string {
+	t.Helper()
+	var cmds []string
+	in := false
+	for _, line := range strings.Split(stderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "(") {
+			in = strings.HasPrefix(trimmed, label)
+			continue
+		}
+		// Commands are indented by ten, prose by less.
+		if !in || !strings.HasPrefix(line, "          ") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") || strings.Contains(trimmed, "systemctl restart") {
+			continue
+		}
+		cmds = append(cmds, strings.ReplaceAll(line, "sudo ", ""))
+	}
+	if len(cmds) == 0 {
+		t.Fatalf("no commands under %s in:\n%s", label, stderr)
+	}
+	return strings.Join(cmds, "\n")
+}
+
+// conflictFixture is a mounted volume with a file the seed did not
+// put there, which is what makes the unit refuse.
+func conflictFixture(t *testing.T) (f fixture, stderr string) {
+	t.Helper()
+	f = newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.mount, "restored.txt"), []byte("from backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.mount, ".hidden"), []byte("dotfile"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	makeSeedTar(t, f.seed, map[string]string{"from-seed.txt": "seeded"})
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, exit := runSeedCheck(t, seedCheckOpts{mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true})
+	if exit == 0 {
+		t.Fatal("setup: unmarked contents should be a conflict")
+	}
+	return f, stderr
+}
+
+// Recovery recipe (a): the customer restored their own data and
+// marks it as seeded. The unit then starts k3s on that data and
+// extracts nothing over it.
+func TestSeedCheck_RecipeMarkExistingData(t *testing.T) {
+	f, stderr := conflictFixture(t)
+	recipe := printedRecipe(t, stderr, "(a)")
+	if out, err := exec.Command("/bin/sh", "-c", recipe).CombinedOutput(); err != nil {
+		t.Fatalf("recipe failed: %s: %v\n%s", out, err, recipe)
+	}
+
+	stdout, stderr, exit := runSeedCheck(t, seedCheckOpts{mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true})
+	if exit != 0 {
+		t.Fatalf("after recipe (a) the unit still fails (%d): %s%s", exit, stdout, stderr)
+	}
+	if body, _ := os.ReadFile(filepath.Join(f.mount, "restored.txt")); string(body) != "from backup" {
+		t.Errorf("restored data changed: %q", body)
+	}
+	if _, err := os.Stat(filepath.Join(f.mount, "from-seed.txt")); err == nil {
+		t.Error("the seed was extracted over data the customer marked as correct")
+	}
+}
+
+// Recovery recipe (b): the contents are junk, wipe and seed afresh.
+// The printed glob has to take dotfiles with it, or the rerun is a
+// conflict again.
+func TestSeedCheck_RecipeWipeAndReseed(t *testing.T) {
+	f, stderr := conflictFixture(t)
+	recipe := printedRecipe(t, stderr, "(b)")
+	// This test runs an rm -rf it did not write. Everything it may
+	// touch is under the fixture's mount.
+	for _, word := range strings.Fields(recipe) {
+		if strings.HasPrefix(word, "/") && !strings.HasPrefix(word, f.mount+"/") {
+			t.Fatalf("recipe reaches outside %s: %s", f.mount, recipe)
+		}
+	}
+	if out, err := exec.Command("/bin/sh", "-c", recipe).CombinedOutput(); err != nil {
+		t.Fatalf("recipe failed: %s: %v\n%s", out, err, recipe)
+	}
+
+	stdout, stderr, exit := runSeedCheck(t, seedCheckOpts{mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true})
+	if exit != 0 {
+		t.Fatalf("after recipe (b) the unit still fails (%d): %s%s", exit, stdout, stderr)
+	}
+	if body, _ := os.ReadFile(filepath.Join(f.mount, "from-seed.txt")); string(body) != "seeded" {
+		t.Errorf("seed content missing after re-seed: %q", body)
+	}
+	for _, gone := range []string{"restored.txt", ".hidden"} {
+		if _, err := os.Stat(filepath.Join(f.mount, gone)); err == nil {
+			t.Errorf("%s survived the wipe", gone)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(f.mount, ".y-cluster-seeded")); err != nil {
+		t.Errorf("no marker after re-seed: %v", err)
+	}
+}
+
+// A damaged seed must not become a partial extract that gets marked
+// as seeded: the pipe hides zstdcat's exit status, and tar accepts a
+// stream that ends on a member boundary. Nothing is extracted, so
+// every later boot fails the same way until the disk is replaced.
+func TestSeedCheck_DamagedSeedExtractsNothing(t *testing.T) {
+	f := newFixture(t)
+	entries := map[string]string{}
+	for i := 0; i < 200; i++ {
+		entries[filepath.Join("d", "file-"+strings.Repeat("n", i))] = strings.Repeat("payload ", 400)
+	}
+	makeSeedTar(t, f.seed, entries)
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	whole, err := os.ReadFile(f.seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.seed, whole[:len(whole)/2], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := seedCheckOpts{mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true}
+	for boot := 1; boot <= 2; boot++ {
+		stdout, stderr, exit := runSeedCheck(t, opts)
+		if exit == 0 {
+			t.Fatalf("boot %d: half a seed extracted as if it were whole: %s", boot, stdout)
+		}
+		if !strings.Contains(stderr, "damaged") {
+			t.Errorf("boot %d: stderr should say the seed is damaged: %s", boot, stderr)
+		}
+		left, err := os.ReadDir(f.mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(left) != 0 {
+			t.Fatalf("boot %d: %d entries extracted from a damaged seed", boot, len(left))
+		}
+	}
+}
+
+// The marker is written last: an extract that died halfway (power
+// loss) leaves contents without a marker, and the next boot refuses
+// them as a conflict rather than taking the volume for seeded.
+func TestSeedCheck_InterruptedExtractIsAConflict(t *testing.T) {
+	f := newFixture(t)
+	makeSeedTar(t, f.seed, map[string]string{"a.txt": "a", "b.txt": "b"})
+	if err := os.WriteFile(f.meta, []byte(`{"schemaVersion":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// What the volume looks like after tar got as far as a.txt.
+	if err := os.WriteFile(filepath.Join(f.mount, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, exit := runSeedCheck(t, seedCheckOpts{mount: f.mount, seed: f.seed, meta: f.meta, forceMount: true})
+	if exit == 0 {
+		t.Fatal("a half-extracted volume passed for seeded")
+	}
+	if !strings.Contains(stderr, "refusing to seed") {
+		t.Errorf("want the conflict message, got: %s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(f.mount, "b.txt")); err == nil {
+		t.Error("the unit extracted over a half-extracted volume")
+	}
+
+	// The ordering that makes the above true.
+	extract := strings.Index(dataSeedCheckScript, `tar -C "$MOUNT" -xpf -`)
+	marker := strings.Index(dataSeedCheckScript, `cp "$META" "$MARKER"`)
+	if extract < 0 || marker < 0 || marker < extract {
+		t.Errorf("the marker must be written after the extract (extract at %d, marker at %d)", extract, marker)
+	}
+}
+
+// runSeedStatus runs the customer-facing status helper against a
+// fixture, with the same path substitution runSeedCheck uses.
+func runSeedStatus(t *testing.T, f fixture) (output string, exit int) {
+	t.Helper()
+	src := seedStatusScript
+	for from, to := range map[string]string{
+		"MOUNT=/data/yolean":                          "MOUNT=" + f.mount,
+		"SEED=/var/lib/y-cluster/data-seed.tar.zst":   "SEED=" + f.seed,
+		"META=/var/lib/y-cluster/data-seed.meta.json": "META=" + f.meta,
+	} {
+		if !strings.Contains(src, from) {
+			t.Fatalf("seed_status.sh no longer assigns %q", from)
+		}
+		src = strings.Replace(src, from, to, 1)
+	}
+	path := filepath.Join(t.TempDir(), "seed-status.sh")
+	if err := os.WriteFile(path, []byte(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("/bin/sh", path).CombinedOutput()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		exit = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run seed-status: %v", err)
+	}
+	return string(out), exit
+}
+
+// y-cluster-seed-status is what a customer is told to run when the
+// appliance does not come up. It has to tell the states apart, and it
+// has to finish: it runs on a machine where k3s is down and the seed
+// unit has failed.
+func TestSeedStatus_ReportsConflictThenSeeded(t *testing.T) {
+	f, _ := conflictFixture(t)
+
+	out, exit := runSeedStatus(t, f)
+	if exit != 0 {
+		t.Errorf("exit %d on a machine in conflict mode:\n%s", exit, out)
+	}
+	for _, want := range []string{"ABSENT.", filepath.Join(f.mount, "restored.txt"), "Recovery recipes", `{"schemaVersion":1}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("conflict-mode status lacks %q:\n%s", want, out)
+		}
+	}
+
+	// The recipe it prints is the one that works (recipe (a) of the
+	// seed unit, run by TestSeedCheck_RecipeMarkExistingData).
+	wantRecipe := `echo '{"schemaVersion":1,"manuallyMarked":true}' | sudo tee ` + filepath.Join(f.mount, ".y-cluster-seeded")
+	if !strings.Contains(out, wantRecipe) {
+		t.Errorf("status prints a different mark-as-seeded recipe than the seed unit:\n%s", out)
+	}
+
+	if err := os.WriteFile(filepath.Join(f.mount, ".y-cluster-seeded"), []byte(`{"schemaVersion":1,"manuallyMarked":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, exit = runSeedStatus(t, f)
+	if exit != 0 {
+		t.Errorf("exit %d on a seeded machine:\n%s", exit, out)
+	}
+	if !strings.Contains(out, "PRESENT:") || !strings.Contains(out, `"manuallyMarked":true`) {
+		t.Errorf("seeded status should show the marker:\n%s", out)
 	}
 }

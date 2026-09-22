@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
+	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
 	"github.com/Yolean/y-cluster/pkg/provision/registries"
 )
@@ -50,7 +52,7 @@ type Cluster struct {
 // cap on systems where the default is 128. CI runners (ubuntu-latest)
 // have high enough limits; developer laptops sometimes don't.
 //
-// docker daemon reachability is now checked through the daemon
+// docker daemon reachability is checked through the daemon
 // API (Ping) rather than `docker info` so we get typed errors
 // instead of "exit status 1": socket-not-found surfaces as
 // net.OpError, version mismatch as a typed errdefs error.
@@ -67,7 +69,7 @@ func CheckPrerequisites() error {
 		return fmt.Errorf("docker daemon unreachable: %w", err)
 	}
 	if data, err := readFirstLine("/proc/sys/fs/inotify/max_user_instances"); err == nil {
-		if n, err := atoi(data); err == nil && n < 256 {
+		if n, err := strconv.Atoi(strings.TrimSpace(data)); err == nil && n < 256 {
 			return fmt.Errorf(
 				"fs.inotify.max_user_instances is %d; docker needs at least 256. "+
 					"Run: sudo sysctl fs.inotify.max_user_instances=512", n,
@@ -78,27 +80,14 @@ func CheckPrerequisites() error {
 }
 
 // readFirstLine reads `path` and returns its first line trimmed.
-// We used to shell out to `cat` here; the stdlib version
-// surfaces typed errors (os.ErrNotExist when /proc/sys/fs/...
-// doesn't exist on a non-Linux host, fs.PathError with
-// permission detail) instead of just `exit status 1`.
+// Errors are typed: os.ErrNotExist when /proc/sys/fs/... doesn't
+// exist on a non-Linux host, fs.PathError with permission detail.
 func readFirstLine(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0]), nil
-}
-
-func atoi(s string) (int, error) {
-	var n int
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("not a number: %q", s)
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, nil
 }
 
 // Provision starts a docker container, waits for the
@@ -185,20 +174,10 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		// we can set Cmd in the same struct.
 		Config: &container.Config{
 			Image: image,
-			// --disable=traefik because y-cluster bundles Envoy
-			// Gateway as the ingress controller; two of them
-			// would fight over host:80/:443.
-			// --disable=local-storage because y-cluster ships
-			// its own local-path-provisioner via
-			// pkg/provision/localstorage with the appliance-
-			// shape defaults (path /data/yolean, PVC
-			// namespace_name pattern, Retain reclaim).
-			Cmd: []string{
-				"server",
-				"--tls-san=127.0.0.1",
-				"--disable=traefik",
-				"--disable=local-storage",
-			},
+			// 127.0.0.1 is where the host reaches the published
+			// apiserver port; k3s lists it among its serving
+			// cert SANs already, the flag makes that explicit.
+			Cmd: append([]string{"server", "--tls-san=127.0.0.1"}, k3s.DisableFlags...),
 			// ExposedPorts must list every guest port carried by
 			// HostConfig.PortBindings. The Docker CLI auto-fills
 			// this when you `-p`; the moby SDK does not. Engine
@@ -393,7 +372,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 		PortBindings: bindings,
 	}
 	if cfg.Memory != "" {
-		mb, err := atoi(cfg.Memory)
+		mb, err := strconv.Atoi(cfg.Memory)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse memory %q: %w", cfg.Memory, err)
 		}
@@ -402,7 +381,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 	if cfg.CPUs != "" {
 		// Accept whole-CPU values; --cpus 1.5 isn't required for our
 		// use-case and would need float parsing.
-		n, err := atoi(cfg.CPUs)
+		n, err := strconv.Atoi(cfg.CPUs)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse cpus %q: %w", cfg.CPUs, err)
 		}
@@ -468,7 +447,7 @@ func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) 
 		return err
 	}
 	if kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger); err == nil {
-		kubecfg.CleanupTeardown()
+		kubecfg.CleanupStale()
 	}
 	return nil
 }
@@ -569,11 +548,13 @@ func (c *Cluster) pollHostAPIServerReadyz(ctx context.Context, timeout, interval
 // the embedded server URL to the host-mapped API port so the host's
 // kubectl can reach it.
 func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
-	out, err := c.NodeExec(ctx, "cat /etc/rancher/k3s/k3s.yaml", nil)
+	// Not k3s.ReadKubeconfig: the rancher/k3s image runs as root
+	// and has no sudo.
+	out, err := c.NodeExec(ctx, "cat "+k3s.KubeconfigPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
 	}
-	return bytes.ReplaceAll(out, []byte("127.0.0.1:6443"), []byte("127.0.0.1:"+c.cfg.HostAPIPort())), nil
+	return k3s.RewriteKubeconfigServer(out, "127.0.0.1:"+c.cfg.HostAPIPort())
 }
 
 // ContainerName returns the docker container name. Test helpers use

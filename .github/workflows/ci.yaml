@@ -3,16 +3,16 @@ name: CI
 # Consolidated pipeline per RELEASE_PIPELINE_PLAN.md.
 #
 # One workflow, one `build` matrix, one source of truth for binaries.
-# Every consumer (e2e-serve, image, release-assets) pulls from the
+# Every consumer (smoke, image, release-assets) pulls from the
 # uploaded artifacts so a tag run ships the same bytes everywhere.
 #
 # Triggers:
-#   push main         → lint, test, build, e2e-serve, image(sha)
-#   push tag v*       → all of the above + image(tag) + release-assets
-#   pull_request      → lint, test, build, e2e-serve only
-#   workflow_dispatch → same as push main
+#   push main         -> lint, test, build, smoke, image(sha)
+#   push tag v*       -> all of the above + image(tag) + release-assets
+#   pull_request      -> lint, test, build, smoke only
+#   workflow_dispatch -> same as push main
 #
-# Image is only published under Yolean (not YoleanAgents) — the `if:`
+# Image is only published under Yolean (not YoleanAgents) -- the `if:`
 # on the image/release-assets jobs is belt-and-braces; the human owner
 # mirrors manually when ready to open-source.
 
@@ -149,9 +149,9 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # --- E2e against the freshly-built linux/amd64 binary ---
+  # --- Smoke test of the freshly-built linux/amd64 binary ---
 
-  e2e-serve:
+  smoke:
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -160,12 +160,12 @@ jobs:
         with:
           name: y-cluster-linux-amd64
           path: bin
-      - name: Run serve e2e against the built binary
+      - name: Run the binary smoke test against the built binary
         env:
           Y_CLUSTER_BIN: ${{ github.workspace }}/bin/y-cluster
         run: |
           chmod +x "$Y_CLUSTER_BIN"
-          ./scripts/e2e-serve-against-binary.sh
+          ./scripts/e2e-binary-smoke.sh
 
   # --- Multi-arch image via contain, blocked on all prior jobs ---
 
@@ -176,7 +176,7 @@ jobs:
       - test
       - e2e
       - build
-      - e2e-serve
+      - smoke
     if: github.repository_owner == 'Yolean' && github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -265,11 +265,10 @@ jobs:
           # listens for:
           # - First run for a tag: `gh release create ... <files>`
           #   uploads atomically, so publish fires only after the
-          #   assets are present. The previous shape called
-          #   `release create` (empty publish, fires the event)
-          #   THEN `release upload`; the event-driven validator
-          #   raced in and saw an empty release ("no assets to
-          #   download").
+          #   assets are present. `release create` followed by
+          #   `release upload` would publish empty, fire the event,
+          #   and let the event-driven validator see a release
+          #   with "no assets to download".
           # - Re-run for an existing tag: skip create, use
           #   `release upload --clobber` to refresh the assets
           #   without retriggering publish.

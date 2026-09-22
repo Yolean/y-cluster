@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -17,14 +18,15 @@ const ProvisionFilename = "y-cluster-provision.yaml"
 
 // LoadProvision reads `<dir>/y-cluster-provision.yaml`, peeks the
 // `provider:` discriminator, and dispatches to the matching typed
-// loader. Returns a pointer to the concrete provider config (e.g.
-// *QEMUConfig) so callers can switch on it.
+// config type. The result holds a pointer to the concrete provider
+// config (e.g. *QEMUConfig); callers that need provider-specific
+// fields assert the type, everything else goes through Common.
 //
 // The peek uses non-strict YAML decoding so unknown fields (the
 // per-provider settings) are tolerated; once we know the provider,
 // the typed loader runs with the package's strict-decode contract
 // and rejects unknown keys properly.
-func LoadProvision(dir string) (any, error) {
+func LoadProvision(dir string) (ProviderConfig, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", dir, err)
@@ -57,32 +59,12 @@ func LoadProvision(dir string) (any, error) {
 		}
 	}
 
-	switch provider {
-	case ProviderQEMU:
-		var c QEMUConfig
-		if err := configfile.Load(dir, ProvisionFilename, &c); err != nil {
-			return nil, err
-		}
-		return &c, nil
-	case ProviderDocker:
-		var c DockerConfig
-		if err := configfile.Load(dir, ProvisionFilename, &c); err != nil {
-			return nil, err
-		}
-		return &c, nil
-	case ProviderMultipass:
-		var c MultipassConfig
-		if err := configfile.Load(dir, ProvisionFilename, &c); err != nil {
-			return nil, err
-		}
-		return &c, nil
-	case ProviderHetzner:
-		var c HetznerConfig
-		if err := configfile.Load(dir, ProvisionFilename, &c); err != nil {
-			return nil, err
-		}
-		return &c, nil
-	default:
-		return nil, fmt.Errorf("%s: unknown provider %q (supported: docker, hetzner, multipass, qemu)", path, hdr.Provider)
+	c := NewProviderConfig(provider)
+	if c == nil {
+		return nil, fmt.Errorf("%s: unknown provider %q (supported: %s)", path, hdr.Provider, strings.Join(AllProviders, ", "))
 	}
+	if err := configfile.Load(dir, ProvisionFilename, c); err != nil {
+		return nil, err
+	}
+	return c, nil
 }

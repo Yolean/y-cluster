@@ -3,13 +3,13 @@
 # Packer, boot a server from it, and verify the echo HTTPRoute
 # answers over the public IP.
 #
-# Replaces the older dd-via-rescue path (qemu-img convert + zstd +
-# dd /dev/sda from rescue mode) which broke at the "TCP/22 reachable,
-# no SSH banner" stage we couldn't diagnose without out-of-band
-# console. Packer's hcloud builder handles base-image / partition
-# layout / network drivers natively, so the path "image boots on
-# Hetzner" is no longer something we have to engineer ourselves --
-# we get it for free by building on Hetzner from the start.
+# Why Packer on Hetzner rather than uploading a locally built disk
+# (qemu-img convert + zstd + dd /dev/sda from rescue mode): that
+# path broke at a "TCP/22 reachable, no SSH banner" stage that
+# cannot be diagnosed without an out-of-band console. Packer's hcloud
+# builder handles base image, partition layout and network drivers
+# natively, so "the image boots on Hetzner" comes with building on
+# Hetzner from the start.
 #
 # Local appliance vs Hetzner appliance:
 #   - Local dev still uses `y-cluster provision` against qemu and

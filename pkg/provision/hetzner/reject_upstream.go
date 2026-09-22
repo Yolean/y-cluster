@@ -3,12 +3,9 @@ package hetzner
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"go.uber.org/zap"
-
-	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
 // rejectUpstreamHostsToml is the per-registry containerd hosts.toml
@@ -141,19 +138,12 @@ func rejectUpstreamScript(waitForReaper bool) string {
 // re-reads hosts.toml on each pull request, so the lockdown is
 // effective immediately after the files land.
 //
-// Uses sshexec.Exec directly (not c.SSH) so the script body can
-// be piped via stdin to `bash -s`, avoiding quoting hazards in
-// the multi-line TOML payload.
+// The script body is piped via stdin to `bash -s`, avoiding quoting
+// hazards in the multi-line TOML payload.
 func (c *Cluster) applyRejectUpstream(ctx context.Context) error {
 	c.logger.Info("locking down upstream pulls (rejectUpstream)",
 		zap.Strings("registries", rejectUpstreamRegistries))
-	target := sshexec.Target{
-		Host:    c.state.IPv4,
-		Port:    "22",
-		User:    c.cfg.SSHUser,
-		KeyPath: filepath.Join(c.cacheDir, c.cfg.Context+"-ssh"),
-	}
-	out, err := sshexec.Exec(ctx, target, "bash -s", strings.NewReader(rejectUpstreamScript(c.cfg.Lifetime.Enabled())))
+	out, err := c.NodeExec(ctx, "bash -s", strings.NewReader(rejectUpstreamScript(c.cfg.Lifetime.Enabled())))
 	if err != nil {
 		return fmt.Errorf("apply: %w; output=%s", err, string(out))
 	}

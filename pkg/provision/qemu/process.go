@@ -4,18 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
 // pidAlive reports whether `pid` refers to a process the current
-// user can signal. signal(0) is the POSIX liveness probe — no
+// user can signal. signal(0) is the POSIX liveness probe -- no
 // signal is delivered, only the permission/existence checks fire.
 //
-// Replaces a `kill -0 <pid>` shell-out. Stdlib gives us typed
-// errors (ESRCH = "no such process", EPERM = "exists but not
-// owned by us") that the bash version collapsed into "exit 1".
-// We treat ESRCH as not-alive; EPERM as alive (we just can't
-// signal it — still a running pid the test cares about).
+// The errors are typed: ESRCH = "no such process", EPERM =
+// "exists but not owned by us". ESRCH is not-alive; EPERM is
+// alive (we just can't signal it).
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -39,6 +39,48 @@ func pidAlive(pid int) bool {
 		// our use (own VM PIDs) this shouldn't happen, but if it
 		// does the right answer is "yes, still there".
 		return true
+	}
+	return false
+}
+
+// vmAlive reports whether pid is alive AND is the qemu process that
+// was started with pidFile. Liveness alone is not enough to act on: a
+// pidfile outlives a reboot or a crashed qemu, the kernel hands the
+// number to something else, and stop/teardown would SIGTERM and then
+// SIGKILL a process that has nothing to do with y-cluster.
+//
+// The identity is qemu's own `-pidfile <path>` argument, read from
+// /proc/<pid>/cmdline. Where /proc does not exist the question cannot
+// be answered and liveness decides, as it did before; the qemu
+// provider needs KVM, so in practice that is never.
+func vmAlive(pid int, pidFile string) bool {
+	if !pidAlive(pid) {
+		return false
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		_, statErr := os.Stat("/proc/self/cmdline")
+		// No /proc at all: unknown. /proc present but this pid
+		// unreadable: it went away between the two checks.
+		return statErr != nil
+	}
+	return cmdlineNamesPidfile(cmdline, pidFile)
+}
+
+// cmdlineNamesPidfile reports whether a NUL-separated argv contains
+// `-pidfile <path>` for our pidfile. Paths are compared by base name
+// when they are not identical: the cache dir may have been spelled
+// differently (relative, symlinked) when the VM was started, and the
+// base name carries the cluster name.
+func cmdlineNamesPidfile(cmdline []byte, pidFile string) bool {
+	args := strings.Split(string(cmdline), "\x00")
+	for i, a := range args {
+		if a != "-pidfile" || i+1 >= len(args) {
+			continue
+		}
+		if args[i+1] == pidFile || filepath.Base(args[i+1]) == filepath.Base(pidFile) {
+			return true
+		}
 	}
 	return false
 }

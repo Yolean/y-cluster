@@ -10,6 +10,11 @@ run:
     - kvm
     - multipass
     - hetzner
+# gofmt as a lint failure: unformatted files otherwise accumulate and
+# every later gofmt of a touched file drags unrelated hunks along.
+formatters:
+  enable:
+    - gofmt
 linters:
   default: none
   enable:

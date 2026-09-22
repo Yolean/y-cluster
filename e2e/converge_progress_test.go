@@ -27,7 +27,7 @@ import (
 // asserts the headers appear in the expected order.
 func TestConvergeProgress_DepAndTargetHeaders(t *testing.T) {
 	setupCluster(t)
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	root := t.TempDir()
 	baseName := "convergeprogress-base"
@@ -130,7 +130,7 @@ step: verify.#Step & { checks: [{
 // case earns the symmetric header.
 func TestConvergeProgress_NoDepsNoTargetHeader(t *testing.T) {
 	setupCluster(t)
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "k")
 	name := "convergeprogress-nodeps"
@@ -177,7 +177,7 @@ data:
 // suppressed alongside the empty-bucket kubectl output.
 func TestConvergeProgress_EmptyModeNoHeader(t *testing.T) {
 	setupCluster(t)
-	bin := buildServeBinary(t)
+	bin := buildBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "k")
 	name := "convergeprogress-empty"

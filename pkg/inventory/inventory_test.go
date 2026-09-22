@@ -134,3 +134,22 @@ func TestFindByHostPort(t *testing.T) {
 		t.Fatalf("empty port must not match, got %+v", rec)
 	}
 }
+
+// Remove builds a file name from the context and deletes it, so it
+// takes the same guard as Save.
+func TestRemove_RejectsPathsInContext(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("Y_CLUSTER_INVENTORY_DIR", filepath.Join(dir, "inventory"))
+	victim := filepath.Join(dir, "victim.json")
+	if err := os.WriteFile(victim, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, ctx := range []string{"../victim", "", `..\victim`} {
+		if err := Remove(ctx); err == nil {
+			t.Errorf("Remove(%q) should be refused", ctx)
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("a file outside the inventory dir was removed: %v", err)
+	}
+}

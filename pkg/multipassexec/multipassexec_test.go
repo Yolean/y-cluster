@@ -8,14 +8,14 @@ import (
 
 func TestIsNotFoundOutput(t *testing.T) {
 	cases := map[string]bool{
-		"":                                       false,
-		"instance \"foo\" does not exist":        true,
-		"unknown instance \"foo\"":               true,
-		"Error: instance not found: foo":         true,
-		"info failed: foo not found":             true,
-		"some other error":                       false,
-		"failed to start, daemon not reachable":  false,
-		"INSTANCE DOES NOT EXIST: foo":           true,
+		"":                                      false,
+		"instance \"foo\" does not exist":       true,
+		"unknown instance \"foo\"":              true,
+		"Error: instance not found: foo":        true,
+		"info failed: foo not found":            true,
+		"some other error":                      false,
+		"failed to start, daemon not reachable": false,
+		"INSTANCE DOES NOT EXIST: foo":          true,
 		"trace: error: instance does not exist": true,
 	}
 	for in, want := range cases {

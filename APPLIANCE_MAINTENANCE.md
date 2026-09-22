@@ -85,9 +85,11 @@ The supplier builds the v1 appliance disk:
    `stop` first). Live phase: clears per-deploy dns-hint-ip
    GatewayClass annotations and snapshots reconciled Gateway state
    for the bundle, then stops the VM itself. Offline phase:
-   virt-customize-driven identity reset (machine-id, ssh host keys,
-   cloud-init clean), netplan generic-NIC match, systemd-timesyncd
-   enable, **build the data seed** (see Mechanism 1 below), **move
+   virt-customize-driven portability reset (`cloud-init clean`, a
+   generic-NIC DHCP netplan that cloud-init may no longer
+   regenerate, systemd-timesyncd enable; `/etc/machine-id`, the ssh
+   host keys and `authorized_keys` are deliberately KEPT, see the
+   header of `pkg/provision/qemu/prepare_inguest.sh` for why), **build the data seed** (see Mechanism 1 below), **move
    staged manifests** into k3s's auto-apply directory.
 5. `y-cluster export <bundle-dir> --format=...` packs the result for
    the target hypervisor (qcow2 / raw / vmdk / ova / gcp-tar).
@@ -148,7 +150,7 @@ write_files:
 When the bypass flag is present, the seed extracts into whatever
 `/data/yolean` is (typically the boot disk's directory if the fstab
 mount soft-failed). A sibling `/data/yolean/.y-cluster-seeded-via-bypass`
-sentinel records that the bypass path was taken — the in-memory flag
+sentinel records that the bypass path was taken -- the in-memory flag
 itself is gone after the next reboot, but the marker on disk still
 controls the seed unit's no-op decision.
 
@@ -162,8 +164,8 @@ unreachable.
 
 How the supplier builds v(N+1), assuming customers exist on v(N).
 
-The build flow is the SAME provision → install → manifests add →
-prepare-export → export sequence as Phase 1. What's
+The build flow is the SAME provision -> install -> manifests add ->
+prepare-export -> export sequence as Phase 1. What's
 different:
 
 - The supplier runs the v(N) testdata against the v(N+1) workload set,
@@ -171,10 +173,10 @@ different:
   smooth-migrated.
 - Migration Jobs go in via `y-cluster manifests add migrate-vN-vN1-... <path>`.
   These accumulate across versions: a v0.6.0 build can stage *both*
-  the v0.4→v0.5 and the v0.5→v0.6 migration Jobs by name; k3s on the
+  the v0.4->v0.5 and the v0.5->v0.6 migration Jobs by name; k3s on the
   customer side applies whichever ones haven't already run.
 - The data seed re-built on this build represents v(N+1)'s baseline.
-  Customers with existing data ignore it (marker present → no-op);
+  Customers with existing data ignore it (marker present -> no-op);
   fresh customers (a NEW customer importing for the first time on
   v(N+1)) get v(N+1)'s baseline directly.
 
@@ -233,7 +235,7 @@ The customer swaps the appliance disk while keeping the data drive.
 
 ### Customer side
 
-1. Power the appliance off (`shutdown`, ideally graceful — see drain
+1. Power the appliance off (`shutdown`, ideally graceful -- see drain
    note in "Open considerations" if Galera-class StatefulSets are in
    the stack).
 2. Detach the v(N) appliance disk; attach the v(N+1) appliance disk.
@@ -253,7 +255,7 @@ The customer issues no commands.
 If a v(N+1) migration fails, the customer reattaches the v(N) disk
 with the same data drive. The seed mechanism's marker-respect logic
 means the data drive is untouched on either appliance. Workloads
-resume against whatever state the migration left behind — which means
+resume against whatever state the migration left behind -- which means
 a partial / broken migration is on the supplier to design defensively
 (idempotent + marker-gated; see Migration Job contract above).
 
@@ -282,34 +284,34 @@ disk's root, NOT under `/data/yolean`, so it's not obscured by the
 customer's mount). It also pre-bakes
 `LABEL=y-cluster-data /data/yolean ext4 defaults,nofail 0 2` into
 `/etc/fstab` so the customer's only attach step is `mkfs.ext4 -L
-y-cluster-data /dev/...` — no fstab edit, no hypervisor-specific
+y-cluster-data /dev/...` -- no fstab edit, no hypervisor-specific
 device path.
 
 At boot, a oneshot systemd unit runs Before=k3s.service,
 After=cloud-init.service, with the following decision (in order):
 
-1. **`/run/y-cluster-seed-bypass` exists** → bypass branch: extract
+1. **`/run/y-cluster-seed-bypass` exists** -> bypass branch: extract
    regardless of mount state, drop a sibling `.y-cluster-seeded-via-bypass`
    sentinel. Hosting-automation only; customers never get here.
-2. **`/data/yolean` is NOT a mountpoint** → fail the unit. k3s stays
+2. **`/data/yolean` is NOT a mountpoint** -> fail the unit. k3s stays
    down. The customer is meant to attach a labeled volume; the
    journal explains how. Eliminates the customer-mounts-after-k3s
    race (the original GCP-appliance failure mode).
-3. **Marker `/data/yolean/.y-cluster-seeded` present** → no-op
+3. **Marker `/data/yolean/.y-cluster-seeded` present** -> no-op
    (respect existing state, upgrade fast path).
-4. **Mountpoint empty (excluding `lost+found`)** → extract the seed,
+4. **Mountpoint empty (excluding `lost+found`)** -> extract the seed,
    then write the marker.
-5. **Mountpoint non-empty, no marker** → REFUSE TO SEED. Fail the
+5. **Mountpoint non-empty, no marker** -> REFUSE TO SEED. Fail the
    unit loudly. k3s does not start.
 
 sshd has no dependency on this unit and starts normally regardless
-of seed outcome — the customer can always SSH in to recover.
+of seed outcome -- the customer can always SSH in to recover.
 
 ### Empty defined
 
 A directory is "empty" iff it has no entries other than `lost+found`
 (the kernel creates this on every freshly-formatted ext4). Anything
-else is a conflict — we won't clobber data the customer didn't tell us
+else is a conflict -- we won't clobber data the customer didn't tell us
 about.
 
 ### Marker
@@ -337,16 +339,16 @@ Mechanism 2).
 
 Four layers, in order:
 
-1. **Marker check first.** Marker present → unconditional no-op. The
+1. **Marker check first.** Marker present -> unconditional no-op. The
    upgrade fast path.
-2. **Conflict detection.** No marker + non-empty dir → fail unit, log
+2. **Conflict detection.** No marker + non-empty dir -> fail unit, log
    conflict-resolution recipes (see Troubleshooting).
 3. **k3s blocks on the unit.** A drop-in adds
    `Requires=y-cluster-data-seed.service` to k3s.service. If seed
-   fails, k3s won't start — the customer SSHes in and fixes the
+   fails, k3s won't start -- the customer SSHes in and fixes the
    situation instead of getting silent partial state.
 4. **Marker is written LAST.** A crashed extract leaves no marker; the
-   next boot detects "non-empty without marker" → conflict mode. The
+   next boot detects "non-empty without marker" -> conflict mode. The
    customer sees something's wrong instead of getting silent
    half-seeded state.
 
@@ -391,10 +393,10 @@ first boot).
 
 The appliance builder needs to ship Kubernetes manifests (typically
 migration `Job`s, but also `ConfigMap`s, `Secret`s, etc.) that should
-apply to the customer's cluster on its first boot — NOT on the build
+apply to the customer's cluster on its first boot -- NOT on the build
 cluster.
 
-Naive: `kubectl apply` during build → applies to the build cluster
+Naive: `kubectl apply` during build -> applies to the build cluster
 immediately. Init Jobs run, write to /data/yolean. Migration Jobs that
 expect "v0.4.0 schema" fail because the build cluster is freshly
 initialized at v0.5.0 schema. Wrong cluster, wrong state.
@@ -425,12 +427,20 @@ Completed state and doesn't recreate the pod).
 
 The name is the file basename (without `.yaml`). It MUST:
 - Match `[a-zA-Z0-9][a-zA-Z0-9._-]*` (no path separators, no `..`).
-- Not already exist in the staging directory (the subcommand bails).
+- Not already exist in the staging directory (the subcommand bails,
+  except that re-adding byte-identical content is a no-op so a build
+  script can run twice).
+
+While iterating on a build, `y-cluster manifests replace <name>
+<path|->` overwrites a name that IS staged and `y-cluster manifests rm
+<name>` drops one; both bail when the name is not staged. There is no
+force flag: the verb states which situation the caller believes it is
+in.
 
 The name is also the source-of-truth identifier for the migration. We
 recommend a versioned shape like `migrate-v0.5.0-userdb-add-tenants`.
-An identical name in a future appliance build → idempotent re-apply
-(no-op). A different name → new migration runs once.
+An identical name in a future appliance build -> idempotent re-apply
+(no-op). A different name -> new migration runs once.
 
 ### Trade-off
 
@@ -464,15 +474,15 @@ TARGETED AT ANOTHER.
 
 ## Open considerations (not blocking the first cut)
 
-- **Selective seeding** — a flag on `prepare-export` to seed only
+- **Selective seeding** -- a flag on `prepare-export` to seed only
   specific subdirs of `/data/yolean` (e.g., init markers and
   config-only files). Lets workloads re-do bulk init on first boot to
   shrink the appliance.
-- **Migration ordering across multiple Jobs** — if multiple staged
+- **Migration ordering across multiple Jobs** -- if multiple staged
   Jobs need to run in order, the appliance builder uses K8s-native
   dependency primitives (a wait-for-completion Init container on the
   second Job). y-cluster doesn't try to model an ordering DAG itself.
-- **Customer-side rollback marker** — today rollback = swap back to
+- **Customer-side rollback marker** -- today rollback = swap back to
   the prior appliance disk. A more explicit "rollback marker" pattern
   would let the supplier signal "this migration is reversible by
   Job-X" and the customer trigger that without disk swap.

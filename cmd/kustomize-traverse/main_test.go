@@ -32,8 +32,8 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, code int) {
 func TestDirsHappyPath(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
-		"base/kustomization.yaml": "namespace: dev\nresources:\n- deployment.yaml\n",
-		"base/deployment.yaml":    "kind: Deployment\n",
+		"base/kustomization.yaml":    "namespace: dev\nresources:\n- deployment.yaml\n",
+		"base/deployment.yaml":       "kind: Deployment\n",
 		"overlay/kustomization.yaml": "resources:\n- ../base\n",
 	})
 
@@ -75,8 +75,8 @@ func TestNamespaceFallsBackThroughSingleBase(t *testing.T) {
 func TestNamespaceEmptyWhenUnresolvable(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
-		"a/kustomization.yaml": "",
-		"b/kustomization.yaml": "",
+		"a/kustomization.yaml":    "",
+		"b/kustomization.yaml":    "",
 		"root/kustomization.yaml": "resources:\n- ../a\n- ../b\n",
 	})
 	stdout, _, code := runCLI(t, "-o", "namespace", filepath.Join(root, "root"))
@@ -91,7 +91,7 @@ func TestNamespaceEmptyWhenUnresolvable(t *testing.T) {
 func TestComponentsAreTraversed(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
-		"comp/kustomization.yaml": "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+		"comp/kustomization.yaml":    "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
 		"overlay/kustomization.yaml": "components:\n- ../comp\n",
 	})
 	stdout, _, code := runCLI(t, "-o", "dirs", filepath.Join(root, "overlay"))
@@ -139,9 +139,9 @@ func TestDedupeAcrossOverlayAndBase(t *testing.T) {
 func TestDepthFirstBasesBeforeOverlay(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{
-		"leaf/kustomization.yaml":   "",
-		"mid/kustomization.yaml":    "resources:\n- ../leaf\n",
-		"top/kustomization.yaml":    "resources:\n- ../mid\n",
+		"leaf/kustomization.yaml": "",
+		"mid/kustomization.yaml":  "resources:\n- ../leaf\n",
+		"top/kustomization.yaml":  "resources:\n- ../mid\n",
 	})
 	stdout, _, code := runCLI(t, "-o", "dirs", filepath.Join(root, "top"))
 	if code != 0 {

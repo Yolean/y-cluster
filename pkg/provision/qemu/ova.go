@@ -64,15 +64,25 @@ func writeOVA(ctx context.Context, qcow2Src, ovaPath string, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("create ova: %w", err)
 	}
-	defer out.Close()
+	if err := writeOVATar(out, tmpDir, cfg.Name); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// A multi-GB write can still fail here (a full disk reports on
+	// close for some filesystems), and the file is the deliverable.
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close ova: %w", err)
+	}
+	return nil
+}
 
+// writeOVATar writes the two members from dir. Order matters: the
+// OVF MUST come first so streaming OVA readers can parse the
+// descriptor before the disk bytes land.
+func writeOVATar(out io.Writer, dir, name string) error {
 	tw := tar.NewWriter(out)
-	// Order matters: OVF MUST come first so streaming OVA
-	// readers can parse the descriptor before the disk bytes
-	// land. Hence we write the .ovf entry, then the .vmdk.
-	for _, name := range []string{cfg.Name + ".ovf", cfg.Name + ".vmdk"} {
-		if err := tarAppendFile(tw, filepath.Join(tmpDir, name), name); err != nil {
-			_ = tw.Close()
+	for _, member := range []string{name + ".ovf", name + ".vmdk"} {
+		if err := tarAppendFile(tw, filepath.Join(dir, member), member); err != nil {
 			return err
 		}
 	}

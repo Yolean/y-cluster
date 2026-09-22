@@ -99,9 +99,8 @@ type Options struct {
 //  4. kubectl apply the default GatewayClass with the configured
 //     name (skipped when GatewayClassName is empty).
 //
-// Implementation switched from client-go's typed apply / rollout
-// to kubectl shellouts to drop pkg/k8sapply + pkg/k8swait (and
-// thereby k8s.io/client-go) from the binary. Stdout / stderr are
+// Everything goes through kubectl shellouts, which keeps
+// k8s.io/client-go out of the binary. Stdout / stderr are
 // forwarded so the operator sees the same `<kind>/<name>
 // serverside-applied` output kubectl prints directly.
 func Install(ctx context.Context, opts Options) error {

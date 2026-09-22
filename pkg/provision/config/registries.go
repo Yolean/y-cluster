@@ -3,8 +3,7 @@ package config
 // Registries mirrors the shape of k3s's
 // /etc/rancher/k3s/registries.yaml. The y-cluster provision step
 // marshals this struct and writes it to that path on the node
-// before k3s starts, replacing the bash `bin/y-registry-config`
-// step ystack used pre-migration.
+// before k3s starts.
 //
 // Reference: https://docs.k3s.io/installation/private-registry
 //

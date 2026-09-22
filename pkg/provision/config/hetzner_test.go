@@ -314,3 +314,57 @@ func TestHetzner_ImageCache_RejectsUnknownRegion(t *testing.T) {
 		t.Errorf("region typo should fail with known-region error, got %v", err)
 	}
 }
+
+// lbGroup defaults to $USER, which containers and CI jobs often lack.
+// An empty group used to pass: it produced hostnames with an empty
+// label and switched off teardown's "delete the load balancer with
+// its last server", so the LB kept billing.
+func TestHetzner_Validate_LBGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name, user, lbGroup, wantErr string
+	}{
+		{"defaults to $USER", "alice", "", ""},
+		{"dotted user name is a valid group", "alice.smith", "", ""},
+		{"explicit group", "", "team-qa", ""},
+		{"no $USER and nothing configured", "", "", "lbGroup"},
+		{"uppercase", "", "Alice", "lbGroup"},
+		{"underscore", "", "team_qa", "lbGroup"},
+		{"trailing dot", "", "alice.", "lbGroup"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("USER", tc.user)
+			c := &HetznerConfig{CommonConfig: CommonConfig{Context: "alice-dev"}, LBGroup: tc.lbGroup}
+			c.ApplyDefaults()
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error naming %s, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// The provisioner always runs the install script on the server. The
+// common default is airgap, which used to be accepted here and then
+// ignored.
+func TestHetzner_K3sInstall(t *testing.T) {
+	c := &HetznerConfig{CommonConfig: CommonConfig{Context: "alice-dev"}}
+	c.ApplyDefaults()
+	if c.K3s.Install != "script" {
+		t.Errorf("default install: got %q, want script (what the provisioner does)", c.K3s.Install)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("defaults should validate: %v", err)
+	}
+
+	asked := &HetznerConfig{CommonConfig: CommonConfig{Context: "alice-dev", K3s: K3sConfig{Install: "airgap"}}}
+	asked.ApplyDefaults()
+	if err := asked.Validate(); err == nil || !strings.Contains(err.Error(), "not supported on hetzner") {
+		t.Errorf("an airgap install the provisioner would ignore must be refused, got %v", err)
+	}
+}

@@ -10,8 +10,8 @@ import (
 
 // imagesPushCmd is `y-cluster images push <ref>`: ensure the ref is
 // in the local OCI cache, then upload the layout + index entry to
-// Hetzner Object Storage. The pre-load Provision-time consumer
-// (phase 6.c) reads the index and OCI layouts from the same bucket.
+// Hetzner Object Storage. Provision's image pre-load reads the
+// index and OCI layouts from the same bucket.
 //
 // Credentials default to the H_S3_* env vars the operator's
 // y-cluster-hetzner.env carries; flags override on a per-invocation
@@ -35,7 +35,7 @@ func imagesPushCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "push <ref>",
-		Short: "Push an image to the Hetzner Object Storage cache (phase 6.b)",
+		Short: "Push an image to the Hetzner Object Storage cache",
 		Long: `Pull <ref> into the local OCI cache (same path as ` + "`images cache`" + `),
 then upload the resulting OCI v1 image layout to Hetzner Object
 Storage under oci/<safe-ref>/<digest>/, and merge an entry into

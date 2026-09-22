@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/multipassexec"
+	"github.com/Yolean/y-cluster/pkg/shquote"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -18,11 +18,11 @@ import (
 //
 // Routing per backend:
 //   - docker:           exec via the Docker daemon API (stdcopy demux);
-//                       dockerexec.ExitError on non-zero exec exit.
+//     dockerexec.ExitError on non-zero exec exit.
 //   - qemu / hetzner:   `sudo k3s ctr <args>` over an x/crypto/ssh session;
-//                       *ssh.ExitError on non-zero remote exit.
+//     *ssh.ExitError on non-zero remote exit.
 //   - multipass:        `multipass exec <name> -- sudo k3s ctr <args>`;
-//                       exit status comes from the local multipass CLI.
+//     exit status comes from the local multipass CLI.
 //
 // `ctr` rather than `k3s ctr` for docker because the rancher/k3s
 // container image puts ctr on PATH directly. qemu and multipass
@@ -38,6 +38,14 @@ func RunCrictl(ctx context.Context, lr *LookupResult, args []string, stdin io.Re
 }
 
 func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return execOnNode(ctx, lr, append([]string{binary}, args...), buildVMNodeRemote(binary, args), stdin, stdout, stderr)
+}
+
+// execOnNode is the one place that knows how each backend reaches
+// its node. The docker backend's node is a container and takes an
+// argv; the VM backends run one command line under the node's shell,
+// over ssh or `multipass exec`.
+func execOnNode(ctx context.Context, lr *LookupResult, containerArgv []string, vmCommand string, stdin io.Reader, stdout, stderr io.Writer) error {
 	switch lr.Backend {
 	case BackendDocker:
 		cli, err := dockerexec.New()
@@ -45,35 +53,29 @@ func runOnNode(ctx context.Context, lr *LookupResult, binary string, args []stri
 			return fmt.Errorf("docker client: %w", err)
 		}
 		defer func() { _ = cli.Close() }()
-		return dockerexec.Exec(ctx, cli, lr.ContainerName,
-			append([]string{binary}, args...),
-			stdin, stdout, stderr)
+		return dockerexec.Exec(ctx, cli, lr.ContainerName, containerArgv, stdin, stdout, stderr)
 	case BackendQEMU, BackendHetzner:
 		return sshexec.ExecStream(ctx, sshexec.Target{
 			Host: lr.SSHHost, Port: lr.SSHPort,
 			User: lr.SSHUser, KeyPath: lr.SSHKey,
-		}, buildVMNodeRemote(binary, args), stdin, stdout, stderr)
+		}, vmCommand, stdin, stdout, stderr)
 	case BackendMultipass:
-		return multipassexec.ExecStream(ctx, lr.MultipassName,
-			buildVMNodeRemote(binary, args), stdin, stdout, stderr)
+		return multipassexec.ExecStream(ctx, lr.MultipassName, vmCommand, stdin, stdout, stderr)
 	default:
 		return fmt.Errorf("unsupported backend %q", lr.Backend)
 	}
 }
 
-// buildQemuRemote shapes the single-string command sshexec.ExecStream
-// passes as the remote command. On a k3s VM, ctr/crictl live under
-// `k3s` so we always wrap in `sudo k3s <binary>`. Args are
-// shell-quoted because ssh executes the string under /bin/sh.
-func buildQemuRemote(binary string, args []string) string {
-	return buildVMNodeRemote(binary, args)
-}
-
-// buildVMNodeRemote is the shared shape used by qemu (over SSH) and
-// multipass (over `multipass exec`). Both run sh inside the VM and
-// k3s puts ctr/crictl behind `sudo k3s`.
+// buildVMNodeRemote shapes the single command string for the VM
+// backends: qemu and hetzner over ssh, multipass over `multipass
+// exec`. All run it under sh inside the VM, so args are shell-quoted,
+// and k3s puts ctr/crictl behind `sudo k3s`.
 func buildVMNodeRemote(binary string, args []string) string {
-	return "sudo k3s " + binary + shellQuoteJoin(args)
+	remote := "sudo k3s " + binary
+	if len(args) > 0 {
+		remote += " " + shquote.Join(args)
+	}
+	return remote
 }
 
 // RunShell executes an arbitrary shell command (parsed by `sh -c`)
@@ -86,55 +88,6 @@ func buildVMNodeRemote(binary string, args []string) string {
 //
 // stdin/stdout/stderr are passthrough so callers can pipe arbitrary
 // bytes (manifest YAML on stdin, command output to stdout).
-//
-// Routing per backend mirrors RunCtr.
 func RunShell(ctx context.Context, lr *LookupResult, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
-	switch lr.Backend {
-	case BackendDocker:
-		cli, err := dockerexec.New()
-		if err != nil {
-			return fmt.Errorf("docker client: %w", err)
-		}
-		defer func() { _ = cli.Close() }()
-		return dockerexec.Exec(ctx, cli, lr.ContainerName,
-			[]string{"sh", "-c", cmd},
-			stdin, stdout, stderr)
-	case BackendQEMU, BackendHetzner:
-		return sshexec.ExecStream(ctx, sshexec.Target{
-			Host: lr.SSHHost, Port: lr.SSHPort,
-			User: lr.SSHUser, KeyPath: lr.SSHKey,
-		}, "sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
-	case BackendMultipass:
-		return multipassexec.ExecStream(ctx, lr.MultipassName,
-			"sudo sh -c "+singleQuote(cmd), stdin, stdout, stderr)
-	default:
-		return fmt.Errorf("unsupported backend %q", lr.Backend)
-	}
-}
-
-// singleQuote wraps a string in POSIX single quotes for safe inclusion
-// in a remote shell command. Single quotes inside the string are
-// escaped via the standard '\'' trick. Used to pass an entire `sh -c`
-// command line through ssh / multipass-exec without re-parsing.
-func singleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// shellQuoteJoin shell-quotes each arg with single quotes (POSIX-
-// safe) and joins with leading spaces. Empty `args` returns "".
-// Single quotes inside an arg become `'\''` per the standard
-// trick — closing the quoted string, escaping a literal quote,
-// reopening.
-func shellQuoteJoin(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, a := range args {
-		b.WriteByte(' ')
-		b.WriteByte('\'')
-		b.WriteString(strings.ReplaceAll(a, "'", `'\''`))
-		b.WriteByte('\'')
-	}
-	return b.String()
+	return execOnNode(ctx, lr, []string{"sh", "-c", cmd}, "sudo sh -c "+shquote.Quote(cmd), stdin, stdout, stderr)
 }

@@ -9,19 +9,18 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
-	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
-	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
 
 // pauseCmd, resumeCmd, stopCmd, startCmd are the cluster lifecycle
 // subcommands -- a provisioner-neutral surface with per-backend
-// depth: stop dispatches to all three backends; pause and resume
-// are qemu-only and return a "not yet implemented for <backend>"
-// error elsewhere; start assumes qemu outright (it rehydrates from
-// the qemu sidecar, so a stopped docker cluster gets the qemu "no
-// saved state" error rather than a not-implemented one).
+// depth: stop works on every provider; pause and resume are
+// qemu-only, refused for hetzner with the reason and "not yet
+// implemented" elsewhere; start handles qemu and hetzner (it
+// rehydrates from their state sidecars, so a stopped docker
+// cluster gets the qemu "no saved state" error rather than a
+// not-implemented one).
 //
 // All four resolve the cluster via the kubeconfig context (the
 // same convention detect / ctr / crictl use) -- no -c <dir>
@@ -31,18 +30,27 @@ import (
 // the qemu launch parameters from the sidecar Provision wrote.
 
 func pauseCmd() *cobra.Command {
-	return signalCmd("pause", "Pause the cluster VM (SIGSTOP); resume to unfreeze", qemu.Pause)
+	return signalCmd("pause", "Pause the cluster VM (SIGSTOP); resume to unfreeze",
+		func(cacheDir, name, _ string, logger *zap.Logger) error {
+			return qemu.Pause(cacheDir, name, logger)
+		})
 }
 
 func resumeCmd() *cobra.Command {
-	return signalCmd("resume", "Resume a paused cluster VM (SIGCONT)", qemu.Resume)
+	return signalCmd("resume", "Resume a paused cluster VM (SIGCONT)",
+		func(cacheDir, name, contextName string, logger *zap.Logger) error {
+			if err := qemu.Resume(cacheDir, name, logger); err != nil {
+				return err
+			}
+			// The timer that paused an expired VM was one-shot, and
+			// Resume has given that VM a new deadline.
+			armHostTimerIfLifetime(cacheDir, name, contextName, logger)
+			return nil
+		})
 }
 
-// stopCmd dispatches per-backend rather than going through
-// signalCmd: qemu.Stop's signature takes (cacheDir, name); docker
-// and multipass take (ctx, name); a uniform signalCmd helper
-// would need a wrapper per backend anyway, so the explicit switch
-// is clearer.
+// stopCmd resolves the context to a running cluster and hands it to
+// that provider's stop adapter.
 func stopCmd() *cobra.Command {
 	var contextName string
 	cmd := &cobra.Command{
@@ -56,32 +64,23 @@ func stopCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			switch lr.Backend {
-			case cluster.BackendQEMU:
-				// A manual stop ends this run's budget; remove the
-				// host expiry timer. `start` re-arms a fresh window.
-				disarmHostTimer(contextName, logger)
-				return qemu.Stop(qemuCacheDir(), lr.ClusterName, logger)
-			case cluster.BackendDocker:
-				return docker.Stop(ctx, lr.ClusterName, logger)
-			case cluster.BackendMultipass:
-				return multipass.Stop(ctx, lr.ClusterName, logger)
-			case cluster.BackendHetzner:
-				return hetzner.Stop(ctx, lr.ClusterName, logger)
-			default:
-				return fmt.Errorf("stop: not yet implemented for %s", lr.Backend)
+			// Backends and providers share their names; a test holds
+			// that every backend has an entry.
+			ops, ok := providers[string(lr.Backend)]
+			if !ok {
+				return fmt.Errorf("stop: no provisioner for backend %s in this binary", lr.Backend)
 			}
+			return ops.stop(ctx, contextName, lr.ClusterName, logger)
 		},
 	}
 	cmd.Flags().StringVar(&contextName, "context", cluster.DefaultContext, "kubeconfig context name")
 	return cmd
 }
 
-// signalCmd is the shared shape for pause / resume / stop. Each
-// looks up the running cluster, dispatches by backend, and calls
-// the qemu lifecycle function. Non-qemu backends return a "not
-// implemented" error.
-func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.Logger) error) *cobra.Command {
+// signalCmd is the shared shape of pause and resume: look up the
+// running cluster and, for qemu, call run. Other backends have no
+// such verb.
+func signalCmd(name, short string, run func(cacheDir, name, contextName string, logger *zap.Logger) error) *cobra.Command {
 	var contextName string
 	cmd := &cobra.Command{
 		Use:   name,
@@ -95,7 +94,7 @@ func signalCmd(name, short string, run func(cacheDir, name string, logger *zap.L
 			}
 			switch lr.Backend {
 			case cluster.BackendQEMU:
-				return run(qemuCacheDir(), lr.ClusterName, logger)
+				return run(qemuCacheDir(), lr.ClusterName, contextName, logger)
 			case cluster.BackendHetzner:
 				// pause / resume have no Hetzner Cloud analog
 				// (no SIGSTOP/SIGCONT against a guest). Surface a
@@ -137,18 +136,20 @@ yolean.se/dns-hint-ip GatewayClass annotations and snapshots the
 reconciled Gateway state for the export bundle, then stops the
 VM itself. Do not run 'y-cluster stop' first.
 
-Offline phase (virt-customize on the stopped qcow2): wipes
-machine-id, SSH host keys, udev persistent net rules, MAC-bound
-netplan, and the cloud-init state cache; stages the data seed
-and any added manifests; registers a firstboot ssh-keygen so the
-imported instance regenerates its own host keys.
+Offline phase (virt-customize on the stopped qcow2): wipes the
+cloud-init state cache, replaces the MAC-bound netplan with one
+that matches any NIC and keeps cloud-init from regenerating it,
+enables time sync; stages the data seed and moves any added
+manifests to where k3s applies them. /etc/machine-id, the SSH host
+keys and authorized_keys are KEPT: removing machine-id breaks DHCP
+on first boot, and the keys are part of the per-customer bundle.
 
 	y-cluster provision
 	y-cluster prepare-export   # stops the VM internally
 
 Idempotent. A prepared appliance is no longer a usable dev
-cluster locally: the next start runs cloud-init re-init and
-regenerates identity. Re-provision for a fresh dev loop.
+cluster locally: the next start runs cloud-init as on a first
+boot. Re-provision for a fresh dev loop.
 
 Requires libguestfs-tools (sudo apt install libguestfs-tools)
 and kubectl.`,

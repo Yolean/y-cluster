@@ -1,16 +1,16 @@
 // Package cache resolves the on-disk root y-cluster uses for
 // downloaded artefacts (k3s airgap bundles, OCI image layouts).
-// Runtime state — qcow2 disks, pidfiles, ssh keys — stays in
+// Runtime state -- qcow2 disks, pidfiles, ssh keys -- stays in
 // each provisioner's own cache (e.g. ~/.cache/y-cluster-qemu)
 // because that's not a "download" and shouldn't be cleared by
 // `y-cluster cache purge`.
 //
 // Resolution order on every command that needs the cache root:
 //
-//	1. --cache-dir=<path>      (per-command flag override)
-//	2. $Y_CLUSTER_CACHE_DIR    (env override)
-//	3. $XDG_CACHE_HOME/y-cluster
-//	4. $HOME/.cache/y-cluster  (POSIX fallback when XDG is unset)
+//  1. --cache-dir=<path>      (per-command flag override)
+//  2. $Y_CLUSTER_CACHE_DIR    (env override)
+//  3. $XDG_CACHE_HOME/y-cluster
+//  4. $HOME/.cache/y-cluster  (POSIX fallback when XDG is unset)
 //
 // All four candidates collapse to the same root; the subtrees
 // (Images, K3s, EnvoyGateway) are conventional names beneath it
@@ -25,7 +25,7 @@ import (
 )
 
 // Root returns the resolved cache directory. The directory is
-// not created here — callers that write into Images() / K3s()
+// not created here -- callers that write into Images() / K3s()
 // own MkdirAll. flagOverride is the value of a `--cache-dir`
 // flag (empty means "no flag was given").
 func Root(flagOverride string) (string, error) {
@@ -74,8 +74,7 @@ func ImageLayout(flagOverride, digest string) (string, error) {
 }
 
 // K3s returns the k3s download root: airgap tarballs, k3s binary,
-// per-version. Replaces the qemu provisioner's old
-// ~/.cache/y-cluster-qemu/airgap/<version> location.
+// per-version.
 func K3s(flagOverride string) (string, error) {
 	root, err := Root(flagOverride)
 	if err != nil {
@@ -120,4 +119,33 @@ func EnvoyGatewayVersion(flagOverride, version string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, version), nil
+}
+
+// Subtree is one purgeable directory under the cache root.
+type Subtree struct {
+	Name string
+	Path string
+}
+
+// Subtrees lists every subtree this binary writes to. `cache info`
+// and `cache purge --all` iterate it, so a subtree added here is
+// reported and purged without touching either command; a subtree
+// missing here is invisible to both.
+func Subtrees(flagOverride string) ([]Subtree, error) {
+	var out []Subtree
+	for _, s := range []struct {
+		name string
+		path func(string) (string, error)
+	}{
+		{"images", Images},
+		{"k3s", K3s},
+		{"envoygateway", EnvoyGateway},
+	} {
+		p, err := s.path(flagOverride)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Subtree{Name: s.name, Path: p})
+	}
+	return out, nil
 }

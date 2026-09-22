@@ -112,15 +112,6 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // RelPath returns path relative to base, or the original path if
 // the relative path would require going above base.
 func RelPath(base, path string) string {

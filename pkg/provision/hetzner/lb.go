@@ -10,8 +10,7 @@ import (
 )
 
 // lbType is the cheapest tier (~5 EUR/mo, 10k connections) -- well
-// over what a per-developer dev cluster needs. Phase 5 makes this
-// configurable if a customer scenario ever lands here.
+// over what a per-developer dev cluster needs. Not configurable.
 const lbType = "lb11"
 
 // lbHealthCheckInterval / Timeout / Retries match Hetzner's UI
@@ -169,6 +168,10 @@ func ensureLoadBalancer(ctx context.Context, hc *hcloud.Client, cfg lbConfig, fi
 	lb, _, err := hc.LoadBalancer.GetByID(ctx, res.LoadBalancer.ID)
 	if err != nil {
 		return nil, fmt.Errorf("re-fetch LB %d: %w", res.LoadBalancer.ID, err)
+	}
+	if lb == nil {
+		// GetByID reports "not found" as (nil, nil).
+		return nil, fmt.Errorf("LB %d was created but is gone on re-fetch", res.LoadBalancer.ID)
 	}
 	logger.Info("Hetzner LB ready",
 		zap.Int64("id", lb.ID),
