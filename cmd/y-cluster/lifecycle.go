@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/cluster"
+	"github.com/Yolean/y-cluster/pkg/provision/glesys"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
 )
@@ -102,6 +103,8 @@ func signalCmd(name, short string, run func(cacheDir, name, contextName string, 
 				// "not yet implemented" so the operator knows it
 				// will not be implemented.
 				return fmt.Errorf("%s: not supported on hetzner provider (Hetzner Cloud has no pause/resume primitive); use `y-cluster stop` + `y-cluster start` to power-cycle the server, or `y-cluster teardown` to free billing", name)
+			case cluster.BackendGlesys:
+				return fmt.Errorf("%s: not supported on glesys provider (a GleSYS server has no pause/resume primitive); use `y-cluster stop` + `y-cluster start` to power-cycle the server, or `y-cluster teardown` to free billing", name)
 			default:
 				return fmt.Errorf("%s: not yet implemented for %s", name, lr.Backend)
 			}
@@ -171,6 +174,9 @@ and kubectl.`,
 			// confusing qemu-shaped failure deep inside virt-sysprep.
 			if hetzner.HasState(clusterName) {
 				return fmt.Errorf("prepare-export: not supported on hetzner provider (Hetzner Cloud has no custom-disk-image upload API); use the qemu provisioner for disk-bound appliances")
+			}
+			if glesys.HasState(clusterName) {
+				return fmt.Errorf("prepare-export: not supported on glesys provider (the node runs Talos, not the k3s appliance image); use the qemu provisioner for disk-bound appliances")
 			}
 			return qemu.PrepareExport(cmd.Context(), qemuCacheDir(), clusterName, logger)
 		},
@@ -273,6 +279,17 @@ func startCmd() *cobra.Command {
 			// can't probe a powered-off server.
 			if hetzner.HasState(clusterName) {
 				ipv4, err := hetzner.Start(cmd.Context(), clusterName, logger)
+				if err != nil {
+					return err
+				}
+				logger.Info("cluster started",
+					zap.String("context", clusterName),
+					zap.String("ipv4", ipv4),
+				)
+				return nil
+			}
+			if glesys.HasState(clusterName) {
+				ipv4, err := glesys.Start(cmd.Context(), clusterName, logger)
 				if err != nil {
 					return err
 				}

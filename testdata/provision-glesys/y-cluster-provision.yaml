@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../../pkg/provision/schema/glesys.schema.json
+#
+# Worked example for the glesys provisioner: a single-node Talos
+# Linux cluster on a GleSYS KVM server. Rename `context` (>= 4
+# chars, DNS-label-safe, not "local"); the server is named after it.
+#
+# Required in env: GLESYS_PROJECT (the cl12345 project id) and
+# GLESYS_API_KEY. Keep them in an env file outside the repo
+# and source it before running y-cluster.
+# The API key has to list the operator's public address as an
+# allowed host, or every call answers 403.
+#
+# After provision:
+#   - kubeconfig is merged into the operator's $KUBECONFIG under
+#     <context> (cluster name == context), pointed at the server's
+#     public IPv4 on 6443.
+#   - talosctl config is at ~/.cache/y-cluster-glesys/<context>-talosconfig.
+#     Talos has no shell; `y-cluster ctr` and friends refuse the
+#     context and say so.
+#   - Nothing is installed on top of Kubernetes: no gateway, no
+#     storage class. The k3s, gateway, registries and lifetime
+#     stanzas are refused at load rather than ignored.
+#   - The server bills until `y-cluster teardown`, which destroys
+#     it and releases its address. `y-cluster stop` powers it off
+#     and keeps billing.
+provider: glesys
+context: alice-talos
+# dataCenter: Falkenberg      # default; server/allowedarguments lists the others
+# template: Talos 1.14        # default; provision lists the Talos templates on a miss
+# memory: "8192"              # default, MB
+# cpus: "4"                   # default
+# serverDisk: 30G             # default; per GB per month, the cheap dimension

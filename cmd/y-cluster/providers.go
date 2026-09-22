@@ -9,6 +9,7 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/provision/glesys"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
@@ -127,6 +128,26 @@ var providers = map[string]providerOps{
 		hostPorts: func(config.ProviderConfig) []string { return nil },
 		stop: func(ctx context.Context, _, clusterName string, logger *zap.Logger) error {
 			return hetzner.Stop(ctx, clusterName, logger)
+		},
+	},
+	config.ProviderGlesys: {
+		provision: func(ctx context.Context, cfg config.ProviderConfig, logger *zap.Logger) (string, error) {
+			g := cfg.(*config.GlesysConfig)
+			cluster, err := glesys.Provision(ctx, *g, logger)
+			if err != nil {
+				return "", err
+			}
+			// Talos has no shell; talosctl is the way in.
+			return fmt.Sprintf("talosctl --talosconfig %s -n %s dashboard",
+				cluster.TalosconfigPath(), cluster.PublicIPv4()), nil
+		},
+		teardown: func(ctx context.Context, cfg config.ProviderConfig, _ bool, logger *zap.Logger) error {
+			return glesys.Teardown(ctx, cfg.Common().Context, logger)
+		},
+		// A remote server binds nothing on this host.
+		hostPorts: func(config.ProviderConfig) []string { return nil },
+		stop: func(ctx context.Context, _, clusterName string, logger *zap.Logger) error {
+			return glesys.Stop(ctx, clusterName, logger)
 		},
 	},
 }

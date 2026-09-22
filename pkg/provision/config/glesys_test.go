@@ -15,20 +15,20 @@ func glesysMinimal() *GlesysConfig {
 	return c
 }
 
-// TestGlesys_DefaultsAreTheSmallMachine pins the sizing defaults.
-// They are deliberately below CommonConfig's 8192/4 because GleSYS
-// bills hourly, and the mechanism that makes the smaller values win
-// is subtle (pre-set before applyTagDefaults, which only fills empty
-// strings), so a regression here would silently double the bill.
-func TestGlesys_DefaultsAreTheSmallMachine(t *testing.T) {
+// TestGlesys_Defaults pins what a bare config expands into. Sizing
+// is CommonConfig's regular single-site machine; where the server
+// runs and what it boots are not details either: a default that
+// drifts moves new clusters to another country or another Talos
+// release without anyone having asked.
+func TestGlesys_Defaults(t *testing.T) {
 	c := glesysMinimal()
 	c.ApplyDefaults()
 
-	if c.Memory != "4096" {
-		t.Errorf("memory: got %q, want 4096 (CommonConfig's 8192 must not win)", c.Memory)
+	if c.Memory != "8192" {
+		t.Errorf("memory: got %q, want 8192 (the regular single-site machine)", c.Memory)
 	}
-	if c.CPUs != "2" {
-		t.Errorf("cpus: got %q, want 2 (CommonConfig's 4 must not win)", c.CPUs)
+	if c.CPUs != "4" {
+		t.Errorf("cpus: got %q, want 4", c.CPUs)
 	}
 	if c.ServerDisk != "30G" {
 		t.Errorf("serverDisk: got %q, want 30G", c.ServerDisk)
@@ -36,35 +36,36 @@ func TestGlesys_DefaultsAreTheSmallMachine(t *testing.T) {
 	if c.Platform != "KVM" {
 		t.Errorf("platform: got %q, want KVM", c.Platform)
 	}
-	// Where the server runs and what it boots are not details: a
-	// default that drifts moves new clusters to another country or
-	// another OS release without anyone having asked.
-	if c.DataCenter != "Stockholm" {
-		t.Errorf("dataCenter: got %q, want Stockholm", c.DataCenter)
+	if c.DataCenter != "Falkenberg" {
+		t.Errorf("dataCenter: got %q, want Falkenberg", c.DataCenter)
 	}
-	if c.Template != "ubuntu-24-04" {
-		t.Errorf("template: got %q, want ubuntu-24-04", c.Template)
+	if c.Template != "Talos 1.14" {
+		t.Errorf("template: got %q, want Talos 1.14", c.Template)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("the defaults must validate: %v", err)
 	}
 }
 
-// TestGlesys_ExplicitSizingSurvivesDefaults is the other half of the
-// pre-set mechanism: an operator who asks for a bigger machine must
-// keep it.
+// TestGlesys_ExplicitSizingSurvivesDefaults: an operator who asks for
+// another machine keeps it.
 func TestGlesys_ExplicitSizingSurvivesDefaults(t *testing.T) {
 	c := glesysMinimal()
-	c.Memory = "8192"
-	c.CPUs = "4"
+	c.Memory = "4096"
+	c.CPUs = "2"
 	c.ServerDisk = "80G"
+	c.Template = "Talos 1.15"
 	c.ApplyDefaults()
 
-	if c.Memory != "8192" || c.CPUs != "4" || c.ServerDisk != "80G" {
-		t.Fatalf("explicit sizing was overwritten: memory=%q cpus=%q serverDisk=%q", c.Memory, c.CPUs, c.ServerDisk)
+	if c.Memory != "4096" || c.CPUs != "2" || c.ServerDisk != "80G" || c.Template != "Talos 1.15" {
+		t.Fatalf("explicit values were overwritten: memory=%q cpus=%q serverDisk=%q template=%q", c.Memory, c.CPUs, c.ServerDisk, c.Template)
 	}
 }
 
 // TestGlesys_PlatformMustBeKVM: KVM is the only platform that takes a
-// cloudconfig, and cloudconfig is how k3s gets installed. Failing at
-// config load beats an unexplained SSH timeout ten minutes later.
+// cloudconfig, and cloudconfig is how the machine config reaches the
+// node. Failing at config load beats an unexplained API timeout ten
+// minutes later.
 func TestGlesys_PlatformMustBeKVM(t *testing.T) {
 	c := glesysMinimal()
 	c.ApplyDefaults()
@@ -99,23 +100,33 @@ func TestGlesys_SizingMustBeNumeric(t *testing.T) {
 	}
 }
 
-// The type comment says hosting, not appliance. These are the two
-// fields through which a config could ask for the appliance shape
-// anyway, and a provisioner that ignored them would leave the
-// operator waiting for something that never happens.
-func TestGlesys_NoApplianceShape(t *testing.T) {
-	c := glesysMinimal()
-	c.K3s.Install = "airgap"
-	c.ApplyDefaults()
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "k3s.install") {
-		t.Errorf("airgap install: want it refused, got %v", err)
-	}
-
-	c = glesysMinimal()
-	c.PortForwards = []PortForward{{Host: "8443", Guest: "443"}}
-	c.ApplyDefaults()
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "portForwards") {
-		t.Errorf("explicit portForwards: want them refused, got %v", err)
+// The node runs Talos, and the provisioner installs nothing on top.
+// Each of these stanzas asks for something the provider does not do,
+// and an operator who wrote one would otherwise look for its effect.
+func TestGlesys_StanzasThatDoNotApply(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*GlesysConfig)
+		want string
+	}{
+		{"k3s airgap install", func(c *GlesysConfig) { c.K3s.Install = "airgap" }, "k3s.install"},
+		{"portForwards", func(c *GlesysConfig) { c.PortForwards = []PortForward{{Host: "8443", Guest: "443"}} }, "portForwards"},
+		{"gateway skip", func(c *GlesysConfig) { c.Gateway.Skip = true }, "gateway"},
+		{"gateway className", func(c *GlesysConfig) { c.Gateway.ClassName = "eg" }, "gateway"},
+		{"lifetime", func(c *GlesysConfig) { c.Lifetime.MaxRun = "8h" }, "lifetime"},
+		{"registries", func(c *GlesysConfig) {
+			c.Registries.Mirrors = map[string]RegistryMirror{"docker.io": {Endpoint: []string{"https://mirror.example"}}}
+		}, "registries"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := glesysMinimal()
+			tc.set(c)
+			c.ApplyDefaults()
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want a refusal naming %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 
