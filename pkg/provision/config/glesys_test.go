@@ -100,8 +100,8 @@ func TestGlesys_SizingMustBeNumeric(t *testing.T) {
 	}
 }
 
-// The node runs Talos, and the provisioner installs nothing on top.
-// Each of these stanzas asks for something the provider does not do,
+// The node runs Talos. Each of these stanzas asks for something the
+// provider does not do,
 // and an operator who wrote one would otherwise look for its effect.
 func TestGlesys_StanzasThatDoNotApply(t *testing.T) {
 	for _, tc := range []struct {
@@ -111,8 +111,6 @@ func TestGlesys_StanzasThatDoNotApply(t *testing.T) {
 	}{
 		{"k3s airgap install", func(c *GlesysConfig) { c.K3s.Install = "airgap" }, "k3s.install"},
 		{"portForwards", func(c *GlesysConfig) { c.PortForwards = []PortForward{{Host: "8443", Guest: "443"}} }, "portForwards"},
-		{"gateway skip", func(c *GlesysConfig) { c.Gateway.Skip = true }, "gateway"},
-		{"gateway className", func(c *GlesysConfig) { c.Gateway.ClassName = "eg" }, "gateway"},
 		{"lifetime", func(c *GlesysConfig) { c.Lifetime.MaxRun = "8h" }, "lifetime"},
 		{"registries", func(c *GlesysConfig) {
 			c.Registries.Mirrors = map[string]RegistryMirror{"docker.io": {Endpoint: []string{"https://mirror.example"}}}

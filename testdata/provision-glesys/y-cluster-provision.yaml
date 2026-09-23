@@ -17,9 +17,14 @@
 #   - talosctl config is at ~/.cache/y-cluster-glesys/<context>-talosconfig.
 #     Talos has no shell; `y-cluster ctr` and friends refuse the
 #     context and say so.
-#   - Nothing is installed on top of Kubernetes: no gateway, no
-#     storage class. The k3s, gateway, registries and lifetime
-#     stanzas are refused at load rather than ignored.
+#   - Envoy Gateway listens on the server's public IPv4, ports 80
+#     and 443, with a default Gateway (y-cluster-gateway/default)
+#     for *.<context>.local.test; HTTPS is a self-signed cert. The
+#     IPv4 is the GatewayClass dns-hint-ip. Try it with
+#       y-cluster gateway example install --context <context> --hostname hello.<context>.local.test
+#       curl -k --resolve hello.<context>.local.test:443:<ipv4> https://hello.<context>.local.test
+#   - No storage class. The k3s, registries, storage-changing and
+#     lifetime stanzas are refused at load rather than ignored.
 #   - The server bills until `y-cluster teardown`, which destroys
 #     it and releases its address. `y-cluster stop` powers it off
 #     and keeps billing.
