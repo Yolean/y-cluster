@@ -42,8 +42,54 @@ func TestGlesys_Defaults(t *testing.T) {
 	if c.Template != "Talos 1.14" {
 		t.Errorf("template: got %q, want Talos 1.14", c.Template)
 	}
+	if c.CNI != "cilium" {
+		t.Errorf("cni: got %q, want cilium", c.CNI)
+	}
+	if c.Workers != 0 || c.ControlPlane.Memory != "4096" || c.ControlPlane.CPUs != "2" {
+		t.Errorf("workers/controlPlane: got %d %q %q, want 0 4096 2", c.Workers, c.ControlPlane.Memory, c.ControlPlane.CPUs)
+	}
+	if len(c.APIAllowedCIDRs) != 0 {
+		t.Errorf("the firewall must be off by default, got %v", c.APIAllowedCIDRs)
+	}
 	if err := c.Validate(); err != nil {
 		t.Errorf("the defaults must validate: %v", err)
+	}
+}
+
+// The multi-node knobs are checked at load: a count that makes no
+// sense, control-plane sizing that is not a number, a CNI nobody
+// installs, an allow-list entry that is not a CIDR.
+func TestGlesys_MultiNodeValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*GlesysConfig)
+		want string
+	}{
+		{"negative workers", func(c *GlesysConfig) { c.Workers = -1 }, "workers"},
+		{"control plane memory", func(c *GlesysConfig) { c.Workers = 2; c.ControlPlane.Memory = "2G" }, "controlPlane.memory"},
+		{"unknown cni", func(c *GlesysConfig) { c.CNI = "calico" }, "cni"},
+		{"bare address", func(c *GlesysConfig) { c.APIAllowedCIDRs = []string{"198.51.100.7"} }, "apiAllowedCIDRs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := glesysMinimal()
+			tc.set(c)
+			c.ApplyDefaults()
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want a refusal naming %q, got %v", tc.want, err)
+			}
+		})
+	}
+	c := glesysMinimal()
+	c.Workers = 2
+	c.Memory, c.CPUs = "4096", "2"
+	c.APIAllowedCIDRs = []string{"198.51.100.7/32"}
+	c.ApplyDefaults()
+	if err := c.Validate(); err != nil {
+		t.Errorf("a valid multi-node config was refused: %v", err)
+	}
+	if c.Nodes() != 3 {
+		t.Errorf("nodes: got %d, want 3", c.Nodes())
 	}
 }
 

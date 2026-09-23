@@ -4,68 +4,86 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	glesysapi "github.com/glesys/glesys-go/v8"
+	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"sigs.k8s.io/yaml"
 
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 )
 
-// The machine config is the whole of what the server boots with, so
-// its contents are the contract: one control-plane node that
-// schedules workloads, an endpoint at the reserved address, and the
-// disk as a GleSYS KVM guest names it. Talos 1.14 writes it as a
-// stream of documents; the checks find each by kind.
-func TestGenerateMachineConfigs(t *testing.T) {
-	mc, err := generateMachineConfigs("qa-glesys", "203.0.113.10")
-	if err != nil {
-		t.Fatal(err)
-	}
+// parseDocuments splits a Talos multi-document config into a map by
+// kind. Named documents (firewall rules) key as kind/name.
+func parseDocuments(t *testing.T, raw []byte) map[string]map[string]any {
+	t.Helper()
 	docs := map[string]map[string]any{}
-	for _, raw := range strings.Split(string(mc.controlPlane), "\n---\n") {
+	for _, part := range strings.Split(string(raw), "\n---\n") {
 		var d map[string]any
-		if err := yaml.Unmarshal([]byte(raw), &d); err != nil {
-			t.Fatalf("parse document: %v\n%s", err, raw)
+		if err := yaml.Unmarshal([]byte(part), &d); err != nil {
+			t.Fatalf("parse document: %v\n%s", err, part)
 		}
 		kind, _ := d["kind"].(string)
 		if kind == "" {
 			kind = "v1alpha1"
+		}
+		if name, ok := d["name"].(string); ok && kind == "NetworkRuleConfig" {
+			kind += "/" + name
 		}
 		if _, dup := docs[kind]; dup {
 			kind += "#2"
 		}
 		docs[kind] = d
 	}
-	dig := func(kind string, path ...string) any {
-		var cur any = docs[kind]
-		for _, k := range path {
-			m, ok := cur.(map[string]any)
-			if !ok {
-				return nil
-			}
-			cur = m[k]
-		}
-		return cur
-	}
+	return docs
+}
 
-	if got := dig("v1alpha1", "machine", "type"); got != "controlplane" {
+func dig(docs map[string]map[string]any, kind string, path ...string) any {
+	var cur any = docs[kind]
+	for _, k := range path {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = m[k]
+	}
+	return cur
+}
+
+// The machine config is the whole of what the server boots with, so
+// its contents are the contract: one control-plane node that
+// schedules workloads, an endpoint at the reserved address, and the
+// disk as a GleSYS KVM guest names it. Talos 1.14 writes it as a
+// stream of documents; the checks find each by kind.
+func TestGenerateMachineConfigs_SingleNode(t *testing.T) {
+	mc, err := generateMachineConfigs(clusterSpec{Name: "qa-glesys",
+		Nodes: []nodeSpec{{Role: machine.TypeControlPlane, IPv4: "203.0.113.10"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mc.nodes) != 1 {
+		t.Fatalf("want one config, got %d", len(mc.nodes))
+	}
+	docs := parseDocuments(t, mc.nodes[0])
+
+	if got := dig(docs, "v1alpha1", "machine", "type"); got != "controlplane" {
 		t.Errorf("machine type: got %v", got)
 	}
-	if got := dig("KubeClusterConfig", "endpoint"); got != "https://203.0.113.10:6443" {
+	if got := dig(docs, "KubeClusterConfig", "endpoint"); got != "https://203.0.113.10:6443" {
 		t.Errorf("endpoint: got %v", got)
 	}
-	if got := dig("KubeClusterConfig", "clusterName"); got != "qa-glesys" {
+	if got := dig(docs, "KubeClusterConfig", "clusterName"); got != "qa-glesys" {
 		t.Errorf("clusterName: got %v", got)
 	}
-	if taints := dig("KubeNodeConfig", "taints"); taints != nil {
+	if taints := dig(docs, "KubeNodeConfig", "taints"); taints != nil {
 		t.Errorf("a single node must schedule workloads; got taints %v", taints)
 	}
-	if got := fmt.Sprint(dig("UnattendedInstallConfig", "provisioning", "diskSelector", "match")); !strings.Contains(got, installDisk) {
+	if got := fmt.Sprint(dig(docs, "UnattendedInstallConfig", "provisioning", "diskSelector", "match")); !strings.Contains(got, installDisk) {
 		t.Errorf("install disk selector: got %q, want it to name %s", got, installDisk)
 	}
-	if got := fmt.Sprint(dig("v1alpha1", "machine", "certSANs")); got != "[203.0.113.10]" {
+	if got := fmt.Sprint(dig(docs, "v1alpha1", "machine", "certSANs")); got != "[203.0.113.10]" {
 		t.Errorf("the Talos API cert must name the public address, got %v", got)
 	}
 	// The DiscoveryServiceConfig document is the one that names
@@ -74,11 +92,23 @@ func TestGenerateMachineConfigs(t *testing.T) {
 	if docs["DiscoveryServiceConfig"] != nil {
 		t.Error("cluster discovery must be off: no node may register with discovery.talos.dev")
 	}
-	if strings.Contains(string(mc.controlPlane), "discovery.talos.dev") {
+	if strings.Contains(string(mc.nodes[0]), "discovery.talos.dev") {
 		t.Error("the machine config must not name discovery.talos.dev anywhere")
 	}
-	if got := fmt.Sprint(dig("KubeAPIServerConfig", "certExtraSANs")); got != "[203.0.113.10]" {
+	if got := fmt.Sprint(dig(docs, "KubeAPIServerConfig", "certExtraSANs")); got != "[203.0.113.10]" {
 		t.Errorf("the apiserver cert must name the public address, got %v", got)
+	}
+	// Time from the Swedish national service, never the Talos
+	// default, on every config.
+	if got := fmt.Sprint(dig(docs, "TimeSyncConfig", "ntp", "servers")); got != "[ntp.se]" {
+		t.Errorf("time servers: got %v, want [ntp.se]", got)
+	}
+	// Flannel stays without Cilium; no firewall without CIDRs.
+	if docs["KubeFlannelCNIConfig"] == nil {
+		t.Error("flannel must stay when cilium is not asked for")
+	}
+	if docs["NetworkDefaultActionConfig"] != nil {
+		t.Error("no firewall without apiAllowedCIDRs")
 	}
 	// The talosconfig points at the same node and is minted from
 	// the same CA, or talosctl could not connect.
@@ -87,8 +117,89 @@ func TestGenerateMachineConfigs(t *testing.T) {
 	if c == nil || len(c.Endpoints) != 1 || c.Endpoints[0] != "203.0.113.10" {
 		t.Errorf("talosconfig endpoints: got %+v", c)
 	}
-	if got := dig("v1alpha1", "machine", "ca", "crt"); got != c.CA {
+	if got := dig(docs, "v1alpha1", "machine", "ca", "crt"); got != c.CA {
 		t.Error("talosconfig CA is not the machine config's OS CA")
+	}
+}
+
+// A control plane with workers: the control plane keeps its taint,
+// the workers join the same endpoint, Cilium replaces flannel, and
+// the firewall opens exactly what each role needs.
+func TestGenerateMachineConfigs_ControlPlaneAndWorkers(t *testing.T) {
+	spec := clusterSpec{Name: "qa-glesys", Cilium: true, APIAllowedCIDRs: []string{"198.51.100.7/32"},
+		Nodes: []nodeSpec{
+			{Role: machine.TypeControlPlane, IPv4: "203.0.113.10"},
+			{Role: machine.TypeWorker, IPv4: "203.0.113.11"},
+			{Role: machine.TypeWorker, IPv4: "203.0.113.12"},
+		}}
+	mc, err := generateMachineConfigs(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mc.nodes) != 3 {
+		t.Fatalf("want three configs, got %d", len(mc.nodes))
+	}
+	cp := parseDocuments(t, mc.nodes[0])
+	w := parseDocuments(t, mc.nodes[1])
+
+	if got := dig(cp, "v1alpha1", "machine", "type"); got != "controlplane" {
+		t.Errorf("control plane type: got %v", got)
+	}
+	if got := dig(w, "v1alpha1", "machine", "type"); got != "worker" {
+		t.Errorf("worker type: got %v", got)
+	}
+	if taints := dig(cp, "KubeNodeConfig", "taints"); taints == nil {
+		t.Error("a dedicated control plane must keep its NoSchedule taint")
+	}
+	if got := dig(w, "KubeClusterConfig", "endpoint"); got != "https://203.0.113.10:6443" {
+		t.Errorf("worker endpoint: got %v", got)
+	}
+	if cp["KubeFlannelCNIConfig"] != nil {
+		t.Error("flannel must go when cilium is the CNI")
+	}
+	for _, docs := range []map[string]map[string]any{cp, w} {
+		if got := dig(docs, "NetworkDefaultActionConfig", "ingress"); got != "block" {
+			t.Errorf("default ingress action: got %v, want block", got)
+		}
+		if got := fmt.Sprint(dig(docs, "TimeSyncConfig", "ntp", "servers")); got != "[ntp.se]" {
+			t.Errorf("time servers: got %v", got)
+		}
+	}
+	// Who may reach what.
+	subnets := func(docs map[string]map[string]any, rule string) string {
+		var out []string
+		in, _ := dig(docs, "NetworkRuleConfig/"+rule, "ingress").([]any)
+		for _, r := range in {
+			out = append(out, fmt.Sprint(r.(map[string]any)["subnet"]))
+		}
+		return strings.Join(out, " ")
+	}
+	// The pod and service networks count as the cluster: a pod's
+	// traffic to its own node's apiserver carries the pod address.
+	cluster := "10.244.0.0/16 10.96.0.0/12 203.0.113.10/32 203.0.113.11/32 203.0.113.12/32"
+	if got := subnets(cp, "talos-api"); got != cluster+" 198.51.100.7/32" {
+		t.Errorf("talos-api on the control plane: %q", got)
+	}
+	if got := subnets(cp, "kubernetes-api"); got != cluster+" 198.51.100.7/32" {
+		t.Errorf("kubernetes-api: %q", got)
+	}
+	if got := subnets(cp, "etcd"); got != "203.0.113.10/32" {
+		t.Errorf("etcd must be reachable from the control plane only: %q", got)
+	}
+	if got := subnets(w, "wireguard"); got != cluster {
+		t.Errorf("wireguard on a worker: %q", got)
+	}
+	if w["NetworkRuleConfig/kubernetes-api"] != nil || w["NetworkRuleConfig/etcd"] != nil || w["NetworkRuleConfig/trustd"] != nil {
+		t.Error("a worker must not open control-plane ports")
+	}
+	if got := subnets(w, "https"); got != "0.0.0.0/0" {
+		t.Errorf("https on a worker must be open to anyone: %q", got)
+	}
+	if cp["NetworkRuleConfig/https"] != nil || cp["NetworkRuleConfig/http"] != nil {
+		t.Error("a dedicated control plane serves no ingress")
+	}
+	if got := fmt.Sprint(dig(cp, "v1alpha1", "machine", "certSANs")); got != "[203.0.113.10 203.0.113.11 203.0.113.12]" {
+		t.Errorf("cert SANs: %v", got)
 	}
 }
 
@@ -166,7 +277,8 @@ users:
 
 func TestStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	s := state{Context: "qa-glesys", ServerID: "kvm123", DataCenter: "Stockholm", IPv4: "203.0.113.10", Bootstrapped: true}
+	s := state{Context: "qa-glesys", ServerID: "kvm123", DataCenter: "Stockholm", IPv4: "203.0.113.10", Bootstrapped: true,
+		Workers: []nodeState{{ServerID: "kvm124", IPv4: "203.0.113.11"}}}
 	if err := saveState(dir, s); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +286,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != s {
+	if !reflect.DeepEqual(got, s) {
 		t.Errorf("got %+v, want %+v", got, s)
 	}
 	// What cluster.Lookup reads from the sidecar, by json key.
@@ -192,6 +304,15 @@ func TestStateRoundTrip(t *testing.T) {
 	if err := os.WriteFile(TalosconfigPath(dir, "qa-glesys"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(workerConfigPath(dir, "qa-glesys", 0), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.servers(); fmt.Sprint(got) != "[kvm123 kvm124]" {
+		t.Errorf("servers: %v", got)
+	}
+	if got := s.workerAddresses(); fmt.Sprint(got) != "[203.0.113.11]" {
+		t.Errorf("worker addresses: %v", got)
+	}
 	if err := deleteState(dir, "qa-glesys"); err != nil {
 		t.Fatal(err)
 	}
@@ -200,6 +321,9 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(TalosconfigPath(dir, "qa-glesys")); !os.IsNotExist(err) {
 		t.Error("deleteState should remove the talosconfig")
+	}
+	if _, err := os.Stat(workerConfigPath(dir, "qa-glesys", 0)); !os.IsNotExist(err) {
+		t.Error("deleteState should remove the worker configs")
 	}
 	if err := deleteState(dir, "qa-glesys"); err != nil {
 		t.Errorf("deleteState must be idempotent: %v", err)
