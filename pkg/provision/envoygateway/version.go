@@ -36,4 +36,4 @@ package envoygateway
 // Version is the pinned Envoy Gateway release. The install
 // manifest is fetched per-version into the cache, so a bump takes
 // effect on the next provision with no other file to refresh.
-const Version = "v1.7.5"
+const Version = "v1.9.1"
