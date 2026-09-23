@@ -35,10 +35,30 @@
     "GlesysConfig": {
       "additionalProperties": false,
       "properties": {
+        "apiAllowedCIDRs": {
+          "description": "Source CIDRs allowed to reach the Talos and Kubernetes APIs (50000",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cni": {
+          "default": "cilium",
+          "description": "Pod network. cilium (default) gives WireGuard-encrypted node-to-node pod traffic and NetworkPolicy enforcement; flannel is Talos's built-in with neither.",
+          "enum": [
+            "cilium",
+            "flannel"
+          ],
+          "type": "string"
+        },
         "context": {
           "default": "local",
           "description": "kubeconfig context name to write.",
           "type": "string"
+        },
+        "controlPlane": {
+          "$ref": "#/$defs/GlesysControlPlane",
+          "description": "Sizing of the dedicated control-plane server"
         },
         "cpus": {
           "default": "4",
@@ -106,11 +126,31 @@
           "default": "Talos 1.14",
           "description": "GleSYS OS template. A Talos Linux release; the Talos machine config is delivered as the server's cloudconfig.",
           "type": "string"
+        },
+        "workers": {
+          "description": "Worker servers beside the control plane. 0 (default) is one server doing both; 1 or more gives a dedicated control plane sized by controlPlane and workers sized by memory and cpus.",
+          "type": "integer"
         }
       },
       "required": [
         "provider"
       ],
+      "type": "object"
+    },
+    "GlesysControlPlane": {
+      "additionalProperties": false,
+      "properties": {
+        "cpus": {
+          "default": "2",
+          "description": "vCPU count for the dedicated control plane.",
+          "type": "string"
+        },
+        "memory": {
+          "default": "4096",
+          "description": "Memory in MB for the dedicated control plane. Talos recommends 3946 MiB; 2048 loses the apiserver under load.",
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "K3sConfig": {

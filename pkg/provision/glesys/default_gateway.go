@@ -46,13 +46,16 @@ func DefaultGatewayHostnamePattern(contextName string) string {
 }
 
 // certSubjects is the SAN list the certificate covers: the
-// context's own FQDN, the wildcard below it, and the node's public
-// address for a client that dials the IP without /etc/hosts.
-func certSubjects(contextName, ipv4 string) (commonName string, dnsNames []string, ipSANs []net.IP) {
+// context's own FQDN, the wildcard below it, and the public address
+// of every node that serves ingress, for a client that dials an IP
+// without /etc/hosts.
+func certSubjects(contextName string, ipv4s []string) (commonName string, dnsNames []string, ipSANs []net.IP) {
 	commonName = contextName + "." + fqdnDomain
 	dnsNames = []string{commonName, "*." + commonName}
-	if ip := net.ParseIP(ipv4); ip != nil {
-		ipSANs = []net.IP{ip}
+	for _, a := range ipv4s {
+		if ip := net.ParseIP(a); ip != nil {
+			ipSANs = append(ipSANs, ip)
+		}
 	}
 	return commonName, dnsNames, ipSANs
 }
@@ -71,6 +74,9 @@ func certSubjects(contextName, ipv4 string) (commonName string, dnsNames []strin
 //     has to do it.
 //   - allowedRoutes from All namespaces, so a workload in its own
 //     namespace attaches without a ReferenceGrant.
+//   - a ClientTrafficPolicy pinning TLS 1.3 as the minimum on the
+//     Gateway. TLS 1.3 is enforced at the edge, and the edge is this
+//     listener: nothing terminates in front of it.
 //
 // Server-side applied so a re-provision reconciles without churn.
 func defaultGatewayManifest(contextName, gatewayClassName string, certPEM, keyPEM []byte) []byte {
@@ -135,6 +141,21 @@ spec:
     allowedRoutes:
       namespaces:
         from: All
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    managed-by: y-cluster
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: __NAME__
+  tls:
+    minVersion: "1.3"
 `))
 }
 
@@ -145,7 +166,7 @@ spec:
 // envoygateway.EnvoyProxyYAML), which is what puts envoy on
 // <ipv4>:80 and :443.
 func (c *Cluster) installDefaultGateway(ctx context.Context) error {
-	commonName, dnsNames, ipSANs := certSubjects(c.cfg.Context, c.state.IPv4)
+	commonName, dnsNames, ipSANs := certSubjects(c.cfg.Context, c.ingressAddresses())
 	certPEM, keyPEM, err := devcert.GenerateSelfSigned(commonName, dnsNames, ipSANs)
 	if err != nil {
 		return fmt.Errorf("self-signed certificate: %w", err)
