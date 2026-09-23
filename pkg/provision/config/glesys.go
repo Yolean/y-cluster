@@ -118,9 +118,6 @@ func (c *GlesysConfig) Validate() error {
 	if c.K3s.Install != "script" {
 		return errInvalid("k3s.install %q does not apply on glesys: the node runs Talos Linux, which ships Kubernetes; drop the k3s stanza", c.K3s.Install)
 	}
-	if c.Gateway.Skip || c.Gateway.ClassName != "y-cluster" {
-		return errInvalid("gateway settings do not apply on glesys: the provisioner delivers the Talos node and a kubeconfig, nothing is installed on top; drop the gateway stanza")
-	}
 	if len(c.Registries.Mirrors) > 0 || len(c.Registries.Configs) > 0 {
 		return errInvalid("registries do not apply on glesys: the node runs Talos Linux, whose registry mirrors are part of the machine config; drop the registries stanza")
 	}

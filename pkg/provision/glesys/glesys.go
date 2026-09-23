@@ -14,12 +14,15 @@
 //     delivered as the server's cloudconfig;
 //   - a bootstrapped single-node cluster, its admin kubeconfig
 //     merged into the operator's kubeconfig under the context;
+//   - Envoy Gateway on the node's public address, ports 80 and 443,
+//     with a default Gateway that terminates HTTPS with a
+//     self-signed certificate for *.<context>.local.test;
 //   - a talosconfig and a state sidecar (<context>.json) under
 //     CacheDir, so Teardown works without the YAML config in hand
 //     and the operator has what talosctl needs.
 //
-// Nothing is installed on top of Kubernetes: no gateway, no storage
-// class. The node and a kubeconfig entry are the deliverable.
+// No storage class is installed; k3s's local-path-provisioner has
+// no Talos counterpart here yet.
 package glesys
 
 import (
@@ -35,6 +38,7 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 )
 
 // CacheDirEnv lets tests / multi-tenant CI override the on-disk
@@ -67,6 +71,8 @@ const (
 	serverRunningTimeout = 5 * time.Minute
 	talosAPITimeout      = 10 * time.Minute
 	kubeconfigTimeout    = 10 * time.Minute
+	kubeAPIReadyTimeout  = 10 * time.Minute
+	bootstrapTimeout     = 5 * time.Minute
 )
 
 // CacheDir resolves the on-disk cache root. Order: env override,
@@ -216,7 +222,43 @@ func Provision(ctx context.Context, cfg config.GlesysConfig, logger *zap.Logger)
 	if err := c.bootstrapAndMergeKubeconfig(ctx, mc); err != nil {
 		return c, err
 	}
+	if err := c.installGateway(ctx); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// installGateway installs Envoy Gateway with the node's public
+// address as the envoy Service's externalIP and as the GatewayClass
+// dns-hint-ip, then the default Gateway that makes envoy start.
+// gateway.skip leaves both out.
+func (c *Cluster) installGateway(ctx context.Context) error {
+	if c.cfg.Gateway.Skip {
+		c.logger.Info("envoy gateway install skipped (gateway.skip)")
+		return nil
+	}
+	if err := envoygateway.Install(ctx, envoygateway.Options{
+		ContextName:          c.cfg.Context,
+		GatewayClassName:     c.cfg.Gateway.ClassName,
+		DNSHintIP:            c.state.IPv4,
+		ExternalIPs:          []string{c.state.IPv4},
+		ControllerCPURequest: c.cfg.Gateway.Resources.Controller.CPU,
+		ControllerMemRequest: c.cfg.Gateway.Resources.Controller.Memory,
+		ProxyCPURequest:      c.cfg.Gateway.Resources.Proxy.CPU,
+		ProxyMemRequest:      c.cfg.Gateway.Resources.Proxy.Memory,
+		Logger:               c.logger,
+	}); err != nil {
+		return fmt.Errorf("install envoy gateway: %w", err)
+	}
+	c.logger.Info("envoy gateway ready",
+		zap.String("version", envoygateway.Version),
+		zap.String("gatewayClass", c.cfg.Gateway.ClassName),
+		zap.String("dnsHintIP", c.state.IPv4),
+	)
+	if err := c.installDefaultGateway(ctx); err != nil {
+		return fmt.Errorf("install default Gateway: %w", err)
+	}
+	return nil
 }
 
 // bootstrapAndMergeKubeconfig is the Talos half of Provision: wait
@@ -235,7 +277,7 @@ func (c *Cluster) bootstrapAndMergeKubeconfig(ctx context.Context, mc *machineCo
 	}
 	if !c.state.Bootstrapped {
 		c.logger.Info("bootstrapping etcd")
-		if err := bootstrap(callCtx, tc); err != nil {
+		if err := bootstrap(callCtx, tc, bootstrapTimeout); err != nil {
 			return err
 		}
 		c.state.Bootstrapped = true
@@ -263,7 +305,7 @@ func (c *Cluster) bootstrapAndMergeKubeconfig(ctx context.Context, mc *machineCo
 		zap.String("context", c.cfg.Context),
 		zap.String("server", "https://"+c.state.IPv4+":6443"),
 	)
-	return nil
+	return waitForKubeAPI(ctx, c.cfg.Context, kubeAPIReadyTimeout, c.logger)
 }
 
 // waitForServerRunning polls server/details until GleSYS reports the
