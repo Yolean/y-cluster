@@ -34,9 +34,13 @@ import (
 	"time"
 
 	glesysapi "github.com/glesys/glesys-go/v8"
+	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"go.uber.org/zap"
 
+	"github.com/siderolabs/talos/pkg/machinery/config/machine"
+
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
+	"github.com/Yolean/y-cluster/pkg/provision/cilium"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 )
@@ -73,6 +77,7 @@ const (
 	kubeconfigTimeout    = 10 * time.Minute
 	kubeAPIReadyTimeout  = 10 * time.Minute
 	bootstrapTimeout     = 5 * time.Minute
+	nodesReadyTimeout    = 10 * time.Minute
 )
 
 // CacheDir resolves the on-disk cache root. Order: env override,
@@ -112,16 +117,16 @@ type Cluster struct {
 	gc    *glesysapi.Client
 }
 
-// PublicIPv4 is the server's public address: the Talos and
+// PublicIPv4 is the control plane's public address: the Talos and
 // Kubernetes API endpoint.
 func (c *Cluster) PublicIPv4() string { return c.state.IPv4 }
 
 // TalosconfigPath is where this cluster's talosctl config was written.
 func (c *Cluster) TalosconfigPath() string { return TalosconfigPath(c.cacheDir, c.cfg.Context) }
 
-// Provision creates a GleSYS KVM server matching cfg and takes it to
-// a usable single-node Talos cluster: reserved address, machine
-// config, server, bootstrap, kubeconfig.
+// Provision creates the GleSYS KVM servers matching cfg and takes
+// them to a usable Talos cluster: reserved addresses, machine
+// configs, servers, bootstrap, kubeconfig, CNI, gateway.
 //
 // Idempotency: if a server named cfg.Context already exists in the
 // project, Provision treats that as an error rather than reusing it
@@ -146,6 +151,17 @@ func Provision(ctx context.Context, cfg config.GlesysConfig, logger *zap.Logger)
 	if existing, err := findServer(ctx, gc, cfg.Context); err != nil {
 		return nil, err
 	} else if existing != nil {
+		// A sidecar that names this server is a provision that got
+		// past server creation and failed later (a transient API
+		// error during an install step, say). Its machine configs
+		// and talosconfig are on disk and its PKI is on the
+		// servers, so the only correct continuation is from the
+		// saved state; regenerating would mint a PKI the running
+		// nodes do not have.
+		if st, err := loadState(cacheDir, cfg.Context); err == nil && st.ServerID == existing.ID {
+			logger.Info("resuming a previous provision from its state sidecar", zap.String("serverID", st.ServerID))
+			return resume(ctx, cfg, gc, cacheDir, st, logger)
+		}
 		return nil, fmt.Errorf("server %q already exists in this project (id=%s); run `y-cluster teardown -c <dir>` first or pick a different context", cfg.Context, existing.ID)
 	}
 
@@ -156,92 +172,198 @@ func Provision(ctx context.Context, cfg config.GlesysConfig, logger *zap.Logger)
 		return nil, err
 	}
 
-	// Sizing was validated as numeric by cfg.Validate.
-	memory, _ := positiveInt(cfg.Memory)
-	cpus, _ := positiveInt(cfg.CPUs)
-	diskGB, _ := config.DiskSizeGB(cfg.ServerDisk)
-
-	// The address first: the machine config names the cluster
-	// endpoint, and the endpoint is this address.
-	ipv4, err := reserveIPv4(ctx, gc, cfg.DataCenter, cfg.Platform, logger)
+	// The addresses first: the machine configs name the cluster
+	// endpoint and the firewall's allow-lists, and those are these
+	// addresses.
+	addrs, err := reserveIPv4s(ctx, gc, cfg.DataCenter, cfg.Platform, cfg.Nodes(), logger)
 	if err != nil {
 		return nil, err
 	}
 	c := &Cluster{cfg: cfg, cacheDir: cacheDir, logger: logger, gc: gc,
-		state: state{Context: cfg.Context, DataCenter: cfg.DataCenter, IPv4: ipv4}}
+		state: state{Context: cfg.Context, DataCenter: cfg.DataCenter, IPv4: addrs[0]}}
+	for _, a := range addrs[1:] {
+		c.state.Workers = append(c.state.Workers, nodeState{IPv4: a})
+	}
 	// From here on a failure leaves something behind; the sidecar
 	// is what lets Teardown find it.
 	if err := saveState(cacheDir, c.state); err != nil {
-		_ = gc.IPs.Release(ctx, ipv4)
+		for _, a := range addrs {
+			_ = gc.IPs.Release(ctx, a)
+		}
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 
-	mc, err := generateMachineConfigs(cfg.Context, ipv4)
+	spec := clusterSpec{
+		Name:            cfg.Context,
+		Cilium:          cfg.CNI == "cilium",
+		APIAllowedCIDRs: cfg.APIAllowedCIDRs,
+		Nodes:           []nodeSpec{{Role: machine.TypeControlPlane, IPv4: addrs[0]}},
+	}
+	for _, a := range addrs[1:] {
+		spec.Nodes = append(spec.Nodes, nodeSpec{Role: machine.TypeWorker, IPv4: a})
+	}
+	mc, err := generateMachineConfigs(spec)
 	if err != nil {
 		return c, err
 	}
-	if err := os.WriteFile(machineConfigPath(cacheDir, cfg.Context), mc.controlPlane, 0o600); err != nil {
+	if err := os.WriteFile(machineConfigPath(cacheDir, cfg.Context), mc.nodes[0], 0o600); err != nil {
 		return c, fmt.Errorf("write machine config: %w", err)
+	}
+	for i, b := range mc.nodes[1:] {
+		if err := os.WriteFile(workerConfigPath(cacheDir, cfg.Context, i), b, 0o600); err != nil {
+			return c, fmt.Errorf("write worker %d config: %w", i, err)
+		}
 	}
 	if err := mc.talosconfig.Save(c.TalosconfigPath()); err != nil {
 		return c, fmt.Errorf("write talosconfig: %w", err)
 	}
 
-	logger.Info("creating GleSYS server",
-		zap.String("name", cfg.Context),
-		zap.String("dataCenter", cfg.DataCenter),
-		zap.String("template", cfg.Template),
-		zap.Int("memoryMB", memory), zap.Int("cpus", cpus), zap.Int("diskGB", diskGB),
-		zap.String("ipv4", ipv4),
-	)
-	srv, err := gc.Servers.Create(ctx, glesysapi.CreateServerParams{
-		Bandwidth:   bandwidthMbit,
-		CloudConfig: string(mc.controlPlane),
-		CPU:         cpus,
-		DataCenter:  cfg.DataCenter,
-		Description: "managed-by=y-cluster context=" + cfg.Context,
-		Hostname:    cfg.Context,
-		IPv4:        ipv4,
-		IPv6:        "none",
-		Memory:      memory,
-		Platform:    cfg.Platform,
-		Storage:     diskGB,
-		Template:    cfg.Template,
-	})
-	if err != nil {
-		return c, fmt.Errorf("server/create: %w", err)
+	// Sizing was validated as numeric by cfg.Validate.
+	diskGB, _ := config.DiskSizeGB(cfg.ServerDisk)
+	cpMemory, cpCPUs := cfg.Memory, cfg.CPUs
+	if cfg.Workers > 0 {
+		cpMemory, cpCPUs = cfg.ControlPlane.Memory, cfg.ControlPlane.CPUs
 	}
-	c.state.ServerID = srv.ID
+	c.state.ServerID, err = c.createServer(ctx, cfg.Context, addrs[0], cpMemory, cpCPUs, diskGB, mc.nodes[0])
+	if err != nil {
+		return c, err
+	}
 	if err := saveState(cacheDir, c.state); err != nil {
 		return c, fmt.Errorf("save state: %w", err)
 	}
+	for i := range c.state.Workers {
+		name := fmt.Sprintf("%s-worker-%d", cfg.Context, i)
+		c.state.Workers[i].ServerID, err = c.createServer(ctx, name, c.state.Workers[i].IPv4, cfg.Memory, cfg.CPUs, diskGB, mc.nodes[i+1])
+		if err != nil {
+			return c, err
+		}
+		if err := saveState(cacheDir, c.state); err != nil {
+			return c, fmt.Errorf("save state: %w", err)
+		}
+	}
 
-	if err := c.waitForServerRunning(ctx); err != nil {
+	if err := c.waitForServerRunning(ctx, c.state.ServerID); err != nil {
 		return c, err
 	}
 	if err := c.bootstrapAndMergeKubeconfig(ctx, mc); err != nil {
 		return c, err
 	}
-	if err := c.installGateway(ctx); err != nil {
+	if err := c.installCNIAndGateway(ctx); err != nil {
 		return c, err
 	}
 	return c, nil
 }
 
-// installGateway installs Envoy Gateway with the node's public
-// address as the envoy Service's externalIP and as the GatewayClass
-// dns-hint-ip, then the default Gateway that makes envoy start.
-// gateway.skip leaves both out.
+// installCNIAndGateway is the tail of Provision and resume: the CNI
+// when it is Cilium, every node Ready, and the gateway. Between the
+// two comes a second wait for the Kubernetes API: when a CNI first
+// becomes available, kubelet recreates the control plane's static
+// pods, and the apiserver is gone for about a minute right after
+// the nodes report Ready.
+func (c *Cluster) installCNIAndGateway(ctx context.Context) error {
+	if c.cfg.CNI == "cilium" {
+		if err := cilium.Install(ctx, c.cfg.Context, c.cfg.Nodes(), nodesReadyTimeout, c.logger); err != nil {
+			return fmt.Errorf("install cilium: %w", err)
+		}
+	} else if err := cilium.WaitNodesReady(ctx, c.cfg.Context, c.cfg.Nodes(), nodesReadyTimeout, c.logger); err != nil {
+		return err
+	}
+	if err := waitForKubeAPI(ctx, c.cfg.Context, kubeAPIReadyTimeout, c.logger); err != nil {
+		return err
+	}
+	return c.installGateway(ctx)
+}
+
+// resume continues a provision whose servers exist, from the steps
+// that are idempotent: waiting for the control plane, bootstrap (the
+// sidecar says whether it happened), kubeconfig, CNI, gateway. Every
+// worker the config asks for must already be in the sidecar; a
+// count that changed is a different cluster.
+func resume(ctx context.Context, cfg config.GlesysConfig, gc *glesysapi.Client, cacheDir string, st state, logger *zap.Logger) (*Cluster, error) {
+	if len(st.Workers) != cfg.Workers {
+		return nil, fmt.Errorf("the state sidecar has %d workers and the config asks for %d; run `y-cluster teardown -c <dir>` first", len(st.Workers), cfg.Workers)
+	}
+	for i, w := range st.Workers {
+		if w.ServerID == "" {
+			return nil, fmt.Errorf("worker %d was never created; run `y-cluster teardown -c <dir>` first", i)
+		}
+	}
+	c := &Cluster{cfg: cfg, cacheDir: cacheDir, logger: logger, gc: gc, state: st}
+	tc, err := clientconfig.Open(c.TalosconfigPath())
+	if err != nil {
+		return nil, fmt.Errorf("talosconfig of the previous provision: %w", err)
+	}
+	mc := &machineConfigs{talosconfig: tc}
+	if err := c.waitForServerRunning(ctx, c.state.ServerID); err != nil {
+		return c, err
+	}
+	if err := c.bootstrapAndMergeKubeconfig(ctx, mc); err != nil {
+		return c, err
+	}
+	if err := c.installCNIAndGateway(ctx); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// createServer is one server/create call: the node's machine config
+// as cloudconfig, its reserved address, and the given sizing.
+func (c *Cluster) createServer(ctx context.Context, hostname, ipv4, memory, cpus string, diskGB int, machineConfig []byte) (string, error) {
+	mem, _ := positiveInt(memory)
+	cores, _ := positiveInt(cpus)
+	c.logger.Info("creating GleSYS server",
+		zap.String("name", hostname),
+		zap.String("dataCenter", c.cfg.DataCenter),
+		zap.String("template", c.cfg.Template),
+		zap.Int("memoryMB", mem), zap.Int("cpus", cores), zap.Int("diskGB", diskGB),
+		zap.String("ipv4", ipv4),
+	)
+	srv, err := c.gc.Servers.Create(ctx, glesysapi.CreateServerParams{
+		Bandwidth:   bandwidthMbit,
+		CloudConfig: string(machineConfig),
+		CPU:         cores,
+		DataCenter:  c.cfg.DataCenter,
+		Description: "managed-by=y-cluster context=" + c.cfg.Context,
+		Hostname:    hostname,
+		IPv4:        ipv4,
+		IPv6:        "none",
+		Memory:      mem,
+		Platform:    c.cfg.Platform,
+		Storage:     diskGB,
+		Template:    c.cfg.Template,
+	})
+	if err != nil {
+		return "", fmt.Errorf("server/create %s: %w", hostname, err)
+	}
+	return srv.ID, nil
+}
+
+// ingressAddresses are the public addresses that serve 80 and 443:
+// the workers', or the one node's when there are none.
+func (c *Cluster) ingressAddresses() []string {
+	if len(c.state.Workers) == 0 {
+		return []string{c.state.IPv4}
+	}
+	return c.state.workerAddresses()
+}
+
+// installGateway installs Envoy Gateway with the ingress nodes'
+// public addresses as the envoy Service's externalIPs, the first as
+// the GatewayClass dns-hint-ip, and the fleet as a DaemonSet when
+// there is more than one, then the default Gateway that makes envoy
+// start. gateway.skip leaves both out.
 func (c *Cluster) installGateway(ctx context.Context) error {
 	if c.cfg.Gateway.Skip {
 		c.logger.Info("envoy gateway install skipped (gateway.skip)")
 		return nil
 	}
+	ingress := c.ingressAddresses()
 	if err := envoygateway.Install(ctx, envoygateway.Options{
 		ContextName:          c.cfg.Context,
 		GatewayClassName:     c.cfg.Gateway.ClassName,
-		DNSHintIP:            c.state.IPv4,
-		ExternalIPs:          []string{c.state.IPv4},
+		DNSHintIP:            ingress[0],
+		ExternalIPs:          ingress,
+		DaemonSet:            len(ingress) > 1,
 		ControllerCPURequest: c.cfg.Gateway.Resources.Controller.CPU,
 		ControllerMemRequest: c.cfg.Gateway.Resources.Controller.Memory,
 		ProxyCPURequest:      c.cfg.Gateway.Resources.Proxy.CPU,
@@ -253,7 +375,7 @@ func (c *Cluster) installGateway(ctx context.Context) error {
 	c.logger.Info("envoy gateway ready",
 		zap.String("version", envoygateway.Version),
 		zap.String("gatewayClass", c.cfg.Gateway.ClassName),
-		zap.String("dnsHintIP", c.state.IPv4),
+		zap.Strings("externalIPs", ingress),
 	)
 	if err := c.installDefaultGateway(ctx); err != nil {
 		return fmt.Errorf("install default Gateway: %w", err)
@@ -262,8 +384,8 @@ func (c *Cluster) installGateway(ctx context.Context) error {
 }
 
 // bootstrapAndMergeKubeconfig is the Talos half of Provision: wait
-// for apid, bootstrap etcd once, fetch the admin kubeconfig and
-// merge it under the context.
+// for the control plane's apid, bootstrap etcd once, fetch the admin
+// kubeconfig, merge it under the context, and wait for the API.
 func (c *Cluster) bootstrapAndMergeKubeconfig(ctx context.Context, mc *machineConfigs) error {
 	tc, callCtx, err := talosClient(ctx, mc.talosconfig, c.state.IPv4)
 	if err != nil {
@@ -311,19 +433,19 @@ func (c *Cluster) bootstrapAndMergeKubeconfig(ctx context.Context, mc *machineCo
 // waitForServerRunning polls server/details until GleSYS reports the
 // server running and unlocked. Creation on KVM is a template copy
 // plus first boot; a minute is typical.
-func (c *Cluster) waitForServerRunning(ctx context.Context) error {
-	c.logger.Info("waiting for the server to run", zap.String("id", c.state.ServerID))
+func (c *Cluster) waitForServerRunning(ctx context.Context, serverID string) error {
+	c.logger.Info("waiting for the server to run", zap.String("id", serverID))
 	deadline := time.Now().Add(serverRunningTimeout)
 	for {
-		d, err := c.gc.Servers.Details(ctx, c.state.ServerID)
+		d, err := c.gc.Servers.Details(ctx, serverID)
 		if err == nil && d.IsRunning && !d.IsLocked {
 			return nil
 		}
 		if time.Now().After(deadline) {
 			if err != nil {
-				return fmt.Errorf("server %s not running after %s: %w", c.state.ServerID, serverRunningTimeout, err)
+				return fmt.Errorf("server %s not running after %s: %w", serverID, serverRunningTimeout, err)
 			}
-			return fmt.Errorf("server %s not running after %s (state %q, locked %v)", c.state.ServerID, serverRunningTimeout, d.State, d.IsLocked)
+			return fmt.Errorf("server %s not running after %s (state %q, locked %v)", serverID, serverRunningTimeout, d.State, d.IsLocked)
 		}
 		select {
 		case <-ctx.Done():
@@ -384,23 +506,37 @@ func matchTemplate(offered []glesysapi.ServerPlatformTemplateDetails, platform, 
 	return fmt.Errorf("template %q is not offered on %s; the Talos templates are: %s", template, platform, strings.Join(talos, ", "))
 }
 
-// reserveIPv4 takes the first free public IPv4 in the datacenter.
-// Reserved before the server so the machine config can carry it;
-// released by Teardown along with the server.
-func reserveIPv4(ctx context.Context, gc *glesysapi.Client, dataCenter, platform string, logger *zap.Logger) (string, error) {
+// reserveIPv4s takes n free public IPv4s in the datacenter. Reserved
+// before the servers so the machine configs can carry them; released
+// by Teardown along with the servers. A reservation that fails (the
+// address was taken between the listing and the take) moves on to
+// the next free one.
+func reserveIPv4s(ctx context.Context, gc *glesysapi.Client, dataCenter, platform string, n int, logger *zap.Logger) ([]string, error) {
 	avail, err := gc.IPs.Available(ctx, glesysapi.AvailableIPsParams{DataCenter: dataCenter, Platform: platform, Version: 4})
 	if err != nil {
-		return "", fmt.Errorf("ip/listfree: %w", err)
+		return nil, fmt.Errorf("ip/listfree: %w", err)
 	}
-	if avail == nil || len(*avail) == 0 {
-		return "", fmt.Errorf("no free IPv4 in %s for %s", dataCenter, platform)
+	var got []string
+	if avail != nil {
+		for _, ip := range *avail {
+			if len(got) == n {
+				break
+			}
+			logger.Info("reserving IPv4", zap.String("address", ip.Address), zap.String("dataCenter", dataCenter))
+			if _, err := gc.IPs.Reserve(ctx, ip.Address); err != nil {
+				logger.Warn("ip/take failed, trying the next free address", zap.String("address", ip.Address), zap.Error(err))
+				continue
+			}
+			got = append(got, ip.Address)
+		}
 	}
-	addr := (*avail)[0].Address
-	logger.Info("reserving IPv4", zap.String("address", addr), zap.String("dataCenter", dataCenter))
-	if _, err := gc.IPs.Reserve(ctx, addr); err != nil {
-		return "", fmt.Errorf("ip/take %s: %w", addr, err)
+	if len(got) < n {
+		for _, a := range got {
+			_ = gc.IPs.Release(ctx, a)
+		}
+		return nil, fmt.Errorf("reserved %d of %d IPv4s in %s for %s; not enough free addresses", len(got), n, dataCenter, platform)
 	}
-	return addr, nil
+	return got, nil
 }
 
 // Teardown destroys the server, releases its address, removes the
@@ -417,36 +553,40 @@ func Teardown(ctx context.Context, contextName string, logger *zap.Logger) error
 	cacheDir := CacheDir()
 	st, _ := loadState(cacheDir, contextName) // ignore missing
 
-	// Prefer the sidecar's server id, fall back to the name so a
-	// missing sidecar does not strand the server.
-	serverID := st.ServerID
-	if serverID == "" {
-		srv, err := findServer(ctx, gc, contextName)
+	// Prefer the sidecar's server ids, fall back to the names so a
+	// missing sidecar does not strand the servers: the control
+	// plane is named after the context, workers <context>-worker-<n>.
+	ids := st.servers()
+	if len(ids) == 0 {
+		servers, err := gc.Servers.List(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("server/list: %w", err)
 		}
-		if srv != nil {
-			serverID = srv.ID
+		for _, srv := range *servers {
+			if srv.Hostname == contextName || strings.HasPrefix(srv.Hostname, contextName+"-worker-") {
+				ids = append(ids, srv.ID)
+			}
 		}
 	}
-	if serverID != "" {
-		logger.Info("destroying GleSYS server", zap.String("id", serverID), zap.String("name", contextName))
-		if err := gc.Servers.Destroy(ctx, serverID, glesysapi.DestroyServerParams{KeepIP: false}); err != nil {
-			if !isNotFound(err) {
-				return fmt.Errorf("server/destroy %s: %w", serverID, err)
-			}
-			logger.Info("server already gone", zap.String("id", serverID))
-		}
-	} else {
+	if len(ids) == 0 {
 		logger.Info("no server to destroy", zap.String("context", contextName))
 	}
-	// The address outlives a server that was never created (a
+	for _, id := range ids {
+		logger.Info("destroying GleSYS server", zap.String("id", id), zap.String("context", contextName))
+		if err := gc.Servers.Destroy(ctx, id, glesysapi.DestroyServerParams{KeepIP: false}); err != nil {
+			if !isNotFound(err) {
+				return fmt.Errorf("server/destroy %s: %w", id, err)
+			}
+			logger.Info("server already gone", zap.String("id", id))
+		}
+	}
+	// An address outlives a server that was never created (a
 	// provision that failed between ip/take and server/create), and
 	// destroy with keepip=false has already released it otherwise.
 	// Either way a release that finds nothing is not a failure.
-	if st.IPv4 != "" {
-		if err := gc.IPs.Release(ctx, st.IPv4); err != nil {
-			logger.Debug("ip/release", zap.String("address", st.IPv4), zap.Error(err))
+	for _, a := range st.addresses() {
+		if err := gc.IPs.Release(ctx, a); err != nil {
+			logger.Debug("ip/release", zap.String("address", a), zap.Error(err))
 		}
 	}
 
@@ -473,13 +613,17 @@ func Stop(ctx context.Context, contextName string, logger *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	serverID, err := resolveServerID(ctx, gc, contextName)
+	ids, err := resolveServerIDs(ctx, gc, contextName)
 	if err != nil {
 		return err
 	}
-	logger.Info("GleSYS server stop", zap.String("id", serverID), zap.String("name", contextName))
-	if err := gc.Servers.Stop(ctx, serverID, glesysapi.StopServerParams{Type: "soft"}); err != nil {
-		return fmt.Errorf("server/stop: %w", err)
+	// Workers first, so the control plane sees them leave; the
+	// order is cosmetic for a soft stop but reads right in the log.
+	for i := len(ids) - 1; i >= 0; i-- {
+		logger.Info("GleSYS server stop", zap.String("id", ids[i]), zap.String("context", contextName))
+		if err := gc.Servers.Stop(ctx, ids[i], glesysapi.StopServerParams{Type: "soft"}); err != nil {
+			return fmt.Errorf("server/stop %s: %w", ids[i], err)
+		}
 	}
 	return nil
 }
@@ -495,13 +639,15 @@ func Start(ctx context.Context, contextName string, logger *zap.Logger) (string,
 	if err != nil {
 		return "", err
 	}
-	serverID, err := resolveServerID(ctx, gc, contextName)
+	ids, err := resolveServerIDs(ctx, gc, contextName)
 	if err != nil {
 		return "", err
 	}
-	logger.Info("GleSYS server start", zap.String("id", serverID), zap.String("name", contextName))
-	if err := gc.Servers.Start(ctx, serverID); err != nil {
-		return "", fmt.Errorf("server/start: %w", err)
+	for _, id := range ids {
+		logger.Info("GleSYS server start", zap.String("id", id), zap.String("context", contextName))
+		if err := gc.Servers.Start(ctx, id); err != nil {
+			return "", fmt.Errorf("server/start %s: %w", id, err)
+		}
 	}
 	st, err := loadState(CacheDir(), contextName)
 	if err != nil {
@@ -510,20 +656,20 @@ func Start(ctx context.Context, contextName string, logger *zap.Logger) (string,
 	return st.IPv4, nil
 }
 
-// resolveServerID is the sidecar-then-name lookup Stop and Start
-// share.
-func resolveServerID(ctx context.Context, gc *glesysapi.Client, contextName string) (string, error) {
-	if st, err := loadState(CacheDir(), contextName); err == nil && st.ServerID != "" {
-		return st.ServerID, nil
+// resolveServerIDs is the sidecar-then-name lookup Stop and Start
+// share, control plane first.
+func resolveServerIDs(ctx context.Context, gc *glesysapi.Client, contextName string) ([]string, error) {
+	if st, err := loadState(CacheDir(), contextName); err == nil && len(st.servers()) > 0 {
+		return st.servers(), nil
 	}
 	srv, err := findServer(ctx, gc, contextName)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if srv == nil {
-		return "", fmt.Errorf("no GleSYS server named %q in this project", contextName)
+		return nil, fmt.Errorf("no GleSYS server named %q in this project", contextName)
 	}
-	return srv.ID, nil
+	return []string{srv.ID}, nil
 }
 
 // isNotFound recognises the API's answer for a server that no longer

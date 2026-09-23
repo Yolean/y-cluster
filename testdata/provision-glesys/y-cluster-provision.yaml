@@ -23,6 +23,15 @@
 #     IPv4 is the GatewayClass dns-hint-ip. Try it with
 #       y-cluster gateway example install --context <context> --hostname hello.<context>.local.test
 #       curl -k --resolve hello.<context>.local.test:443:<ipv4> https://hello.<context>.local.test
+#   - Cilium is the CNI (cni: cilium, the default): pod traffic
+#     between nodes is WireGuard-encrypted and NetworkPolicy is
+#     enforced. Clocks sync against ntp.se. Talos cluster discovery
+#     is off.
+#   - With workers > 0 the control plane is a dedicated small server
+#     (controlPlane sizing) and envoy runs on every worker.
+#   - apiAllowedCIDRs turns on the Talos ingress firewall; without
+#     it the Talos and Kubernetes APIs are mTLS-only but reachable
+#     from anywhere.
 #   - No storage class. The k3s, registries, storage-changing and
 #     lifetime stanzas are refused at load rather than ignored.
 #   - The server bills until `y-cluster teardown`, which destroys
@@ -35,3 +44,10 @@ context: alice-talos
 # memory: "8192"              # default, MB
 # cpus: "4"                   # default
 # serverDisk: 30G             # default; per GB per month, the cheap dimension
+# workers: 2                  # default 0: one server does everything
+# controlPlane:               # sizing of the dedicated control plane when workers > 0
+#   memory: "4096"              # Talos recommends 3946 MiB for a control plane
+#   cpus: "2"
+# cni: cilium                 # default; flannel is Talos's built-in, no encryption, no NetworkPolicy
+# apiAllowedCIDRs:            # default empty: firewall off
+#   - 198.51.100.7/32         # the operator's address

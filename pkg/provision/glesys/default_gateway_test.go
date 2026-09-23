@@ -16,7 +16,7 @@ import (
 // its listeners, hostname and certificate reference are the contract
 // consumer HTTPRoutes and the example workload rely on.
 func TestDefaultGatewayManifest(t *testing.T) {
-	cn, dns, ips := certSubjects("qa-glesys", "203.0.113.10")
+	cn, dns, ips := certSubjects("qa-glesys", []string{"203.0.113.10", "203.0.113.11"})
 	certPEM, keyPEM, err := devcert.GenerateSelfSigned(cn, dns, ips)
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +32,7 @@ func TestDefaultGatewayManifest(t *testing.T) {
 		}
 		docs[d["kind"].(string)] = d
 	}
-	for _, kind := range []string{"Namespace", "Secret", "Gateway"} {
+	for _, kind := range []string{"Namespace", "Secret", "Gateway", "ClientTrafficPolicy"} {
 		if docs[kind] == nil {
 			t.Fatalf("no %s document", kind)
 		}
@@ -70,6 +70,16 @@ func TestDefaultGatewayManifest(t *testing.T) {
 		}
 	}
 
+	// TLS 1.3 at the edge is a requirement row; the policy targets
+	// the Gateway by name.
+	ctp := docs["ClientTrafficPolicy"]["spec"].(map[string]any)
+	if got := ctp["tls"].(map[string]any)["minVersion"]; got != "1.3" {
+		t.Errorf("tls minVersion = %v, want 1.3", got)
+	}
+	if ref := ctp["targetRefs"].([]any)[0].(map[string]any); ref["kind"] != "Gateway" || ref["name"] != DefaultGatewayName {
+		t.Errorf("policy target = %v", ref)
+	}
+
 	secret := docs["Secret"]
 	if secret["type"] != "kubernetes.io/tls" {
 		t.Errorf("secret type = %v", secret["type"])
@@ -89,8 +99,10 @@ func TestDefaultGatewayManifest(t *testing.T) {
 	if err := cert.VerifyHostname("hello.qa-glesys.local.test"); err != nil {
 		t.Errorf("cert does not cover the wildcard: %v", err)
 	}
-	if err := cert.VerifyHostname("203.0.113.10"); err != nil {
-		t.Errorf("cert does not cover the node address: %v", err)
+	for _, ip := range []string{"203.0.113.10", "203.0.113.11"} {
+		if err := cert.VerifyHostname(ip); err != nil {
+			t.Errorf("cert does not cover node address %s: %v", ip, err)
+		}
 	}
 	if _, err := base64.StdEncoding.DecodeString(data["tls.key"].(string)); err != nil {
 		t.Errorf("tls.key: %v", err)

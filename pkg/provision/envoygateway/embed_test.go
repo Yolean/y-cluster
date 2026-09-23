@@ -87,7 +87,7 @@ func TestGatewayClassYAML_WithEnvoyProxyRef(t *testing.T) {
 // fields y-cluster actually owns: requests under provider.
 // kubernetes.envoyDeployment.container.resources.
 func TestEnvoyProxyYAML_ShapesResources(t *testing.T) {
-	got := string(EnvoyProxyYAML("10m", "128Mi", nil))
+	got := string(EnvoyProxyYAML("10m", "128Mi", nil, false))
 	for _, want := range []string{
 		"apiVersion: gateway.envoyproxy.io/v1alpha1",
 		"kind: EnvoyProxy",
@@ -154,7 +154,7 @@ func TestEnvoyProxyYAML_ExternalTrafficPolicyLocal(t *testing.T) {
 			} `json:"provider"`
 		} `json:"spec"`
 	}
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	if got := cr.Spec.Provider.Kubernetes.EnvoyService.ExternalTrafficPolicy; got != "Local" {
@@ -187,7 +187,7 @@ func TestEnvoyProxyYAML_ExternalIPs(t *testing.T) {
 			} `json:"provider"`
 		} `json:"spec"`
 	}
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", []string{"203.0.113.10"}), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", []string{"203.0.113.10"}, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	svc := cr.Spec.Provider.Kubernetes.EnvoyService
@@ -200,10 +200,43 @@ func TestEnvoyProxyYAML_ExternalIPs(t *testing.T) {
 	// Without addresses the Service keeps Envoy Gateway's default
 	// type, which is what the providers with a ServiceLB rely on.
 	cr.Spec.Provider.Kubernetes.EnvoyService.Type = ""
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	if cr.Spec.Provider.Kubernetes.EnvoyService.Type != "" {
 		t.Errorf("type without externalIPs = %q, want unset", cr.Spec.Provider.Kubernetes.EnvoyService.Type)
+	}
+}
+
+// TestEnvoyProxyYAML_DaemonSet pins that the fleet kind follows the
+// flag and carries the resource requests either way, since a request
+// under the wrong key is silently ignored.
+func TestEnvoyProxyYAML_DaemonSet(t *testing.T) {
+	var cr struct {
+		Spec struct {
+			Provider struct {
+				Kubernetes map[string]any `json:"kubernetes"`
+			} `json:"provider"`
+		} `json:"spec"`
+	}
+	for _, tc := range []struct {
+		daemonSet bool
+		want      string
+		absent    string
+	}{
+		{false, "envoyDeployment", "envoyDaemonSet"},
+		{true, "envoyDaemonSet", "envoyDeployment"},
+	} {
+		cr.Spec.Provider.Kubernetes = nil
+		if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet), &cr); err != nil {
+			t.Fatal(err)
+		}
+		k := cr.Spec.Provider.Kubernetes
+		if k[tc.want] == nil || k[tc.absent] != nil {
+			t.Errorf("daemonSet=%v: want %s and no %s, got keys %v", tc.daemonSet, tc.want, tc.absent, k)
+		}
+		if !strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet)), "cpu: 10m") {
+			t.Errorf("daemonSet=%v: resource requests missing", tc.daemonSet)
+		}
 	}
 }

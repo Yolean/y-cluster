@@ -101,14 +101,26 @@ const EnvoyProxyName = "y-cluster"
 // EnvoyProxy has no field for externalIPs; the service patch is
 // the upstream-blessed way to set what it has no field for.
 //
+// daemonSet runs the envoy fleet as a DaemonSet instead of a
+// Deployment. With externalTrafficPolicy Local a node without an
+// envoy pod drops what arrives on its address, so a cluster that
+// lists several nodes' addresses needs envoy on each of them; a
+// DaemonSet is the guarantee. Tainted nodes (a dedicated control
+// plane) are skipped, which is right: their addresses are not
+// listed.
+//
 // Pure function for unit-test pinning.
-func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string) []byte {
+func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonSet bool) []byte {
 	var service string
 	if len(externalIPs) > 0 {
 		service = "        type: NodePort\n        patch:\n          type: StrategicMerge\n          value:\n            spec:\n              externalIPs:\n"
 		for _, ip := range externalIPs {
 			service += "                - " + ip + "\n"
 		}
+	}
+	fleet := "envoyDeployment"
+	if daemonSet {
+		fleet = "envoyDaemonSet"
 	}
 	return []byte(fmt.Sprintf(`---
 # y-cluster's tuning for the per-Gateway envoy proxy pod.
@@ -124,13 +136,13 @@ spec:
     kubernetes:
       envoyService:
         externalTrafficPolicy: Local
-%s      envoyDeployment:
+%s      %s:
         container:
           resources:
             requests:
               cpu: %s
               memory: %s
-`, EnvoyProxyName, Namespace, service, cpuRequest, memRequest))
+`, EnvoyProxyName, Namespace, service, fleet, cpuRequest, memRequest))
 }
 
 // ControllerResourcesPatch is a strategic-merge patch body for
