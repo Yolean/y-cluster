@@ -68,6 +68,15 @@ func TestGenerateMachineConfigs(t *testing.T) {
 	if got := fmt.Sprint(dig("v1alpha1", "machine", "certSANs")); got != "[203.0.113.10]" {
 		t.Errorf("the Talos API cert must name the public address, got %v", got)
 	}
+	// The DiscoveryServiceConfig document is the one that names
+	// discovery.talos.dev; DiscoveryIdentityConfig is only the
+	// cluster's random id and secret and stays.
+	if docs["DiscoveryServiceConfig"] != nil {
+		t.Error("cluster discovery must be off: no node may register with discovery.talos.dev")
+	}
+	if strings.Contains(string(mc.controlPlane), "discovery.talos.dev") {
+		t.Error("the machine config must not name discovery.talos.dev anywhere")
+	}
 	if got := fmt.Sprint(dig("KubeAPIServerConfig", "certExtraSANs")); got != "[203.0.113.10]" {
 		t.Errorf("the apiserver cert must name the public address, got %v", got)
 	}
