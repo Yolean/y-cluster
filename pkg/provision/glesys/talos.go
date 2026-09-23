@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -111,16 +112,28 @@ func waitForTalosAPI(ctx context.Context, c *client.Client, timeout time.Duratio
 	}
 }
 
-// bootstrap runs the one-time etcd bootstrap. Talos rejects a second
-// call with an error naming the reason; that is treated as done,
-// since the only way to get there is a provision retried past its
-// first bootstrap.
-func bootstrap(ctx context.Context, c *client.Client) error {
-	err := c.Bootstrap(ctx, &machineapi.BootstrapRequest{})
-	if err == nil || strings.Contains(err.Error(), "already") {
-		return nil
+// bootstrap runs the one-time etcd bootstrap, retrying while Talos
+// says it is not available yet: apid answers before the machine has
+// reached the stage where bootstrap is accepted. A second bootstrap
+// is rejected with an error naming the reason; that is treated as
+// done, since the only way to get there is a provision retried past
+// its first bootstrap.
+func bootstrap(ctx context.Context, c *client.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := c.Bootstrap(ctx, &machineapi.BootstrapRequest{})
+		if err == nil || strings.Contains(err.Error(), "already") {
+			return nil
+		}
+		if !strings.Contains(err.Error(), "not available yet") || time.Now().After(deadline) {
+			return fmt.Errorf("talos bootstrap: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
-	return fmt.Errorf("talos bootstrap: %w", err)
 }
 
 // waitForKubeconfig asks the node for its admin kubeconfig until the
@@ -141,6 +154,32 @@ func waitForKubeconfig(ctx context.Context, c *client.Client, timeout time.Durat
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// waitForKubeAPI polls `kubectl get --raw=/readyz` on the merged
+// context until the apiserver answers 200. Talos hands out the
+// kubeconfig as soon as its PKI exists, which is before
+// kube-apiserver listens on 6443; the gateway install that follows
+// drives the same kubectl path, so the probe is on the path the
+// next caller uses.
+func waitForKubeAPI(ctx context.Context, contextName string, timeout time.Duration, logger *zap.Logger) error {
+	logger.Info("waiting for the Kubernetes API to be ready", zap.String("context", contextName), zap.Duration("timeout", timeout))
+	deadline := time.Now().Add(timeout)
+	for {
+		probe := exec.CommandContext(ctx, "kubectl", "--context="+contextName, "get", "--raw=/readyz")
+		out, err := probe.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("apiserver /readyz never returned 200 within %s on context %q: %v: %s", timeout, contextName, err, strings.TrimSpace(string(out)))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
 	}
