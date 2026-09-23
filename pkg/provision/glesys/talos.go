@@ -54,6 +54,14 @@ func generateMachineConfigs(clusterName, ipv4 string) (*machineConfigs, error) {
 		generate.WithInstallDisk(installDisk),
 		generate.WithEndpointList([]string{ipv4}),
 		generate.WithAdditionalSubjectAltNames([]string{ipv4}),
+		// No cluster discovery: the default registers every node
+		// with Sidero's hosted discovery.talos.dev, a dependency
+		// outside the hosting country that a sovereignty-minded
+		// customer would have to be told about. It is only needed
+		// by KubeSpan, which this provider does not enable; a
+		// self-hosted discovery service is the way back if it ever
+		// is.
+		generate.WithClusterDiscovery(false),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("talos config input: %w", err)
