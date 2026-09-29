@@ -1,5 +1,6 @@
-// Package cilium installs Cilium as the CNI of a cluster whose machine
-// config was generated without one. The manifest is rendered from the
+// Package cilium installs Cilium as the CNI of a cluster started without
+// one: Talos nodes generated with no CNI (glesys), and k3s started with
+// --flannel-backend=none (qemu). The manifests are rendered from the
 // upstream Helm chart by render.sh and embedded, so provisioning needs
 // no helm and every cluster gets the same manifest; the values are in
 // render.sh. Cilium is here for what flannel cannot do: encrypt pod
@@ -20,13 +21,46 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed cilium.yaml
-var manifest []byte
+// Variant selects the manifest rendered for a node distribution.
+type Variant string
 
-// Version is the chart (and Cilium) version cilium.yaml was rendered
-// from, read off the manifest so it cannot drift from render.sh.
+const (
+	// Talos nodes: no module loading, cgroup v2 mounted by the OS.
+	Talos Variant = "talos"
+	// K3s nodes: portmap chaining for the hostPorts of k3s ServiceLB,
+	// see K3sPortmapCommand.
+	K3s Variant = "k3s"
+)
+
+//go:embed cilium-talos.yaml
+var talosManifest []byte
+
+//go:embed cilium-k3s.yaml
+var k3sManifest []byte
+
+// K3sPortmapCommand makes k3s's bundled portmap plugin available where
+// containerd looks for CNI plugins once k3s runs without flannel
+// (/opt/cni/bin, containerd's default). The target is k3s's own
+// per-plugin symlink, which k3s repoints on upgrade; the plugin is a
+// multi-call binary that dispatches on the name it is run as.
+const K3sPortmapCommand = "sudo mkdir -p /opt/cni/bin && sudo ln -sfn /var/lib/rancher/k3s/data/cni/portmap /opt/cni/bin/portmap"
+
+// Manifest returns the embedded manifest of a variant.
+func Manifest(v Variant) ([]byte, error) {
+	switch v {
+	case Talos:
+		return talosManifest, nil
+	case K3s:
+		return k3sManifest, nil
+	default:
+		return nil, fmt.Errorf("no cilium manifest for variant %q", v)
+	}
+}
+
+// Version is the chart (and Cilium) version the manifests were rendered
+// from, read off one of them so it cannot drift from render.sh.
 var Version = func() string {
-	m := regexp.MustCompile(`quay\.io/cilium/cilium:v([0-9.]+)`).FindSubmatch(manifest)
+	m := regexp.MustCompile(`quay\.io/cilium/cilium:v([0-9.]+)`).FindSubmatch(k3sManifest)
 	if m == nil {
 		return "unknown"
 	}
@@ -40,11 +74,15 @@ const Namespace = "kube-system"
 // Install applies the manifest with server-side apply and waits for
 // the cilium DaemonSet to roll out and every node to be Ready, which
 // is when pods can be scheduled. Idempotent.
-func Install(ctx context.Context, contextName string, nodes int, timeout time.Duration, logger *zap.Logger) error {
+func Install(ctx context.Context, variant Variant, contextName string, nodes int, timeout time.Duration, logger *zap.Logger) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	logger.Info("applying cilium manifest", zap.String("version", Version), zap.String("namespace", Namespace))
+	manifest, err := Manifest(variant)
+	if err != nil {
+		return err
+	}
+	logger.Info("applying cilium manifest", zap.String("version", Version), zap.String("variant", string(variant)), zap.String("namespace", Namespace))
 	apply := exec.CommandContext(ctx, "kubectl", "--context="+contextName,
 		"apply", "--server-side", "--force-conflicts", "--field-manager=y-cluster", "-f", "-")
 	apply.Stdin = bytes.NewReader(manifest)
