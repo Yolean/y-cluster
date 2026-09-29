@@ -57,11 +57,11 @@ func TestInstallCommand_EnvironmentAsTheInstallerSeesIt(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cmd := installCommand("v1.35.3+k3s1", ServerFlags("--tls-san=10.0.0.5"), c.skipDownload)
-			const prefix, suffix = "curl -sfL https://get.k3s.io | ", " sudo -E sh -"
-			if !strings.HasPrefix(cmd, prefix) || !strings.HasSuffix(cmd, suffix) {
+			const suffix = " sudo -E sh /tmp/k3s-install.sh"
+			if !strings.HasSuffix(cmd, suffix) {
 				t.Fatalf("unexpected shape: %s", cmd)
 			}
-			env := strings.TrimSuffix(strings.TrimPrefix(cmd, prefix), suffix)
+			env := strings.TrimSuffix(cmd, suffix)
 			out, err := exec.Command(sh, "-c", env+` sh -c 'printf "%s|%s|%s" "$INSTALL_K3S_VERSION" "$INSTALL_K3S_SKIP_DOWNLOAD" "$INSTALL_K3S_EXEC"'`).Output()
 			if err != nil {
 				t.Fatal(err)
@@ -79,11 +79,34 @@ func TestInstallScript(t *testing.T) {
 	if err := InstallScript(context.Background(), node.exec, "v1.35.3+k3s1", ServerFlags()); err != nil {
 		t.Fatal(err)
 	}
-	if len(node.commands) != 1 || !strings.Contains(node.commands[0], "get.k3s.io") {
-		t.Errorf("commands: %q", node.commands)
+	if len(node.commands) != 2 {
+		t.Fatalf("commands: %q", node.commands)
 	}
-	if strings.Contains(node.commands[0], "SKIP_DOWNLOAD") {
-		t.Errorf("script install must let the installer download: %s", node.commands[0])
+	// The installer of the pinned release, downloaded to a file in its
+	// own step: `curl | sh` turns a failed download into an empty
+	// script that exits 0 with nothing installed.
+	if want := "curl -sSfL -o /tmp/k3s-install.sh 'https://raw.githubusercontent.com/k3s-io/k3s/v1.35.3%2Bk3s1/install.sh'"; node.commands[0] != want {
+		t.Errorf("fetch = %s, want %s", node.commands[0], want)
+	}
+	if strings.Contains(node.commands[1], "SKIP_DOWNLOAD") || strings.Contains(node.commands[1], "|") {
+		t.Errorf("script install must let the installer download, from a file: %s", node.commands[1])
+	}
+}
+
+// A failed installer download stops the install before sh runs.
+func TestInstallScript_FailedDownloadStops(t *testing.T) {
+	node := &fakeNode{answer: func(command string) ([]byte, error) {
+		if strings.HasPrefix(command, "curl ") {
+			return []byte("curl: (22) The requested URL returned error: 500"), errors.New("exit status 22")
+		}
+		return nil, nil
+	}}
+	err := InstallScript(context.Background(), node.exec, "v1.35.3+k3s1", ServerFlags())
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("want the download error, got %v", err)
+	}
+	if len(node.commands) != 1 {
+		t.Errorf("ran after a failed download: %q", node.commands)
 	}
 }
 
