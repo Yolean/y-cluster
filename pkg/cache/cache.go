@@ -121,6 +121,28 @@ func EnvoyGatewayVersion(flagOverride, version string) (string, error) {
 	return filepath.Join(root, version), nil
 }
 
+// CertManager is the root of the per-release cert-manager caches.
+func CertManager(flagOverride string) (string, error) {
+	root, err := Root(flagOverride)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "certmanager"), nil
+}
+
+// CertManagerVersion is the per-release subdir of CertManager; the caller
+// maps its config to a release tag (typically certmanager.Version).
+func CertManagerVersion(flagOverride, version string) (string, error) {
+	if version == "" {
+		return "", fmt.Errorf("CertManagerVersion: version is empty")
+	}
+	root, err := CertManager(flagOverride)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, version), nil
+}
+
 // Subtree is one purgeable directory under the cache root.
 type Subtree struct {
 	Name string
@@ -140,6 +162,7 @@ func Subtrees(flagOverride string) ([]Subtree, error) {
 		{"images", Images},
 		{"k3s", K3s},
 		{"envoygateway", EnvoyGateway},
+		{"certmanager", CertManager},
 	} {
 		p, err := s.path(flagOverride)
 		if err != nil {
