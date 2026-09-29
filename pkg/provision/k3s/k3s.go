@@ -40,6 +40,12 @@ const KubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
 // that apply. Older k3s releases have no such addon and ignore the flag.
 var DisableFlags = []string{"--disable=traefik", "--disable=local-storage", "--disable=gateway-api-crd"}
 
+// CiliumFlags start k3s without a CNI for pkg/provision/cilium to
+// install: no flannel, and no k3s network policy controller, which
+// would enforce NetworkPolicy alongside Cilium. Only provisioners that
+// install Cilium pass them (qemu); the rest keep flannel.
+var CiliumFlags = []string{"--flannel-backend=none", "--disable-network-policy"}
+
 // ServerFlags is the INSTALL_K3S_EXEC value of a VM provisioner:
 // DisableFlags, a kubeconfig the unprivileged login user can read,
 // then whatever the provisioner adds (--tls-san for every host-side

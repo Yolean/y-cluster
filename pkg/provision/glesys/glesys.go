@@ -261,7 +261,7 @@ func Provision(ctx context.Context, cfg config.GlesysConfig, logger *zap.Logger)
 // the nodes report Ready.
 func (c *Cluster) installCNIAndGateway(ctx context.Context) error {
 	if c.cfg.CNI == "cilium" {
-		if err := cilium.Install(ctx, c.cfg.Context, c.cfg.Nodes(), nodesReadyTimeout, c.logger); err != nil {
+		if err := cilium.Install(ctx, cilium.Talos, c.cfg.Context, c.cfg.Nodes(), nodesReadyTimeout, c.logger); err != nil {
 			return fmt.Errorf("install cilium: %w", err)
 		}
 	} else if err := cilium.WaitNodesReady(ctx, c.cfg.Context, c.cfg.Nodes(), nodesReadyTimeout, c.logger); err != nil {

@@ -22,6 +22,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/cache"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
+	"github.com/Yolean/y-cluster/pkg/provision/cilium"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
@@ -406,6 +407,16 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return nil, fmt.Errorf("merge kubeconfig: %w", err)
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
+
+	// k3s runs without flannel (k3s.CiliumFlags): the node is NotReady
+	// and nothing schedules until the CNI is up, so Cilium comes before
+	// any workload install.
+	if out, err := c.NodeExec(ctx, cilium.K3sPortmapCommand, nil); err != nil {
+		return nil, fmt.Errorf("link portmap for cilium: %s: %w", out, err)
+	}
+	if err := cilium.Install(ctx, cilium.K3s, cfg.Context, 1, ciliumReadyTimeout, logger); err != nil {
+		return nil, fmt.Errorf("install cilium: %w", err)
+	}
 
 	// Install the bundled local-path-provisioner (replaces k3s's
 	// disabled local-storage addon). Runs before any workload
