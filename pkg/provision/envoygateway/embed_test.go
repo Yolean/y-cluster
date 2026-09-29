@@ -87,7 +87,7 @@ func TestGatewayClassYAML_WithEnvoyProxyRef(t *testing.T) {
 // fields y-cluster actually owns: requests under provider.
 // kubernetes.envoyDeployment.container.resources.
 func TestEnvoyProxyYAML_ShapesResources(t *testing.T) {
-	got := string(EnvoyProxyYAML("10m", "128Mi", nil, false))
+	got := string(EnvoyProxyYAML("10m", "128Mi", nil, false, false))
 	for _, want := range []string{
 		"apiVersion: gateway.envoyproxy.io/v1alpha1",
 		"kind: EnvoyProxy",
@@ -154,7 +154,7 @@ func TestEnvoyProxyYAML_ExternalTrafficPolicyLocal(t *testing.T) {
 			} `json:"provider"`
 		} `json:"spec"`
 	}
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	if got := cr.Spec.Provider.Kubernetes.EnvoyService.ExternalTrafficPolicy; got != "Local" {
@@ -187,7 +187,7 @@ func TestEnvoyProxyYAML_ExternalIPs(t *testing.T) {
 			} `json:"provider"`
 		} `json:"spec"`
 	}
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", []string{"203.0.113.10"}, false), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", []string{"203.0.113.10"}, false, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	svc := cr.Spec.Provider.Kubernetes.EnvoyService
@@ -200,7 +200,7 @@ func TestEnvoyProxyYAML_ExternalIPs(t *testing.T) {
 	// Without addresses the Service keeps Envoy Gateway's default
 	// type, which is what the providers with a ServiceLB rely on.
 	cr.Spec.Provider.Kubernetes.EnvoyService.Type = ""
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	if cr.Spec.Provider.Kubernetes.EnvoyService.Type != "" {
@@ -228,15 +228,34 @@ func TestEnvoyProxyYAML_DaemonSet(t *testing.T) {
 		{true, "envoyDaemonSet", "envoyDeployment"},
 	} {
 		cr.Spec.Provider.Kubernetes = nil
-		if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet), &cr); err != nil {
+		if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet, false), &cr); err != nil {
 			t.Fatal(err)
 		}
 		k := cr.Spec.Provider.Kubernetes
 		if k[tc.want] == nil || k[tc.absent] != nil {
 			t.Errorf("daemonSet=%v: want %s and no %s, got keys %v", tc.daemonSet, tc.want, tc.absent, k)
 		}
-		if !strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet)), "cpu: 10m") {
+		if !strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet, false)), "cpu: 10m") {
 			t.Errorf("daemonSet=%v: resource requests missing", tc.daemonSet)
 		}
+	}
+}
+
+// mergeGateways is rendered only when asked for; qemu asks, so ystack's and
+// a site's Gateways share the proxy ServiceLB publishes on the node.
+func TestEnvoyProxyYAML_MergeGateways(t *testing.T) {
+	if strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, false, false)), "mergeGateways") {
+		t.Error("mergeGateways rendered without being asked for")
+	}
+	var cr struct {
+		Spec struct {
+			MergeGateways bool `json:"mergeGateways"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false, true), &cr); err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Spec.MergeGateways {
+		t.Error("spec.mergeGateways not true")
 	}
 }

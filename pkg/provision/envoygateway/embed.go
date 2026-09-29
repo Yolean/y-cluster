@@ -110,7 +110,7 @@ const EnvoyProxyName = "y-cluster"
 // listed.
 //
 // Pure function for unit-test pinning.
-func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonSet bool) []byte {
+func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonSet, mergeGateways bool) []byte {
 	var service string
 	if len(externalIPs) > 0 {
 		service = "        type: NodePort\n        patch:\n          type: StrategicMerge\n          value:\n            spec:\n              externalIPs:\n"
@@ -122,6 +122,10 @@ func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonS
 	if daemonSet {
 		fleet = "envoyDaemonSet"
 	}
+	var merge string
+	if mergeGateways {
+		merge = "  mergeGateways: true\n"
+	}
 	return []byte(fmt.Sprintf(`---
 # y-cluster's tuning for the per-Gateway envoy proxy pod.
 # Referenced by the GatewayClass via parametersRef.
@@ -131,7 +135,7 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  provider:
+%s  provider:
     type: Kubernetes
     kubernetes:
       envoyService:
@@ -142,7 +146,7 @@ spec:
             requests:
               cpu: %s
               memory: %s
-`, EnvoyProxyName, Namespace, service, fleet, cpuRequest, memRequest))
+`, EnvoyProxyName, Namespace, merge, service, fleet, cpuRequest, memRequest))
 }
 
 // ControllerResourcesPatch is a strategic-merge patch body for

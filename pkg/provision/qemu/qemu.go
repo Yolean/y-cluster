@@ -451,6 +451,9 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
 			ProxyCPURequest:      cfg.Gateway.Resources.Proxy.CPU,
 			ProxyMemRequest:      cfg.Gateway.Resources.Proxy.Memory,
+			// One node, ServiceLB: Gateways beyond y-cluster's own
+			// (ystack's, a site's) must share the proxy on :80/:443.
+			MergeGateways: true,
 		}); err != nil {
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}
