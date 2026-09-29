@@ -88,6 +88,13 @@ type Options struct {
 	// ExternalIPs (see EnvoyProxyYAML). Applies the EnvoyProxy CR
 	// like ExternalIPs does.
 	DaemonSet bool
+
+	// MergeGateways makes every Gateway of the class share one proxy
+	// fleet and one Service. Needed where the Service is published on
+	// a single node's ports (k3s ServiceLB): a second Gateway on :80
+	// would get its own LoadBalancer Service that ServiceLB cannot
+	// bind. Listeners of merged Gateways are told apart by hostname.
+	MergeGateways bool
 }
 
 // Install resolves the per-version install.yaml from cache
@@ -186,7 +193,7 @@ func Install(ctx context.Context, opts Options) error {
 	// configured we skip the CR and leave the GatewayClass
 	// parametersRef-less -- EG uses its built-in defaults.
 	envoyProxyName := ""
-	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet {
+	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet || opts.MergeGateways {
 		envoyProxyName = EnvoyProxyName
 		logger.Info("applying EnvoyProxy CR",
 			zap.String("name", envoyProxyName),
@@ -194,9 +201,10 @@ func Install(ctx context.Context, opts Options) error {
 			zap.String("memory", opts.ProxyMemRequest),
 			zap.Strings("externalIPs", opts.ExternalIPs),
 			zap.Bool("daemonSet", opts.DaemonSet),
+			zap.Bool("mergeGateways", opts.MergeGateways),
 		)
 		if err := kubectlApplyStdin(ctx, opts.ContextName,
-			EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet),
+			EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet, opts.MergeGateways),
 		); err != nil {
 			return fmt.Errorf("apply EnvoyProxy: %w", err)
 		}
