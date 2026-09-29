@@ -71,25 +71,26 @@ on it.`,
 
 func cachePurgeCmd() *cobra.Command {
 	var cacheDir string
-	var images, k3s, envoyGateway, all bool
+	var images, k3s, envoyGateway, certManager, all bool
 
 	cmd := &cobra.Command{
 		Use:   "purge",
-		Short: "Delete cached artefacts. Requires --images, --k3s, --envoygateway, or --all.",
+		Short: "Delete cached artefacts. Requires --images, --k3s, --envoygateway, --certmanager, or --all.",
 		Long: `Removes cache subtrees from disk. The flags must be explicit so
 adding a new subtree later doesn't silently expand "purge" to it:
 
   --images         delete <root>/images/
   --k3s            delete <root>/k3s/
   --envoygateway   delete <root>/envoygateway/
+  --certmanager    delete <root>/certmanager/
   --all            delete every subtree the running binary knows about
 
 Bare 'cache purge' (no flag) exits non-zero with a usage error.
 Combine flags to delete several subtrees in one invocation.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			selected := map[string]bool{"images": images, "k3s": k3s, "envoygateway": envoyGateway}
-			if !images && !k3s && !envoyGateway && !all {
-				return fmt.Errorf("specify --images, --k3s, --envoygateway, or --all")
+			selected := map[string]bool{"images": images, "k3s": k3s, "envoygateway": envoyGateway, "certmanager": certManager}
+			if !images && !k3s && !envoyGateway && !certManager && !all {
+				return fmt.Errorf("specify --images, --k3s, --envoygateway, --certmanager, or --all")
 			}
 			subtrees, err := cache.Subtrees(cacheDir)
 			if err != nil {
@@ -111,6 +112,7 @@ Combine flags to delete several subtrees in one invocation.`,
 	cmd.Flags().BoolVar(&images, "images", false, "delete the images subtree")
 	cmd.Flags().BoolVar(&k3s, "k3s", false, "delete the k3s subtree")
 	cmd.Flags().BoolVar(&envoyGateway, "envoygateway", false, "delete the envoygateway subtree")
+	cmd.Flags().BoolVar(&certManager, "certmanager", false, "delete the certmanager subtree")
 	cmd.Flags().BoolVar(&all, "all", false, "delete every known subtree")
 	return cmd
 }

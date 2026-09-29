@@ -22,6 +22,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/cache"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
+	"github.com/Yolean/y-cluster/pkg/provision/certmanager"
 	"github.com/Yolean/y-cluster/pkg/provision/cilium"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
@@ -458,6 +459,13 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 		)
 	}
+
+	// qemu is the provider that targets production: its clusters get
+	// cert-manager and y-cluster's CA issuer for in-cluster certificates.
+	if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
+		return nil, fmt.Errorf("install cert-manager: %w", err)
+	}
+	logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 
 	return c, nil
 }
