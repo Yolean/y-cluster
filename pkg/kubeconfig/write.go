@@ -72,6 +72,11 @@ func withFileLock(path string, fn func() error) error {
 	// a flock'd file lets a waiter lock the unlinked inode while a
 	// newcomer locks a fresh one.
 	lockPath := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".y-cluster-lock")
+	// The first cluster on a fresh account: ~/.kube may not exist yet.
+	// 0700 because the kubeconfig in it carries credentials.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create kubeconfig directory: %w", err)
+	}
 	fh, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", lockPath, err)
