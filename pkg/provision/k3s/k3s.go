@@ -34,8 +34,11 @@ const KubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
 // fight over :80/:443. local-storage: pkg/provision/localstorage
 // ships its own local-path-provisioner, and k3s's deploy controller
 // would reconcile that config back to upstream defaults on every
-// restart.
-var DisableFlags = []string{"--disable=traefik", "--disable=local-storage"}
+// restart. gateway-api-crd: pkg/provision/envoygateway installs the
+// Gateway API CRDs its Envoy Gateway release needs; k3s 1.37's bundled
+// ones carry a ValidatingAdmissionPolicy (safe-upgrades) that refuses
+// that apply. Older k3s releases have no such addon and ignore the flag.
+var DisableFlags = []string{"--disable=traefik", "--disable=local-storage", "--disable=gateway-api-crd"}
 
 // ServerFlags is the INSTALL_K3S_EXEC value of a VM provisioner:
 // DisableFlags, a kubeconfig the unprivileged login user can read,

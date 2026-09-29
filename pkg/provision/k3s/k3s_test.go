@@ -25,17 +25,17 @@ func (n *fakeNode) exec(_ context.Context, command string, _ io.Reader) ([]byte,
 }
 
 func TestServerFlags(t *testing.T) {
-	if got, want := ServerFlags(), "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage"; got != want {
+	if got, want := ServerFlags(), "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --disable=gateway-api-crd"; got != want {
 		t.Errorf("ServerFlags() = %q, want %q", got, want)
 	}
 	got := ServerFlags("--tls-san=10.0.0.5", "--node-external-ip=10.0.0.5")
-	want := "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --tls-san=10.0.0.5 --node-external-ip=10.0.0.5"
+	want := "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --disable=gateway-api-crd --tls-san=10.0.0.5 --node-external-ip=10.0.0.5"
 	if got != want {
 		t.Errorf("ServerFlags(extra) = %q, want %q", got, want)
 	}
 	// A caller appending to the result of one call must not see it
 	// in the next: DisableFlags is shared with the docker provider.
-	if len(DisableFlags) != 2 {
+	if len(DisableFlags) != 3 {
 		t.Errorf("DisableFlags grew: %v", DisableFlags)
 	}
 }
@@ -66,7 +66,7 @@ func TestInstallCommand_EnvironmentAsTheInstallerSeesIt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "v1.35.3+k3s1|" + c.wantSkip + "|--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --tls-san=10.0.0.5"
+			want := "v1.35.3+k3s1|" + c.wantSkip + "|--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --disable=gateway-api-crd --tls-san=10.0.0.5"
 			if string(out) != want {
 				t.Errorf("installer would see %q, want %q", out, want)
 			}
