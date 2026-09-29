@@ -46,27 +46,50 @@ func ServerFlags(extra ...string) string {
 	return strings.Join(append(flags, extra...), " ")
 }
 
-// installCommand is the get.k3s.io invocation. skipDownload is the
-// airgap form: the installer sets up the systemd unit around a binary
-// that is already in place.
+// installScriptBaseURL serves the installer as committed at each k3s
+// release tag, a variable so tests can serve it. get.k3s.io serves the
+// installer of the default branch, which can differ from the pinned
+// release and has been down (HTTP 500 on 2026-09-29) while GitHub was not.
+var installScriptBaseURL = "https://raw.githubusercontent.com/k3s-io/k3s"
+
+// installScriptURL is the installer of release version.
+func installScriptURL(version string) string {
+	return installScriptBaseURL + "/" + strings.ReplaceAll(version, "+", "%2B") + "/install.sh"
+}
+
+// installScriptNodePath is where the installer is put on the node.
+const installScriptNodePath = "/tmp/k3s-install.sh"
+
+// installCommand runs the installer at installScriptNodePath with its
+// settings in the environment. skipDownload is the airgap form: the
+// installer sets up the systemd unit around a binary that is already
+// in place.
 func installCommand(version, serverFlags string, skipDownload bool) string {
 	env := "INSTALL_K3S_VERSION=" + shquote.Quote(version)
 	if skipDownload {
 		env += " INSTALL_K3S_SKIP_DOWNLOAD=true"
 	}
 	env += " INSTALL_K3S_EXEC=" + shquote.Quote(serverFlags)
-	return "curl -sfL https://get.k3s.io | " + env + " sudo -E sh -"
+	return env + " sudo -E sh " + installScriptNodePath
 }
 
-// InstallScript runs the upstream installer, which downloads k3s on
-// the node. The node needs outbound HTTPS to get.k3s.io and GitHub.
+// fetchInstallScriptCommand downloads the installer on the node. A
+// separate step and not `curl | sh`: in a pipe a failed download hands
+// sh empty input, which exits 0 with nothing installed.
+func fetchInstallScriptCommand(version string) string {
+	return "curl -sSfL -o " + installScriptNodePath + " " + shquote.Quote(installScriptURL(version))
+}
+
+// InstallScript runs the upstream installer of the release, which
+// downloads k3s on the node. The node needs outbound HTTPS to GitHub.
 func InstallScript(ctx context.Context, exec NodeExec, version, serverFlags string) error {
 	if version == "" {
 		return errNoVersion
 	}
-	out, err := exec(ctx, installCommand(version, serverFlags, false), nil)
-	if err != nil {
-		return fmt.Errorf("k3s install script: %s: %w", out, err)
+	for _, step := range []string{fetchInstallScriptCommand(version), installCommand(version, serverFlags, false)} {
+		if out, err := exec(ctx, step, nil); err != nil {
+			return fmt.Errorf("k3s install script: %s: %w", out, err)
+		}
 	}
 	return nil
 }
