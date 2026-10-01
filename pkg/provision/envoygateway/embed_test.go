@@ -87,7 +87,7 @@ func TestGatewayClassYAML_WithEnvoyProxyRef(t *testing.T) {
 // fields y-cluster actually owns: requests under provider.
 // kubernetes.envoyDeployment.container.resources.
 func TestEnvoyProxyYAML_ShapesResources(t *testing.T) {
-	got := string(EnvoyProxyYAML("10m", "128Mi"))
+	got := string(EnvoyProxyYAML("10m", "128Mi", nil, false, false))
 	for _, want := range []string{
 		"apiVersion: gateway.envoyproxy.io/v1alpha1",
 		"kind: EnvoyProxy",
@@ -154,10 +154,108 @@ func TestEnvoyProxyYAML_ExternalTrafficPolicyLocal(t *testing.T) {
 			} `json:"provider"`
 		} `json:"spec"`
 	}
-	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi"), &cr); err != nil {
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false, false), &cr); err != nil {
 		t.Fatal(err)
 	}
 	if got := cr.Spec.Provider.Kubernetes.EnvoyService.ExternalTrafficPolicy; got != "Local" {
 		t.Fatalf("spec.provider.kubernetes.envoyService.externalTrafficPolicy = %q, want Local", got)
+	}
+}
+
+// TestEnvoyProxyYAML_ExternalIPs pins the shape that makes the envoy
+// Service reachable on a node address without a load balancer
+// implementation: NodePort, and the strategic-merge patch carrying
+// spec.externalIPs. Parsed, since a patch at the wrong path is
+// silently ignored by Envoy Gateway.
+func TestEnvoyProxyYAML_ExternalIPs(t *testing.T) {
+	var cr struct {
+		Spec struct {
+			Provider struct {
+				Kubernetes struct {
+					EnvoyService struct {
+						Type  string `json:"type"`
+						Patch struct {
+							Type  string `json:"type"`
+							Value struct {
+								Spec struct {
+									ExternalIPs []string `json:"externalIPs"`
+								} `json:"spec"`
+							} `json:"value"`
+						} `json:"patch"`
+					} `json:"envoyService"`
+				} `json:"kubernetes"`
+			} `json:"provider"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", []string{"203.0.113.10"}, false, false), &cr); err != nil {
+		t.Fatal(err)
+	}
+	svc := cr.Spec.Provider.Kubernetes.EnvoyService
+	if svc.Type != "NodePort" {
+		t.Errorf("type = %q, want NodePort", svc.Type)
+	}
+	if svc.Patch.Type != "StrategicMerge" || len(svc.Patch.Value.Spec.ExternalIPs) != 1 || svc.Patch.Value.Spec.ExternalIPs[0] != "203.0.113.10" {
+		t.Errorf("patch = %+v, want a StrategicMerge with spec.externalIPs [203.0.113.10]", svc.Patch)
+	}
+	// Without addresses the Service keeps Envoy Gateway's default
+	// type, which is what the providers with a ServiceLB rely on.
+	cr.Spec.Provider.Kubernetes.EnvoyService.Type = ""
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false, false), &cr); err != nil {
+		t.Fatal(err)
+	}
+	if cr.Spec.Provider.Kubernetes.EnvoyService.Type != "" {
+		t.Errorf("type without externalIPs = %q, want unset", cr.Spec.Provider.Kubernetes.EnvoyService.Type)
+	}
+}
+
+// TestEnvoyProxyYAML_DaemonSet pins that the fleet kind follows the
+// flag and carries the resource requests either way, since a request
+// under the wrong key is silently ignored.
+func TestEnvoyProxyYAML_DaemonSet(t *testing.T) {
+	var cr struct {
+		Spec struct {
+			Provider struct {
+				Kubernetes map[string]any `json:"kubernetes"`
+			} `json:"provider"`
+		} `json:"spec"`
+	}
+	for _, tc := range []struct {
+		daemonSet bool
+		want      string
+		absent    string
+	}{
+		{false, "envoyDeployment", "envoyDaemonSet"},
+		{true, "envoyDaemonSet", "envoyDeployment"},
+	} {
+		cr.Spec.Provider.Kubernetes = nil
+		if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet, false), &cr); err != nil {
+			t.Fatal(err)
+		}
+		k := cr.Spec.Provider.Kubernetes
+		if k[tc.want] == nil || k[tc.absent] != nil {
+			t.Errorf("daemonSet=%v: want %s and no %s, got keys %v", tc.daemonSet, tc.want, tc.absent, k)
+		}
+		if !strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, tc.daemonSet, false)), "cpu: 10m") {
+			t.Errorf("daemonSet=%v: resource requests missing", tc.daemonSet)
+		}
+	}
+}
+
+// mergeGateways is rendered only when asked for; qemu asks, so ystack's and
+// a site's Gateways share the proxy ServiceLB publishes on the node.
+func TestEnvoyProxyYAML_MergeGateways(t *testing.T) {
+	if strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, false, false)), "mergeGateways") {
+		t.Error("mergeGateways rendered without being asked for")
+	}
+	var cr struct {
+		Spec struct {
+			MergeGateways bool `json:"mergeGateways"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(EnvoyProxyYAML("10m", "128Mi", nil, false, true), &cr); err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Spec.MergeGateways {
+		t.Error("spec.mergeGateways not true")
 	}
 }

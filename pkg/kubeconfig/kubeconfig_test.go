@@ -131,6 +131,44 @@ users:
 	}
 }
 
+// A fresh account has no ~/.kube: the first import creates it.
+func TestImport_CreatesMissingDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".kube", "yolean")
+	m, err := New(path, "local", "ystack-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: default
+contexts:
+- context:
+    cluster: default
+    user: default
+  name: default
+current-context: default
+users:
+- name: default
+  user: {}
+`)
+	if err := m.Import(raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o700 {
+		t.Errorf("created %s with mode %o, want 700", filepath.Dir(path), perm)
+	}
+}
+
 func TestImport_MergeExisting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kubeconfig")

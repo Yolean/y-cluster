@@ -16,8 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// releaseServer stands in for GitHub releases and records the request
-// paths it served. Every file's content is derived from its name, and
+// releaseServer stands in for GitHub releases, and for the installer
+// at the release tag, and records the request paths it served. Every file's content is derived from its name, and
 // the sha256sum-<arch>.txt files list the digests of that content.
 // tamper names a file that is served with other bytes than the
 // checksum file promises.
@@ -56,9 +56,10 @@ func newReleaseServer(t *testing.T) *releaseServer {
 		_, _ = w.Write(content(name))
 	}))
 	t.Cleanup(srv.Close)
-	prev := releaseBaseURL
+	prev, prevScript := releaseBaseURL, installScriptBaseURL
 	releaseBaseURL = srv.URL + "/download"
-	t.Cleanup(func() { releaseBaseURL = prev })
+	installScriptBaseURL = srv.URL + "/raw"
+	t.Cleanup(func() { releaseBaseURL, installScriptBaseURL = prev, prevScript })
 	return rs
 }
 
@@ -107,13 +108,17 @@ func TestInstallAirgap_AMD64(t *testing.T) {
 		"/download/v1.35.3%2Bk3s1/sha256sum-amd64.txt",
 		"/download/v1.35.3%2Bk3s1/k3s",
 		"/download/v1.35.3%2Bk3s1/k3s-airgap-images-amd64.tar.zst",
+		"/raw/v1.35.3%2Bk3s1/install.sh",
 	}
 	if got := release.requests(); !reflect.DeepEqual(got, wantRequests) {
 		t.Errorf("requests = %q, want %q", got, wantRequests)
 	}
+	// The installer comes from the host cache too: the node needs no
+	// internet, get.k3s.io included.
 	wantCopies := []copied{
 		{"content of k3s", "/tmp/k3s"},
 		{"content of k3s-airgap-images-amd64.tar.zst", "/tmp/k3s-airgap-images-amd64.tar.zst"},
+		{"content of install.sh", "/tmp/k3s-install.sh"},
 	}
 	if !reflect.DeepEqual(copies, wantCopies) {
 		t.Errorf("copies = %q, want %q", copies, wantCopies)
@@ -131,6 +136,11 @@ func TestInstallAirgap_AMD64(t *testing.T) {
 	if !strings.Contains(node.commands[4], "INSTALL_K3S_SKIP_DOWNLOAD=true") {
 		t.Errorf("airgap install must not download on the node: %s", node.commands[4])
 	}
+	for _, c := range node.commands {
+		if strings.Contains(c, "curl") || strings.Contains(c, "get.k3s.io") {
+			t.Errorf("airgap install fetched on the node: %s", c)
+		}
+	}
 
 	// Same version again, any cluster on this host: no download.
 	if err := InstallAirgap(context.Background(), unameNode("x86_64").exec, recordingCopy(t, &copies), "v1.35.3+k3s1", ServerFlags(), zap.NewNop()); err != nil {
@@ -139,8 +149,10 @@ func TestInstallAirgap_AMD64(t *testing.T) {
 	if got := release.requests(); len(got) != len(wantRequests) {
 		t.Errorf("second install downloaded again: %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, "k3s", "v1.35.3+k3s1", "k3s")); err != nil {
-		t.Errorf("cache layout: %v", err)
+	for _, name := range []string{"k3s", "install.sh"} {
+		if _, err := os.Stat(filepath.Join(cacheDir, "k3s", "v1.35.3+k3s1", name)); err != nil {
+			t.Errorf("cache layout: %v", err)
+		}
 	}
 }
 
@@ -159,6 +171,7 @@ func TestInstallAirgap_ARM64(t *testing.T) {
 		"/download/v1.35.3%2Bk3s1/sha256sum-arm64.txt",
 		"/download/v1.35.3%2Bk3s1/k3s-arm64",
 		"/download/v1.35.3%2Bk3s1/k3s-airgap-images-arm64.tar.zst",
+		"/raw/v1.35.3%2Bk3s1/install.sh",
 	}
 	if got := release.requests(); !reflect.DeepEqual(got, wantRequests) {
 		t.Errorf("requests = %q, want %q", got, wantRequests)
@@ -218,7 +231,7 @@ func TestInstallAirgap_RefusesAnArtifactThatFailsItsChecksum(t *testing.T) {
 	if err := InstallAirgap(context.Background(), unameNode("x86_64").exec, recordingCopy(t, &copies), "v1.35.3+k3s1", ServerFlags(), zap.NewNop()); err != nil {
 		t.Fatalf("after the upstream recovered: %v", err)
 	}
-	if len(copies) != 2 || copies[0].hostContent != string(content("k3s")) {
+	if len(copies) != 3 || copies[0].hostContent != string(content("k3s")) {
 		t.Errorf("copies after recovery: %q", copies)
 	}
 }

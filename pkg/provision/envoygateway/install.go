@@ -75,6 +75,26 @@ type Options struct {
 	// GatewayClass has no parametersRef -- EG uses its defaults.
 	ProxyCPURequest string
 	ProxyMemRequest string
+
+	// ExternalIPs makes the envoy Service reachable on these node
+	// addresses, for a cluster with no load balancer implementation
+	// (see EnvoyProxyYAML). Empty on every provider that has one:
+	// k3s ServiceLB locally and on hetzner. Setting it applies the
+	// EnvoyProxy CR even when no proxy resources are configured.
+	ExternalIPs []string
+
+	// DaemonSet runs the envoy fleet as a DaemonSet, one pod per
+	// schedulable node, for a cluster that lists several nodes in
+	// ExternalIPs (see EnvoyProxyYAML). Applies the EnvoyProxy CR
+	// like ExternalIPs does.
+	DaemonSet bool
+
+	// MergeGateways makes every Gateway of the class share one proxy
+	// fleet and one Service. Needed where the Service is published on
+	// a single node's ports (k3s ServiceLB): a second Gateway on :80
+	// would get its own LoadBalancer Service that ServiceLB cannot
+	// bind. Listeners of merged Gateways are told apart by hostname.
+	MergeGateways bool
 }
 
 // Install resolves the per-version install.yaml from cache
@@ -173,15 +193,18 @@ func Install(ctx context.Context, opts Options) error {
 	// configured we skip the CR and leave the GatewayClass
 	// parametersRef-less -- EG uses its built-in defaults.
 	envoyProxyName := ""
-	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" {
+	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet || opts.MergeGateways {
 		envoyProxyName = EnvoyProxyName
 		logger.Info("applying EnvoyProxy CR",
 			zap.String("name", envoyProxyName),
 			zap.String("cpu", opts.ProxyCPURequest),
 			zap.String("memory", opts.ProxyMemRequest),
+			zap.Strings("externalIPs", opts.ExternalIPs),
+			zap.Bool("daemonSet", opts.DaemonSet),
+			zap.Bool("mergeGateways", opts.MergeGateways),
 		)
 		if err := kubectlApplyStdin(ctx, opts.ContextName,
-			EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest),
+			EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet, opts.MergeGateways),
 		); err != nil {
 			return fmt.Errorf("apply EnvoyProxy: %w", err)
 		}

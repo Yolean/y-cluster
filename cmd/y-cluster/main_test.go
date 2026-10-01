@@ -222,6 +222,38 @@ func TestProvisionCmd_UnknownProviderError(t *testing.T) {
 	}
 }
 
+// The glesys verbs need credentials before they touch anything. A
+// valid config without them is refused by name of the variable, and
+// an invalid config is refused for what is wrong with it first.
+func TestProvisionCmd_GlesysNeedsCredentials(t *testing.T) {
+	t.Setenv("GLESYS_PROJECT", "")
+	t.Setenv("GLESYS_API_KEY", "")
+	t.Setenv("Y_CLUSTER_GLESYS_CACHE_DIR", t.TempDir())
+	for _, verb := range []string{"provision", "teardown"} {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "y-cluster-provision.yaml"), "provider: glesys\ncontext: qa-glesys\n")
+		cmd := rootCmd()
+		cmd.SetArgs([]string{verb, "-c", dir})
+		var buf strings.Builder
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "GLESYS_PROJECT") {
+			t.Errorf("%s: want a refusal naming the unset credential, got %v", verb, err)
+		}
+
+		writeFile(t, filepath.Join(dir, "y-cluster-provision.yaml"), "provider: glesys\ncontext: qa-glesys\nplatform: VMware\n")
+		cmd = rootCmd()
+		cmd.SetArgs([]string{verb, "-c", dir})
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		err = cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "platform") {
+			t.Errorf("%s: want the config's own validation error, got %v", verb, err)
+		}
+	}
+}
+
 // TestProvisionCmd_MissingProviderError covers the empty-discovery
 // path: when the YAML omits provider: and DiscoverProvider also
 // returns nothing, the CLI surfaces an actionable error pointing

@@ -43,9 +43,9 @@ func artifactsFor(unameMachine string) (artifacts, error) {
 	}
 }
 
-// InstallAirgap downloads the k3s binary and image tarball on the
-// host (once per version, into the shared cache), copies them to the
-// node and runs the installer around them. The node pulls nothing,
+// InstallAirgap downloads the k3s binary, image tarball and installer
+// on the host (once per version, into the shared cache), copies them to
+// the node and runs the installer around them. The node pulls nothing,
 // which is the point when its outbound is slow, rate-limited or
 // absent.
 //
@@ -68,12 +68,19 @@ func InstallAirgap(ctx context.Context, exec NodeExec, copy NodeCopy, version, s
 	if err != nil {
 		return err
 	}
+	scriptPath, err := cacheInstallScript(ctx, version, logger)
+	if err != nil {
+		return err
+	}
 
 	if err := copy(ctx, binPath, "/tmp/k3s"); err != nil {
 		return fmt.Errorf("copy k3s binary to node: %w", err)
 	}
 	if err := copy(ctx, imagesPath, "/tmp/"+art.images); err != nil {
 		return fmt.Errorf("copy airgap images to node: %w", err)
+	}
+	if err := copy(ctx, scriptPath, installScriptNodePath); err != nil {
+		return fmt.Errorf("copy k3s installer to node: %w", err)
 	}
 	for _, step := range []string{
 		"sudo install -m 755 /tmp/k3s /usr/local/bin/k3s",
@@ -126,6 +133,36 @@ func cacheAirgap(ctx context.Context, version string, art artifacts, logger *zap
 		paths = append(paths, path)
 	}
 	return paths[0], paths[1], nil
+}
+
+// cacheInstallScript returns the host path of the release's installer
+// under cache.K3s/<version>/install.sh, downloading it when missing.
+// k3s publishes no checksum for it; it is fetched from the release tag,
+// over HTTPS like the checksum file, and moved into place only once
+// complete so a cache hit is never a partial download.
+func cacheInstallScript(ctx context.Context, version string, logger *zap.Logger) (string, error) {
+	root, err := cache.K3s("")
+	if err != nil {
+		return "", fmt.Errorf("resolve k3s cache: %w", err)
+	}
+	dir := filepath.Join(root, version)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create k3s cache: %w", err)
+	}
+	path := filepath.Join(dir, "install.sh")
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+	logger.Info("downloading k3s installer", zap.String("version", version))
+	partial := path + ".partial"
+	defer func() { _ = os.Remove(partial) }()
+	if err := cache.Download(ctx, installScriptURL(version), partial); err != nil {
+		return "", fmt.Errorf("download k3s installer: %w", err)
+	}
+	if err := os.Rename(partial, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // releaseChecksums fetches a sha256sum-<arch>.txt and returns its

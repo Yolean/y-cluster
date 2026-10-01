@@ -15,6 +15,10 @@ import (
 // the airgap image import.
 const k3sReadyTimeout = 3 * time.Minute
 
+// ciliumReadyTimeout caps the Cilium rollout and the node turning
+// Ready after it; the first boot pulls Cilium's images.
+const ciliumReadyTimeout = 5 * time.Minute
+
 // installK3s installs k3s in the running VM with the strategy in
 // c.cfg.K3s.Install and returns once the apiserver is ready.
 func (c *Cluster) installK3s(ctx context.Context) error {
