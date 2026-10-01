@@ -34,6 +34,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
+	"github.com/Yolean/y-cluster/pkg/provision/devcert"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
@@ -252,7 +253,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 	// before the LB so a fresh-LB create can include it in the
 	// initial HTTPS service (Hetzner refuses an empty cert list).
 	commonName, dnsNames := certSubjectsForContext(cfg.Context, cfg.LBGroup, cfg.FQDNDomain)
-	certPEM, keyPEM, err := generateSelfSignedCert(commonName, dnsNames, nil)
+	certPEM, keyPEM, err := devcert.GenerateSelfSigned(commonName, dnsNames, nil)
 	if err != nil {
 		return nil, fmt.Errorf("generate self-signed cert: %w", err)
 	}

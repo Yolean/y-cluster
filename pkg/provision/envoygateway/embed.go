@@ -88,8 +88,44 @@ const EnvoyProxyName = "y-cluster"
 // The CR lives in envoy-gateway-system because that's the only
 // namespace EG looks at for parametersRef of GatewayClass.
 //
+// externalIPs, when given, is for a cluster with no load balancer
+// implementation at all (Talos on a rented server: no ServiceLB, no
+// cloud controller). The envoy Service becomes a NodePort with
+// spec.externalIPs set to the node's public addresses, which is
+// what makes kube-proxy accept connections on <address>:80 and 443
+// and hand them to the envoy pod. That is the ServiceLB outcome
+// without ServiceLB. NodePort rather than LoadBalancer so the
+// Service does not sit in Pending forever; externalTrafficPolicy
+// Local applies to externalIPs traffic as it does to a load
+// balancer's, so the client address still reaches the workload.
+// EnvoyProxy has no field for externalIPs; the service patch is
+// the upstream-blessed way to set what it has no field for.
+//
+// daemonSet runs the envoy fleet as a DaemonSet instead of a
+// Deployment. With externalTrafficPolicy Local a node without an
+// envoy pod drops what arrives on its address, so a cluster that
+// lists several nodes' addresses needs envoy on each of them; a
+// DaemonSet is the guarantee. Tainted nodes (a dedicated control
+// plane) are skipped, which is right: their addresses are not
+// listed.
+//
 // Pure function for unit-test pinning.
-func EnvoyProxyYAML(cpuRequest, memRequest string) []byte {
+func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonSet, mergeGateways bool) []byte {
+	var service string
+	if len(externalIPs) > 0 {
+		service = "        type: NodePort\n        patch:\n          type: StrategicMerge\n          value:\n            spec:\n              externalIPs:\n"
+		for _, ip := range externalIPs {
+			service += "                - " + ip + "\n"
+		}
+	}
+	fleet := "envoyDeployment"
+	if daemonSet {
+		fleet = "envoyDaemonSet"
+	}
+	var merge string
+	if mergeGateways {
+		merge = "  mergeGateways: true\n"
+	}
 	return []byte(fmt.Sprintf(`---
 # y-cluster's tuning for the per-Gateway envoy proxy pod.
 # Referenced by the GatewayClass via parametersRef.
@@ -99,18 +135,18 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  provider:
+%s  provider:
     type: Kubernetes
     kubernetes:
       envoyService:
         externalTrafficPolicy: Local
-      envoyDeployment:
+%s      %s:
         container:
           resources:
             requests:
               cpu: %s
               memory: %s
-`, EnvoyProxyName, Namespace, cpuRequest, memRequest))
+`, EnvoyProxyName, Namespace, merge, service, fleet, cpuRequest, memRequest))
 }
 
 // ControllerResourcesPatch is a strategic-merge patch body for

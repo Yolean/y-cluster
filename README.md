@@ -3,7 +3,7 @@
 Single Go binary for Kubernetes cluster lifecycle on a developer
 machine or a rented host, image management, and declarative
 convergence. Replaces a stack of shell scripts that previously drove
-ystack and checkit's local clusters.
+ystack's local clusters.
 
 ## What it does
 
@@ -20,6 +20,7 @@ discovered when omitted: multipass, then qemu, then docker):
 | `docker` | k3s in a container | anywhere a docker daemon runs; what CI uses |
 | `multipass` | k3s in a Multipass VM | macOS and Linux |
 | `hetzner` | k3s on a Hetzner Cloud server | paid; tears itself down in-cluster when `lifetime` expires |
+| `glesys` | Talos Linux on a GleSYS KVM server | paid; the node and a kubeconfig context, nothing installed on top; `talosctl` for node access |
 
 Subcommand groups:
 

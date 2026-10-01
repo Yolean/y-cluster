@@ -20,7 +20,7 @@ import (
 // has no other: neither of those can run in this suite, so this is
 // the one place pkg/provision/k3s's script path meets a real node.
 //
-// Needs outbound HTTPS from the guest to get.k3s.io and GitHub.
+// Needs outbound HTTPS from the guest to GitHub.
 func TestQemu_ScriptInstall(t *testing.T) {
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		t.Skip("QEMU tests require /dev/kvm")

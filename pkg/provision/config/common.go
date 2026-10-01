@@ -45,6 +45,7 @@ const (
 	ProviderDocker    = "docker"
 	ProviderMultipass = "multipass"
 	ProviderHetzner   = "hetzner"
+	ProviderGlesys    = "glesys"
 )
 
 // ProviderConfig is one provider's y-cluster-provision.yaml, as
@@ -72,7 +73,18 @@ var providerConfigs = map[string]func() ProviderConfig{
 	ProviderDocker:    func() ProviderConfig { return &DockerConfig{} },
 	ProviderMultipass: func() ProviderConfig { return &MultipassConfig{} },
 	ProviderHetzner:   func() ProviderConfig { return &HetznerConfig{} },
+	ProviderGlesys:    func() ProviderConfig { return &GlesysConfig{} },
 }
+
+// configOnly lists providers whose config type, validation and schema
+// have landed ahead of their provisioner. Their configs load and
+// validate, and get a schema; the CLI's verbs refuse them by name. A
+// provider leaves this set in the change that adds its provisioner.
+var configOnly = map[string]bool{}
+
+// ConfigOnly reports whether provider is registered without a
+// provisioner.
+func ConfigOnly(provider string) bool { return configOnly[provider] }
 
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
@@ -387,7 +399,7 @@ func (c CommonConfig) HostAPIPort() string {
 // flows to: GHA mirror, schema default, runtime default.
 type K3sConfig struct {
 	Version string `yaml:"version,omitempty" json:"version,omitempty" jsonschema:"default=__K3S_TAG__,description=k3s release version e.g. vX.Y.Z+k3sN."`
-	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and images from the host cache to the node; script lets the node download via get.k3s.io. Default airgap on qemu and script on multipass; hetzner accepts script only; docker runs the k3s image and ignores this."`
+	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and its images and installer from the host cache to the node; script lets the node download the installer and binary of the release from GitHub. Default airgap on qemu and script on multipass; hetzner and glesys accept script only; docker runs the k3s image and ignores this."`
 }
 
 // applyCommonDefaults fills defaults that the reflective tag-default

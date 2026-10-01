@@ -104,10 +104,11 @@ func netdevArg(cfg Config) string {
 // 127.0.0.1 and the node's own addresses in its serving cert, so any
 // other host address has to be added as a SAN.
 func k3sServerFlags(e endpoints) string {
-	if e.APIHost == "127.0.0.1" {
-		return k3s.ServerFlags()
+	extra := append([]string{}, k3s.CiliumFlags...)
+	if e.APIHost != "127.0.0.1" {
+		extra = append(extra, "--tls-san="+e.APIHost)
 	}
-	return k3s.ServerFlags("--tls-san=" + e.APIHost)
+	return k3s.ServerFlags(extra...)
 }
 
 const netdevID = "net0"

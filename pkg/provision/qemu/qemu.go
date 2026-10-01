@@ -22,6 +22,8 @@ import (
 	"github.com/Yolean/y-cluster/pkg/cache"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
+	"github.com/Yolean/y-cluster/pkg/provision/certmanager"
+	"github.com/Yolean/y-cluster/pkg/provision/cilium"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
@@ -407,6 +409,16 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
 
+	// k3s runs without flannel (k3s.CiliumFlags): the node is NotReady
+	// and nothing schedules until the CNI is up, so Cilium comes before
+	// any workload install.
+	if out, err := c.NodeExec(ctx, cilium.K3sPortmapCommand, nil); err != nil {
+		return nil, fmt.Errorf("link portmap for cilium: %s: %w", out, err)
+	}
+	if err := cilium.Install(ctx, cilium.K3s, cfg.Context, 1, ciliumReadyTimeout, logger); err != nil {
+		return nil, fmt.Errorf("install cilium: %w", err)
+	}
+
 	// Install the bundled local-path-provisioner (replaces k3s's
 	// disabled local-storage addon). Runs before any workload
 	// install so the StorageClass exists when consumer PVCs land.
@@ -439,6 +451,9 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
 			ProxyCPURequest:      cfg.Gateway.Resources.Proxy.CPU,
 			ProxyMemRequest:      cfg.Gateway.Resources.Proxy.Memory,
+			// One node, ServiceLB: Gateways beyond y-cluster's own
+			// (ystack's, a site's) must share the proxy on :80/:443.
+			MergeGateways: true,
 		}); err != nil {
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}
@@ -447,6 +462,13 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 		)
 	}
+
+	// qemu is the provider that targets production: its clusters get
+	// cert-manager and y-cluster's CA issuer for in-cluster certificates.
+	if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
+		return nil, fmt.Errorf("install cert-manager: %w", err)
+	}
+	logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 
 	return c, nil
 }

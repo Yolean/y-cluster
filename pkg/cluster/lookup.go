@@ -55,6 +55,7 @@ const (
 	BackendQEMU      Backend = "qemu"
 	BackendMultipass Backend = "multipass"
 	BackendHetzner   Backend = "hetzner"
+	BackendGlesys    Backend = "glesys"
 )
 
 // AllBackends is the canonical list of probed backends. Mirrors
@@ -62,7 +63,7 @@ const (
 // known backend (test helpers, error messages) read from one place
 // and a new provisioner only edits this slice plus the constants
 // above. Sorted alphabetically.
-var AllBackends = []Backend{BackendDocker, BackendHetzner, BackendMultipass, BackendQEMU}
+var AllBackends = []Backend{BackendDocker, BackendGlesys, BackendHetzner, BackendMultipass, BackendQEMU}
 
 // LookupResult is what Lookup returns when it finds a running
 // cluster matching a kubectl context. The Backend-specific
@@ -92,7 +93,7 @@ type LookupResult struct {
 // context exists but no docker, qemu, multipass, or hetzner
 // cluster is running with that cluster name". Wrapped with the
 // cluster + context names so the message is actionable.
-var ErrNotFound = errors.New("no running docker, qemu, multipass, or hetzner cluster matches the kubeconfig context")
+var ErrNotFound = errors.New("no running docker, qemu, multipass, hetzner, or glesys cluster matches the kubeconfig context")
 
 // Lookup resolves the kubectl `contextName` (defaults to
 // DefaultContext when empty) to a running cluster runtime.
@@ -169,6 +170,15 @@ func Lookup(ctx context.Context, kubeconfigPath, contextName string) (*LookupRes
 			SSHHost:     sshHost,
 			SSHPort:     "22",
 			SSHUser:     sshUser,
+		}, nil
+	}
+
+	if alive, host := glesysRunning(clusterName); alive {
+		return &LookupResult{
+			Backend:     BackendGlesys,
+			Context:     contextName,
+			ClusterName: clusterName,
+			SSHHost:     host,
 		}, nil
 	}
 
@@ -335,6 +345,35 @@ func hetznerRunning(name string) (bool, string, string, string) {
 		return false, "", "", ""
 	}
 	return true, filepath.Join(cacheDir, name+"-ssh"), s.IPv4, s.SSHUser
+}
+
+// glesysRunning reports whether the glesys provisioner shipped a
+// cluster by this name, from its state sidecar, and the node's
+// public address. Like hetznerRunning it does not ask the API: a
+// sidecar means a server exists (Teardown removes both), and a
+// stopped server is what `y-cluster start` is for. The address is
+// returned as SSHHost for the sake of one field that means "where
+// the node is"; there is no sshd behind it, Talos has none.
+func glesysRunning(name string) (bool, string) {
+	cacheDir := os.Getenv("Y_CLUSTER_GLESYS_CACHE_DIR")
+	if cacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, ""
+		}
+		cacheDir = filepath.Join(home, ".cache", "y-cluster-glesys")
+	}
+	data, err := os.ReadFile(filepath.Join(cacheDir, name+".json"))
+	if err != nil {
+		return false, ""
+	}
+	var s struct {
+		IPv4 string `json:"ipv4"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil || s.IPv4 == "" {
+		return false, ""
+	}
+	return true, s.IPv4
 }
 
 // readQemuState reads where the guest's sshd is reached out of the

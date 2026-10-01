@@ -9,6 +9,7 @@ import (
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
+	"github.com/Yolean/y-cluster/pkg/provision/glesys"
 	"github.com/Yolean/y-cluster/pkg/provision/hetzner"
 	"github.com/Yolean/y-cluster/pkg/provision/multipass"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
@@ -35,7 +36,8 @@ type providerOps struct {
 	stop func(ctx context.Context, contextName, clusterName string, logger *zap.Logger) error
 }
 
-// providers has one entry per config.AllProviders; a test holds that.
+// providers has one entry per config.AllProviders that is not
+// config.ConfigOnly; a test holds that.
 // Each adapter asserts its own config type, which LoadProvision
 // guarantees for the provider name it was looked up by.
 var providers = map[string]providerOps{
@@ -128,15 +130,36 @@ var providers = map[string]providerOps{
 			return hetzner.Stop(ctx, clusterName, logger)
 		},
 	},
+	config.ProviderGlesys: {
+		provision: func(ctx context.Context, cfg config.ProviderConfig, logger *zap.Logger) (string, error) {
+			g := cfg.(*config.GlesysConfig)
+			cluster, err := glesys.Provision(ctx, *g, logger)
+			if err != nil {
+				return "", err
+			}
+			// Talos has no shell; talosctl is the way in.
+			return fmt.Sprintf("talosctl --talosconfig %s -n %s dashboard",
+				cluster.TalosconfigPath(), cluster.PublicIPv4()), nil
+		},
+		teardown: func(ctx context.Context, cfg config.ProviderConfig, _ bool, logger *zap.Logger) error {
+			return glesys.Teardown(ctx, cfg.Common().Context, logger)
+		},
+		// A remote server binds nothing on this host.
+		hostPorts: func(config.ProviderConfig) []string { return nil },
+		stop: func(ctx context.Context, _, clusterName string, logger *zap.Logger) error {
+			return glesys.Stop(ctx, clusterName, logger)
+		},
+	},
 }
 
-// opsFor returns the provider's adapters. A provider that is
-// registered for config loading but has no entry here can be loaded
-// and validated, and that is all.
+// opsFor returns the provider's adapters. A provider registered as
+// config.ConfigOnly has none: its config loaded and validated, and
+// that is all this binary can do with it.
 func opsFor(cfg config.ProviderConfig) (providerOps, error) {
-	ops, ok := providers[cfg.Common().Provider]
+	name := cfg.Common().Provider
+	ops, ok := providers[name]
 	if !ok {
-		return providerOps{}, fmt.Errorf("provider %q has a config type but no provisioner in this binary", cfg.Common().Provider)
+		return providerOps{}, fmt.Errorf("provider %q: the config is valid, but this build of y-cluster has no provisioner for it yet", name)
 	}
 	return ops, nil
 }
