@@ -139,6 +139,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(echoCmd())
 	root.AddCommand(gatewayCmd())
 	root.AddCommand(localstorageCmd())
+	root.AddCommand(dockerhostCmd())
 
 	return root
 }
