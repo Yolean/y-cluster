@@ -289,11 +289,12 @@ RequiredForOnline=no
 
 and these lines in `/etc/hardened-host/guestnat.nft`, in the existing chains of
 `table inet guestnat` -- not in a table of their own: guestnat's forward chain has policy drop and
-drops every forwarded packet it does not name, so a second table could accept nothing:
+drops every forwarded packet it does not name, so a second table could accept nothing. This is
+what was applied on gle01 on 2026-10-05 (public interface `bond0`):
 
 ```
   chain postrouting {   # add
-    ip saddr 10.88.1.2 oifname "<public-if>" masquerade
+    ip saddr 10.88.1.0/24 oifname "<public-if>" masquerade
   }
   chain forward {       # add, after the established/invalid rules
     iifname "ycl1" oifname "<public-if>" ip saddr 10.88.1.2 ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } accept
