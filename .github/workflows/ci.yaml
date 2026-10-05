@@ -41,7 +41,7 @@ jobs:
       # Preinstalled on ubuntu runners. Nothing else executes the
       # workflow scripts in CI, so this is their only gate here.
       - name: shellcheck
-        run: shellcheck -x --severity=warning test.sh scripts/*.sh testdata/appliance-hooks/*.sh
+        run: shellcheck -x --severity=warning test.sh scripts/*.sh testdata/appliance-hooks/*.sh pkg/dockerhost/guest/*.sh
 
   test:
     runs-on: ubuntu-latest

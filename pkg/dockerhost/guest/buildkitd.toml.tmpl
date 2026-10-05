@@ -1,0 +1,20 @@
+# y-cluster dockerhost: buildkitd, rootful in the guest. TCP {{.BuildkitPort}} takes
+# only clients with a certificate from the same CA as dockerd's; TLS
+# applies to the tcp address, the unix socket is root's only.
+root = "/var/lib/buildkit"
+
+[grpc]
+  address = ["unix:///run/buildkit/buildkitd.sock", "tcp://0.0.0.0:{{.BuildkitPort}}"]
+
+  [grpc.tls]
+    cert = "{{.TLSDir}}/server-cert.pem"
+    key = "{{.TLSDir}}/server-key.pem"
+    ca = "{{.TLSDir}}/ca.pem"
+
+[worker.oci]
+  enabled = true
+  binary = "buildkit-runc"
+  gc = true
+
+[worker.containerd]
+  enabled = false

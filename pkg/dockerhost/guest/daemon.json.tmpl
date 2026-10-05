@@ -1,0 +1,9 @@
+{
+  "tls": true,
+  "tlsverify": true,
+  "tlscacert": "{{.TLSDir}}/ca.pem",
+  "tlscert": "{{.TLSDir}}/server-cert.pem",
+  "tlskey": "{{.TLSDir}}/server-key.pem",
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "20m", "max-file": "3"}
+}
