@@ -132,11 +132,20 @@ type fakeTapHost struct {
 	flagsErr error
 	owner    int
 	uid      int
+	// master is the bridge the tap is a port of, with its addresses.
+	master      string
+	bridgeAddrs []net.IP
 }
 
-func (f fakeTapHost) Addrs(string) ([]net.IP, error)  { return f.addrs, f.addrsErr }
+func (f fakeTapHost) Addrs(ifname string) ([]net.IP, error) {
+	if f.master != "" && ifname == f.master {
+		return f.bridgeAddrs, nil
+	}
+	return f.addrs, f.addrsErr
+}
 func (f fakeTapHost) TunFlags(string) (uint64, error) { return f.flags, f.flagsErr }
 func (f fakeTapHost) Owner(string) (int, error)       { return f.owner, nil }
+func (f fakeTapHost) Master(string) (string, error)   { return f.master, nil }
 func (f fakeTapHost) UID() int                        { return f.uid }
 func (f fakeTapHost) Username() string                { return "alice" }
 
@@ -157,6 +166,14 @@ func TestCheckTap(t *testing.T) {
 		{"owned by someone else", func(h fakeTapHost) fakeTapHost { h.owner = 1001; return h }, "owned by uid 1001"},
 		{"no owner", func(h fakeTapHost) fakeTapHost { h.owner = -1; return h }, "owned by uid -1"},
 		{"gateway address missing", func(h fakeTapHost) fakeTapHost { h.addrs = nil; return h }, "does not have the gateway address 10.88.0.1"},
+		{"port of a bridge with the gateway address", func(h fakeTapHost) fakeTapHost {
+			h.addrs, h.master, h.bridgeAddrs = nil, "br-guests", []net.IP{net.ParseIP("10.88.0.1")}
+			return h
+		}, ""},
+		{"port of a bridge without it", func(h fakeTapHost) fakeTapHost {
+			h.addrs, h.master, h.bridgeAddrs = nil, "br-guests", []net.IP{net.ParseIP("10.99.0.1")}
+			return h
+		}, "port of bridge br-guests, which does not have the gateway address 10.88.0.1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkTap(tap, tc.host(ready))

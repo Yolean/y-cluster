@@ -244,6 +244,13 @@ func StartForDiagnosticWithDisks(ctx context.Context, cacheDir, name string, ext
 // the boot disk + cidata seed; nil/empty means "boot disk + seed
 // only", the default.
 func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []string, logger *zap.Logger) (*Cluster, error) {
+	return bootSaved(ctx, cacheDir, name, extraDisks, true, logger)
+}
+
+// bootSaved boots the VM that state in cacheDir describes and waits
+// for ssh. withKubeconfig is false for a guest that is not a cluster
+// node (StartGuest): it has no kubeconfig context to manage.
+func bootSaved(ctx context.Context, cacheDir, name string, extraDisks []string, withKubeconfig bool, logger *zap.Logger) (*Cluster, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -274,9 +281,11 @@ func startVMReady(ctx context.Context, cacheDir, name string, extraDisks []strin
 		}
 	}
 
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
-	if err != nil {
-		return nil, err
+	var kubecfg *kubeconfig.Manager
+	if withKubeconfig {
+		if kubecfg, err = kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger); err != nil {
+			return nil, err
+		}
 	}
 
 	c := &Cluster{
