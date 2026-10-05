@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	cuelang.org/go v0.16.1
+	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/containerd/errdefs v1.0.0
 	github.com/glesys/glesys-go/v8 v8.5.0
 	github.com/google/go-containerregistry v0.21.7
@@ -26,7 +27,6 @@ require (
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20251212221603-3adeb8663819 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/ProtonMail/gopenpgp/v3 v3.4.1 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
