@@ -111,8 +111,8 @@ func attributePort(err error) string {
 		return err.Error()
 	}
 	return fmt.Sprintf(
-		"host port %s in use by y-cluster %q (context %q); tear it down with: y-cluster teardown -c %s",
-		inUse.port, rec.Name, rec.Context, rec.ConfigDir)
+		"host port %s in use by y-cluster %q (context %q); tear it down with: %s",
+		inUse.port, rec.Name, rec.Context, rec.TeardownCommand())
 }
 
 // checkHostPort verifies port (a string for cobra-friendliness) is

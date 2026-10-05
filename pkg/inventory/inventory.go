@@ -49,6 +49,19 @@ type Record struct {
 	// (port forwards, qemu ssh). Empty for remote providers.
 	HostPorts     []string `json:"hostPorts,omitempty"`
 	ProvisionedAt string   `json:"provisionedAt"` // RFC3339
+	// Teardown is the command that removes what the record stands
+	// for, when that is not `y-cluster teardown -c <ConfigDir>` (the
+	// dockerhost guest, which has no provision config directory).
+	Teardown string `json:"teardown,omitempty"`
+}
+
+// TeardownCommand is the command that removes the record's cluster or
+// guest.
+func (r Record) TeardownCommand() string {
+	if r.Teardown != "" {
+		return r.Teardown
+	}
+	return "y-cluster teardown -c " + r.ConfigDir
 }
 
 // Dir resolves the records directory: $Y_CLUSTER_INVENTORY_DIR
