@@ -469,11 +469,15 @@ func recordInventory(p paths, st State, logger *zap.Logger) {
 	}
 }
 
-func teardownCommand(p paths) string {
+func teardownCommand(p paths) string { return command(p, "teardown") }
+
+// command is the y-cluster dockerhost command line for the state
+// directory p, with DirEnv only when p is not the default.
+func command(p paths, sub string) string {
 	if home, err := os.UserHomeDir(); err == nil && p.dir() == filepath.Join(home, ".cache", "y-cluster-dockerhost") {
-		return "y-cluster dockerhost teardown"
+		return "y-cluster dockerhost " + sub
 	}
-	return DirEnv + "=" + shquote.Quote(p.dir()) + " y-cluster dockerhost teardown"
+	return DirEnv + "=" + shquote.Quote(p.dir()) + " y-cluster dockerhost " + sub
 }
 
 // EnvVars are the variables of the client contract, in the order Env
@@ -511,6 +515,30 @@ func Env(dir string, getenv func(string) string) (string, error) {
 		return "unset " + strings.Join(EnvVars, " ") + "\n", nil
 	}
 	return "", nil
+}
+
+// ErrGuestDown is BuildkitClient's answer for a guest that was
+// provisioned but does not run, for instance after the idle reaper
+// powered it off. Its message says how to start it again.
+var ErrGuestDown = errors.New("the dockerhost guest does not run")
+
+// BuildkitClient returns the buildkitd address and TLS client directory
+// of the guest in dir, the BUILDKIT_HOST and BUILDKIT_TLS_DIR that Env
+// exports. found is false when no guest was provisioned. Reads files
+// only, as Env does.
+func BuildkitClient(dir string) (addr, tlsDir string, found bool, err error) {
+	p := paths(dir)
+	st, err := loadState(p)
+	if errors.Is(err, errNoState) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", true, err
+	}
+	if _, running := guestRunning(p.vm()); !running || st.ReadyAt.IsZero() {
+		return "", "", true, fmt.Errorf("%w: start it with `%s`", ErrGuestDown, command(p, "provision"))
+	}
+	return st.BuildkitHostURL(), p.client(), true, nil
 }
 
 func renderEnv(st State, clientDir string) string {

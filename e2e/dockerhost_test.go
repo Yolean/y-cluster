@@ -26,9 +26,10 @@ import (
 
 // The dockerhost e2e tests boot a real guest: cloud-init installs the
 // pinned dockerd, containerd and buildkitd, and the host talks to them
-// with the docker CLI and buildctl the way a session would. Both
-// clients must be on PATH (or named by Y_CLUSTER_E2E_DOCKER and
-// Y_CLUSTER_E2E_BUILDCTL); y-cluster does not ship them.
+// with the docker CLI and buildctl the way a session would. docker must
+// be on PATH (or named by Y_CLUSTER_E2E_DOCKER); buildctl is the built
+// binary's `y-cluster buildctl` unless Y_CLUSTER_E2E_BUILDCTL names
+// another.
 //
 // TestDockerhost_TestForwards needs nothing from root: qemu user-mode
 // networking with the daemon ports forwarded to 127.0.0.1. It is a
@@ -45,19 +46,27 @@ import (
 //	Y_CLUSTER_E2E_DOCKERHOST_IFNAME=ycl1 Y_CLUSTER_E2E_DOCKERHOST_GUEST_ADDRESS=10.88.1.2/24 \
 //	  go test -tags 'e2e kvm' -run TestDockerhost_Tap -timeout 30m ./e2e/
 
-func dockerhostClients(t *testing.T) (docker, buildctl string) {
+// dockerhostClients returns the docker CLI and the buildctl command
+// line, bin being the y-cluster binary under test.
+func dockerhostClients(t *testing.T, bin string) (docker string, buildctl []string) {
 	t.Helper()
-	find := func(env, name string) string {
-		if p := os.Getenv(env); p != "" {
-			return p
-		}
-		p, err := exec.LookPath(name)
+	docker = os.Getenv("Y_CLUSTER_E2E_DOCKER")
+	if docker == "" {
+		p, err := exec.LookPath("docker")
 		if err != nil {
-			t.Skipf("%s not on PATH (or set %s); the dockerhost e2e tests drive the guest with it", name, env)
+			t.Skip("docker not on PATH (or set Y_CLUSTER_E2E_DOCKER); the dockerhost e2e tests drive the guest with it")
 		}
-		return p
+		docker = p
 	}
-	return find("Y_CLUSTER_E2E_DOCKER", "docker"), find("Y_CLUSTER_E2E_BUILDCTL", "buildctl")
+	if p := os.Getenv("Y_CLUSTER_E2E_BUILDCTL"); p != "" {
+		return docker, []string{p}
+	}
+	return docker, []string{bin, "buildctl"}
+}
+
+func mustBuildctl(t *testing.T, env []string, buildctl []string, args ...string) string {
+	t.Helper()
+	return mustClient(t, env, buildctl[0], append(buildctl[1:len(buildctl):len(buildctl)], args...)...)
 }
 
 func requireKVM(t *testing.T) {
@@ -203,9 +212,9 @@ const buildContextDockerfile = "FROM busybox:1.37\nRUN echo built-in-the-dockerh
 
 func TestDockerhost_TestForwards(t *testing.T) {
 	requireKVM(t)
-	docker, buildctl := dockerhostClients(t)
 	t.Setenv("Y_CLUSTER_INVENTORY_DIR", t.TempDir())
 	bin := buildBinary(t)
+	docker, buildctl := dockerhostClients(t, bin)
 	log := logger(t)
 	ctx := context.Background()
 
@@ -291,10 +300,10 @@ func TestDockerhost_TestForwards(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ctxDir, "Dockerfile"), []byte(buildContextDockerfile), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mustClient(t, env, buildctl, "--tlsdir", vars["BUILDKIT_TLS_DIR"], "debug", "workers")
+	mustBuildctl(t, env, buildctl, "--tlsdir", vars["BUILDKIT_TLS_DIR"], "debug", "workers")
 	buildStart := time.Now()
 	ociTar := filepath.Join(t.TempDir(), "image.tar")
-	mustClient(t, env, buildctl, "--tlsdir", vars["BUILDKIT_TLS_DIR"], "build",
+	mustBuildctl(t, env, buildctl, "--tlsdir", vars["BUILDKIT_TLS_DIR"], "build",
 		"--frontend", "dockerfile.v0", "--local", "context="+ctxDir, "--local", "dockerfile="+ctxDir,
 		"--output", "type=oci,dest="+ociTar)
 	t.Logf("TIMING buildctl build (cold): %s", time.Since(buildStart).Round(time.Second))
@@ -522,9 +531,9 @@ func TestDockerhost_Tap(t *testing.T) {
 		t.Skip("set Y_CLUSTER_E2E_DOCKERHOST_IFNAME and Y_CLUSTER_E2E_DOCKERHOST_GUEST_ADDRESS to a tap root prepared (DOCKERHOST.md, One-time root setup)")
 	}
 	requireKVM(t)
-	docker, buildctl := dockerhostClients(t)
 	t.Setenv("Y_CLUSTER_INVENTORY_DIR", t.TempDir())
 	bin := buildBinary(t)
+	docker, buildctl := dockerhostClients(t, bin)
 	log := logger(t)
 	ctx := context.Background()
 
@@ -665,7 +674,7 @@ func TestDockerhost_Tap(t *testing.T) {
 		t.Fatal(err)
 	}
 	buildStart := time.Now()
-	mustClient(t, env, buildctl, "--tlsdir", vars["BUILDKIT_TLS_DIR"], "build",
+	mustBuildctl(t, env, buildctl, "--tlsdir", vars["BUILDKIT_TLS_DIR"], "build",
 		"--frontend", "dockerfile.v0", "--local", "context="+ctxDir, "--local", "dockerfile="+ctxDir,
 		"--output", "type=oci,dest="+filepath.Join(t.TempDir(), "image.tar"))
 	t.Logf("TIMING buildctl build at the guest address: %s", time.Since(buildStart).Round(time.Second))

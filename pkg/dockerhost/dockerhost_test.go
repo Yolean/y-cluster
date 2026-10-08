@@ -2,6 +2,7 @@ package dockerhost
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Yolean/y-cluster/pkg/inventory"
+	"github.com/Yolean/y-cluster/pkg/shquote"
 )
 
 func readyState() State {
@@ -274,5 +276,38 @@ func TestGetStatus_NoGuest(t *testing.T) {
 	s, err := GetStatus(context.Background(), t.TempDir())
 	if err != nil || s.State != nil || s.Healthy() {
 		t.Fatalf("got %+v, %v", s, err)
+	}
+}
+
+func TestBuildkitClient(t *testing.T) {
+	dir := t.TempDir()
+	p := paths(dir)
+	running := false
+	restore := guestRunning
+	guestRunning = func(string) (int, bool) { return 4242, running }
+	t.Cleanup(func() { guestRunning = restore })
+
+	if _, _, found, err := BuildkitClient(dir); found || err != nil {
+		t.Fatalf("no guest: found %v, %v", found, err)
+	}
+
+	if err := saveState(p, readyState()); err != nil {
+		t.Fatal(err)
+	}
+	_, _, found, err := BuildkitClient(dir)
+	if !found || !errors.Is(err, ErrGuestDown) {
+		t.Fatalf("a stopped guest: found %v, %v", found, err)
+	}
+	if want := DirEnv + "=" + shquote.Quote(dir) + " y-cluster dockerhost provision"; !strings.Contains(err.Error(), want) {
+		t.Errorf("%q does not say %q", err, want)
+	}
+
+	running = true
+	addr, tlsDir, found, err := BuildkitClient(dir)
+	if err != nil || !found {
+		t.Fatalf("a running guest: found %v, %v", found, err)
+	}
+	if addr != "tcp://10.88.1.2:8547" || tlsDir != filepath.Join(dir, "client") {
+		t.Errorf("got %s %s", addr, tlsDir)
 	}
 }
