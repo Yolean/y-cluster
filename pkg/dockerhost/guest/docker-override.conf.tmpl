@@ -1,0 +1,6 @@
+# y-cluster dockerhost: dockerd also listens on TCP {{.DockerPort}}, with TLS and
+# client verification from /etc/docker/daemon.json. The unix socket stays
+# socket-activated (fd://) and is root's only, inside the guest.
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:{{.DockerPort}} --containerd=/run/containerd/containerd.sock

@@ -1,0 +1,6 @@
+[Unit]
+Description=y-cluster dockerhost idle reaper
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/y-cluster-dockerhost-idle check

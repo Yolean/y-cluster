@@ -120,6 +120,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "debug logging")
 
 	root.AddCommand(yconvergeCmd())
+	root.AddCommand(buildctlCmd())
 	root.AddCommand(provisionCmd())
 	root.AddCommand(teardownCmd())
 	root.AddCommand(pauseCmd())
@@ -139,6 +140,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(echoCmd())
 	root.AddCommand(gatewayCmd())
 	root.AddCommand(localstorageCmd())
+	root.AddCommand(dockerhostCmd())
 
 	return root
 }
@@ -428,11 +430,17 @@ func listTeardownCandidates(cmd *cobra.Command) error {
 	fmt.Fprintln(out, "provisioned clusters recorded on this host:")
 	fmt.Fprintln(out)
 	for _, r := range recs {
+		if r.Teardown != "" {
+			// Not a cluster from a provision config: the dockerhost.
+			fmt.Fprintf(out, "  %s\n", r.TeardownCommand())
+			fmt.Fprintf(out, "      # %s %q\n", r.Provider, r.Name)
+			continue
+		}
 		note := ""
 		if _, statErr := os.Stat(filepath.Join(r.ConfigDir, "y-cluster-provision.yaml")); statErr != nil {
 			note = " -- config no longer at this path"
 		}
-		fmt.Fprintf(out, "  y-cluster teardown -c %s\n", r.ConfigDir)
+		fmt.Fprintf(out, "  %s\n", r.TeardownCommand())
 		fmt.Fprintf(out, "      # %s cluster %q, context %q%s\n", r.Provider, r.Name, r.Context, note)
 	}
 	cmd.SilenceUsage = true

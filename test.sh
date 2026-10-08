@@ -53,7 +53,7 @@ fi
 echo
 if command -v shellcheck >/dev/null 2>&1; then
   echo "==> shellcheck"
-  shellcheck -x --severity=warning test.sh scripts/*.sh testdata/appliance-hooks/*.sh
+  shellcheck -x --severity=warning test.sh scripts/*.sh testdata/appliance-hooks/*.sh pkg/dockerhost/guest/*.sh
 else
   echo "==> shellcheck  (skipped: not installed; CI runs it)"
 fi

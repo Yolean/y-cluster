@@ -27,6 +27,9 @@ type tapHost interface {
 	// Owner returns the uid allowed to attach to the device, or -1
 	// when it has no owner (root only).
 	Owner(ifname string) (int, error)
+	// Master returns the bridge the interface is a port of, or ""
+	// when it is not enslaved.
+	Master(ifname string) (string, error)
 	UID() int
 	Username() string
 }
@@ -35,8 +38,10 @@ type tapHost interface {
 // the device exists, is a tap device, may be opened by this user
 // (qemu fails otherwise, and as a daemonized process its error is
 // easy to miss), and carries the gateway address the guest will
-// route through. y-cluster never creates or configures the device;
-// every failure ends with the commands that do.
+// route through -- on the tap itself, or on the bridge the tap is a
+// port of when the host keeps its guests on a bridge. y-cluster never
+// creates or configures the device; every failure ends with the
+// commands that do.
 func checkTap(t TapNetwork, h tapHost) error {
 	fail := func(format string, a ...any) error {
 		return fmt.Errorf("network.mode tap: "+format+"\nPrepare the host once (y-cluster never changes host network devices):\n  %s",
@@ -61,12 +66,33 @@ func checkTap(t TapNetwork, h tapHost) error {
 		return fail("interface %s is owned by uid %d, not by you (uid %d), so qemu cannot attach to it", t.Ifname, owner, h.UID())
 	}
 	gw := net.ParseIP(t.Gateway)
+	if hasIP(addrs, gw) {
+		return nil
+	}
+	master, err := h.Master(t.Ifname)
+	if err != nil {
+		return fail("cannot read the bridge %s belongs to: %v", t.Ifname, err)
+	}
+	if master == "" {
+		return fail("interface %s does not have the gateway address %s (it has %v)", t.Ifname, t.Gateway, addrs)
+	}
+	bridgeAddrs, err := h.Addrs(master)
+	if err != nil {
+		return fail("cannot read the addresses of bridge %s: %v", master, err)
+	}
+	if hasIP(bridgeAddrs, gw) {
+		return nil
+	}
+	return fail("interface %s is a port of bridge %s, which does not have the gateway address %s (it has %v)", t.Ifname, master, t.Gateway, bridgeAddrs)
+}
+
+func hasIP(addrs []net.IP, ip net.IP) bool {
 	for _, a := range addrs {
-		if a.Equal(gw) {
-			return nil
+		if a.Equal(ip) {
+			return true
 		}
 	}
-	return fail("interface %s does not have the gateway address %s (it has %v)", t.Ifname, t.Gateway, addrs)
+	return false
 }
 
 // sysTapHost is the real tapHost.
@@ -112,6 +138,17 @@ func (sysTapHost) Owner(ifname string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(v)
+}
+
+func (sysTapHost) Master(ifname string) (string, error) {
+	target, err := os.Readlink(filepath.Join("/sys/class/net", ifname, "master"))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(target), nil
 }
 
 func (sysTapHost) UID() int { return os.Getuid() }
