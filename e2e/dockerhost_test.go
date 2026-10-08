@@ -563,15 +563,24 @@ func TestDockerhost_Tap(t *testing.T) {
 	logGuestMemory(t, "after provision", pid)
 
 	// D-e: nothing new listens on the host's wildcard; qemu on a tap
-	// listens on nothing at all.
+	// listens on nothing at all. Other processes on a shared host come and
+	// go meanwhile (on gle01 a user-mode qemu guest opened a udp socket on
+	// 0.0.0.0 during the first run), so a new wildcard listener fails the
+	// test only when it is this test's or the guest's; others are logged.
 	after := hostListeners(t)
+	ours := []string{"pid=" + strconv.Itoa(pid) + ",", "pid=" + strconv.Itoa(os.Getpid()) + ","}
 	for l := range after {
 		if before[l] {
 			continue
 		}
 		t.Logf("EXPOSURE new host listener during the test: %s", l)
-		if strings.Contains(l, " 0.0.0.0:") || strings.Contains(l, " [::]:") || strings.Contains(l, " *:") {
+		if !strings.Contains(l, " 0.0.0.0:") && !strings.Contains(l, " [::]:") && !strings.Contains(l, " *:") {
+			continue
+		}
+		if strings.Contains(l, ours[0]) || strings.Contains(l, ours[1]) || !strings.Contains(l, "pid=") {
 			t.Errorf("EXPOSURE new wildcard listener on the host: %s", l)
+		} else {
+			t.Logf("EXPOSURE new wildcard listener of another process, not the dockerhost's: %s", l)
 		}
 	}
 	for l := range after {
