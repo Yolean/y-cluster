@@ -9,8 +9,8 @@ the daemon would be root-equivalent for the bot user, and the appliance QA machi
 
 Status: implemented. The guest, its daemons, TLS, the lifecycle and the idle reaper are tested
 on a real KVM guest behind the test harness's loopback forwards (Testing). The product path,
-a guest on a tap device that root prepared, is pending its first run, and so are the exposure
-checks on it (Exposure checks).
+a guest on a tap device that root prepared, had its first run on gle01 on 2026-10-07, with the
+CLI and the exposure checks by hand (Exposure checks); `TestDockerhost_Tap` has not run yet.
 
 ## Using it
 
@@ -188,6 +188,9 @@ and frees the memory; the disk stays for the next provision.
   up forever.
 - Every `provision` renews the lease (over ssh), so a session that provisions before each run keeps
   the guest.
+- A service stack left running in containers (a Prometheus, an S3 stand-in) is not use either, so
+  it stops with the guest after `idleTimeout`. Raise `idleTimeout` in the configuration for such
+  use: the next `provision` applies it with the lease, without recreating the guest.
 - The reason goes to the guest's console, which the host keeps in the VM's console log.
 
 ## Patching (compliance review D-c, HST-20..23)
@@ -234,8 +237,13 @@ them on the prepared tap and logs each result:
 Other guests on the host (the cluster guest at 10.88.0.2 on gle01) are not probed: the private
 ranges check covers their subnet, and a check that reached them would touch them.
 
-Status: pending the first run on gle01. The same TLS and refusal checks, and the loopback-only
-host listeners, pass in the test harness (Testing).
+Status: run by hand on gle01 on 2026-10-07/08 against a guest made by `y-cluster dockerhost
+provision` on `ycl1` (4 vCPU, 6 GB, 40G), all as above: the guest's qemu owns no host socket; a
+container reaches 1.1.1.1:443 and 9.9.9.9:53 but not the host at 10.88.1.1 or its public address,
+the `ycl0` guest, the four private ranges or 169.254.169.254; a published port answers at
+10.88.1.2; both TLS ports refuse plain HTTP, a client without a certificate and one from another
+CA. `TestDockerhost_Tap` itself has not run on the tap yet. The same TLS and refusal checks, and the
+loopback-only host listeners, pass in the test harness (Testing).
 
 ## One-time root setup (compliance review D-a, D-g)
 
@@ -390,7 +398,8 @@ and `moby/buildkit:v0.33.0` with TLS. The consumers have not yet run against the
 3. Guest memory: qemu's resident memory was 1.9 GB after the first boot with a 4 GB guest, the
    same after a container run and a build, and 1.0 GB after a restart (Testing). The proof of
    concept measured 1.2 GB idle and 2.9 GB after tests.
-4. Exposure checks on a real guest: written (`TestDockerhost_Tap`), pending their first run.
+4. Exposure checks on a real guest: passed by hand on gle01 (Exposure checks); `TestDockerhost_Tap`
+   pending its first run.
 5. `env` without a guest: decided -- nothing, except `unset` lines for a shell that still carries
    this dockerhost's own variables.
 6. buildkitd rootful or rootless in the guest: decided -- rootful.
