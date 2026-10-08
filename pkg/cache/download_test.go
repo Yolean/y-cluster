@@ -113,3 +113,47 @@ func TestDownload_ReplacesExistingFile(t *testing.T) {
 		t.Errorf("body: %q", got)
 	}
 }
+
+func TestDownloadSHA256_AcceptsMatchingDigest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("payload\n"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "artifact")
+	// sha256 of "payload\n"
+	want := "d4e4877bac978b7952f0d544fc52ebff5411d351d129f1f056fa43f11da9af2b"
+	if err := DownloadSHA256(context.Background(), srv.URL, dest, strings.ToUpper(want)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "payload\n" {
+		t.Fatalf("dest = %q", got)
+	}
+	if extra := leftovers(t, dir, "artifact"); len(extra) > 0 {
+		t.Fatalf("left behind: %v", extra)
+	}
+}
+
+func TestDownloadSHA256_MismatchLeavesNoFile(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("tampered\n"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "artifact")
+	err := DownloadSHA256(context.Background(), srv.URL, dest, "d4e4877bac978b7952f0d544fc52ebff5411d351d129f1f056fa43f11da9af2b")
+	if err == nil || !strings.Contains(err.Error(), "SHA-256 is") {
+		t.Fatalf("want a digest mismatch error, got %v", err)
+	}
+	if extra := leftovers(t, dir); len(extra) > 0 {
+		t.Fatalf("a mismatched download must leave nothing: %v", extra)
+	}
+}
+
+func TestDownloadSHA256_RejectsMalformedDigest(t *testing.T) {
+	if err := DownloadSHA256(context.Background(), "http://127.0.0.1:1/x", filepath.Join(t.TempDir(), "x"), "abc"); err == nil {
+		t.Fatal("a short digest must be refused before any request")
+	}
+}

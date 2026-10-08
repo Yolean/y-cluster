@@ -153,3 +153,14 @@ func TestRemove_RejectsPathsInContext(t *testing.T) {
 		t.Fatalf("a file outside the inventory dir was removed: %v", err)
 	}
 }
+
+func TestRecord_TeardownCommand(t *testing.T) {
+	cluster := Record{ConfigDir: "/repo/cluster"}
+	if got := cluster.TeardownCommand(); got != "y-cluster teardown -c /repo/cluster" {
+		t.Errorf("cluster: %q", got)
+	}
+	guest := Record{ConfigDir: "/home/u/.cache/y-cluster-dockerhost", Teardown: "y-cluster dockerhost teardown"}
+	if got := guest.TeardownCommand(); got != "y-cluster dockerhost teardown" {
+		t.Errorf("guest: %q", got)
+	}
+}

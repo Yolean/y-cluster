@@ -59,6 +59,17 @@ Subcommand groups:
   by hand.
 - **cache info / purge** -- inspect or wipe y-cluster's shared
   download cache (k3s airgap bundles, image OCI layouts).
+- **dockerhost provision / env / status / teardown** -- dockerd and
+  buildkitd in one KVM guest per machine, for hosts that must not run
+  a container daemon: `eval "$(y-cluster dockerhost env)"` points
+  docker, Testcontainers and buildctl at it over TLS with client
+  certificates. Every session of the user shares the daemon, its
+  images and its build cache. The guest's tap device is a one-time
+  root step y-cluster never takes. Advisories for its pinned dockerd,
+  containerd and buildkitd are followed by the y-cluster maintainer,
+  and new pins ship as y-cluster releases. See
+  [DOCKERHOST.md](DOCKERHOST.md): the design, the root setup,
+  patching, logging and exposure checks.
 - **lifetime status / reap / extend / arm / disarm / gcp-flags** --
   cost-control auto-expiry. A `lifetime.maxRun` in the config gives
   the cluster a wall-clock budget counted from when it starts; on

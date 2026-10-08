@@ -185,6 +185,9 @@ type Cluster struct {
 	// StartForDiagnosticWithDisks for the e2e tests that
 	// exercise the appliance's pre-baked LABEL fstab.
 	extraDisks []string
+	// guest is set by ProvisionGuest: the caller's files and first
+	// boot commands, appended to the provider's cloud-init.
+	guest *GuestSpec
 }
 
 // CheckPrerequisites verifies that required binaries and /dev/kvm exist.
@@ -494,10 +497,15 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		return err
 	}
 
-	// Without a kubeconfig path there is no context to remove.
-	kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger)
-	if err == nil {
-		kubecfg.CleanupStale()
+	// Without a kubeconfig path there is no context to remove, and
+	// a guest that is not a cluster node (ProvisionGuest) has no
+	// context at all: CleanupStale would otherwise remove a cluster
+	// and user named like the guest from whatever $KUBECONFIG
+	// loadState picked up.
+	if cfg.Context != "" {
+		if kubecfg, err := kubeconfig.New(cfg.Kubeconfig, cfg.Context, cfg.Name, logger); err == nil {
+			kubecfg.CleanupStale()
+		}
 	}
 
 	// Handle per-VM artefacts. keepDisk preserves everything (for
@@ -877,13 +885,25 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 	}
 
 	cloudInit := renderCloudInitUserData(c.cfg.Name, string(pubKey), c.cfg.DataDisk != "", c.cfg.Tap != nil)
+	if c.guest != nil {
+		extra, err := renderGuestUserData(*c.guest)
+		if err != nil {
+			return "", err
+		}
+		cloudInit += extra
+	}
 
 	// Name-prefix the cloud-init source so two concurrent provisions
 	// in the same cacheDir don't race on the file. Per-VM artifacts
 	// elsewhere (qcow2, pidfile, ssh key, seed image, console log,
 	// state sidecar) all follow the same <name>-prefixed convention.
+	// 0600, like the seed image below: a guest's user-data may carry
+	// key material (ProvisionGuest's files).
 	cloudInitPath := filepath.Join(c.cfg.CacheDir, c.cfg.Name+"-cloud-init.yaml")
-	if err := os.WriteFile(cloudInitPath, []byte(cloudInit), 0o644); err != nil {
+	if err := os.WriteFile(cloudInitPath, []byte(cloudInit), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(cloudInitPath, 0o600); err != nil {
 		return "", err
 	}
 
@@ -919,6 +939,9 @@ func (c *Cluster) createCloudInitSeed() (string, error) {
 	cmd := exec.Command("cloud-localds", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloud-localds: %s: %w", out, err)
+	}
+	if err := os.Chmod(seedPath, 0o600); err != nil {
+		return "", err
 	}
 	return seedPath, nil
 }
