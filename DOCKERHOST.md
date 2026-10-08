@@ -38,7 +38,8 @@ Then, in any session:
 ```sh
 y-cluster dockerhost provision        # idempotent; cheap when the guest is healthy
 eval "$(y-cluster dockerhost env)"
-docker run ...; y-build ...; mvn verify ...   # Testcontainers, buildctl via y-buildctl, docker
+docker run ...; mvn verify ...       # docker and Testcontainers
+y-cluster buildctl build ...          # BuildKit, finds the guest without the env
 y-cluster dockerhost status           # exits non-zero unless the guest runs and both daemons answer
 y-cluster dockerhost teardown         # guest, disk, certificates and state
 ```
@@ -106,9 +107,20 @@ export BUILDKIT_TLS_DIR='<client dir>'
 - `DOCKER_CERT_PATH` and `BUILDKIT_TLS_DIR` are the same directory, `~/.cache/y-cluster-dockerhost/client`:
   `ca.pem`, `cert.pem`, `key.pem`, the directory 0700 and the files 0600.
 - 2376 is Docker's port for TLS. 8547 is the port of ystack's in-cluster buildkitd.
-- `BUILDKIT_TLS_DIR` is read by ystack's `y-buildctl` (branch `YoleanAgents/ystack:y-build-tls`,
-  PR to Yolean/ystack pending), which passes it as `buildctl --tlsdir`; buildctl takes TLS files
-  only as flags.
+- `BUILDKIT_TLS_DIR` is read by `y-cluster buildctl`, and by ystack's `y-buildctl` (branch
+  `YoleanAgents/ystack:y-build-tls`, PR to Yolean/ystack pending); both pass it as
+  `buildctl --tlsdir`, since buildctl takes TLS files only as flags.
+- **`y-cluster buildctl`** is BuildKit's buildctl compiled into y-cluster, at the `BuildKitVersion`
+  the guest runs (`pkg/dockerhost/versions.go`), so the client never drifts from the server and
+  nothing is downloaded. Arguments pass through untouched. Without `--addr` or `BUILDKIT_HOST` it
+  dials this machine's guest, and when the guest does not run (after the idle poweroff, say) it
+  fails with the provision command instead of buildctl's connection error.
+  `scripts/buildctl-refresh.sh` copies only buildctl's own source (`cmd/buildctl`) into
+  `pkg/buildctl` after a `BuildKitVersion` bump; the rest of BuildKit is the module at that version.
+- **Builds go through BuildKit, not `docker build`.** The docker client y-cluster expects has no
+  buildx plugin, and without it `docker build` falls back to the legacy builder, which rejects
+  `RUN --mount` (mirror-v3's Dockerfile, for one). Repos build with `y-cluster buildctl build
+  --frontend dockerfile.v0 ...` (or y-build) and adapt where they assumed `docker build`.
 - No `TESTCONTAINERS_*` variables are needed. `TESTCONTAINERS_RYUK_DISABLED` stays unset: Ryuk works.
 - **Without a running guest, `env` prints nothing** (open question 5, decided). A machine with
   plain Docker, or with a `DOCKER_HOST` someone set on purpose (cicd-v1's `tcp://dockerd:2375`),

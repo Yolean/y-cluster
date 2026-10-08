@@ -120,6 +120,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "debug logging")
 
 	root.AddCommand(yconvergeCmd())
+	root.AddCommand(buildctlCmd())
 	root.AddCommand(provisionCmd())
 	root.AddCommand(teardownCmd())
 	root.AddCommand(pauseCmd())
