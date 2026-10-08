@@ -5,6 +5,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,7 +87,7 @@ func setupKwok() {
 
 	cmd := exec.CommandContext(ctx, "docker", "run", "-d",
 		"--name", kwokContainerName,
-		"-p", "0:8080",
+		"-p", publishHost()+"::8080",
 		kwokImage)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		kwokSetupErr = fmt.Errorf("start kwok: %s: %w", out, err)
@@ -111,7 +112,7 @@ func setupKwok() {
 kind: Config
 clusters:
 - cluster:
-    server: http://127.0.0.1:%s
+    server: http://%s
   name: %s
 contexts:
 - context:
@@ -121,7 +122,7 @@ contexts:
 current-context: %s
 users:
 - name: %s
-`, port, kwokContextName, kwokContextName, kwokContextName, kwokContextName, kwokContextName, kwokContextName)
+`, net.JoinHostPort(publishHost(), port), kwokContextName, kwokContextName, kwokContextName, kwokContextName, kwokContextName, kwokContextName)
 	if err := os.WriteFile(kubeconfigPath, []byte(content), 0o600); err != nil {
 		kwokSetupErr = fmt.Errorf("write kubeconfig: %w", err)
 		return
