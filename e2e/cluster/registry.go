@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,8 +27,9 @@ type Registry struct {
 	// `<HostPort>/<repo>:<tag>` as the image reference.
 	HostPort string
 
-	// Endpoint is "127.0.0.1:<port>" -- the address callers feed
-	// to crane.Push or any go-containerregistry remote.* call.
+	// Endpoint is "<host>:<port>" -- the address callers feed
+	// to crane.Push or any go-containerregistry remote.* call:
+	// 127.0.0.1, or a remote daemon's address (publishHost).
 	Endpoint string
 }
 
@@ -66,21 +68,25 @@ func setupLocalRegistry() {
 	}
 	_ = exec.CommandContext(ctx, "docker", "rm", "-f", registryContainerName).Run()
 
-	hostPort, err := pickFreePort()
-	if err != nil {
-		registrySetupErr = fmt.Errorf("pick free port: %w", err)
-		return
-	}
+	host := publishHost()
 	cmd := exec.CommandContext(ctx, "docker", "run", "-d",
 		"--name", registryContainerName,
-		"-p", fmt.Sprintf("127.0.0.1:%d:5000", hostPort),
+		"-p", host+"::5000",
 		registryImage)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		registrySetupErr = fmt.Errorf("start registry: %s: %w", out, err)
 		return
 	}
+	portOut, err := exec.CommandContext(ctx, "docker", "port", registryContainerName, "5000").Output()
+	if err != nil {
+		_ = exec.Command("docker", "rm", "-f", registryContainerName).Run()
+		registrySetupErr = fmt.Errorf("docker port: %w", err)
+		return
+	}
+	parts := strings.Split(strings.TrimSpace(string(portOut)), ":")
+	hostPort := parts[len(parts)-1]
 
-	endpoint := fmt.Sprintf("127.0.0.1:%d", hostPort)
+	endpoint := net.JoinHostPort(host, hostPort)
 	if err := waitForRegistry(ctx, endpoint, 30*time.Second); err != nil {
 		_ = exec.Command("docker", "rm", "-f", registryContainerName).Run()
 		registrySetupErr = fmt.Errorf("registry not ready: %w", err)
@@ -88,21 +94,9 @@ func setupLocalRegistry() {
 	}
 
 	registryInstance = &Registry{
-		HostPort: fmt.Sprintf("%d", hostPort),
+		HostPort: hostPort,
 		Endpoint: endpoint,
 	}
-}
-
-// pickFreePort asks the kernel for an ephemeral port, then
-// closes the listener so docker's port mapping can grab it.
-// Race window is small enough we accept it for tests.
-func pickFreePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
 // waitForRegistry polls the v2 root until it answers 200/401.
