@@ -26,6 +26,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/dockerexec"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
+	"github.com/Yolean/y-cluster/pkg/provision/certmanager"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
 	"github.com/Yolean/y-cluster/pkg/provision/k3s"
@@ -268,6 +269,9 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
 			ProxyCPURequest:      cfg.Gateway.Resources.Proxy.CPU,
 			ProxyMemRequest:      cfg.Gateway.Resources.Proxy.Memory,
+			// One node, ServiceLB, as on qemu: Gateways beyond y-cluster's
+			// own (ystack's, a site's) must share the proxy on :80/:443.
+			MergeGateways: true,
 		}); err != nil {
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}
@@ -276,6 +280,14 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 		)
 	}
+
+	// On macOS docker is the provider for the local dev clusters that qemu
+	// provisions on Linux, and they converge the same workloads, whose
+	// certificates come from y-cluster's CA issuer.
+	if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
+		return nil, fmt.Errorf("install cert-manager: %w", err)
+	}
+	logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 
 	return c, nil
 }

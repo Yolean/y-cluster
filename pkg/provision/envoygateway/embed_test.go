@@ -241,7 +241,7 @@ func TestEnvoyProxyYAML_DaemonSet(t *testing.T) {
 	}
 }
 
-// mergeGateways is rendered only when asked for; qemu asks, so ystack's and
+// mergeGateways is rendered only when asked for; qemu and docker ask, so ystack's and
 // a site's Gateways share the proxy ServiceLB publishes on the node.
 func TestEnvoyProxyYAML_MergeGateways(t *testing.T) {
 	if strings.Contains(string(EnvoyProxyYAML("10m", "128Mi", nil, false, false)), "mergeGateways") {
