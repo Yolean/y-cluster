@@ -116,6 +116,29 @@ func TestBuildHostConfig_PortBindingsHaveValidHostIP(t *testing.T) {
 	}
 }
 
+// Published ports listen on bindAddress: loopback when unset, so a
+// cluster's API and ingress are not on every network the host is on.
+func TestBuildHostConfig_BindAddress(t *testing.T) {
+	forwards := []config.PortForward{{Host: "6443", Guest: "6443"}, {Host: "443", Guest: "443"}}
+	for bind, want := range map[string]string{"": "127.0.0.1", "127.0.0.1": "127.0.0.1", "0.0.0.0": "0.0.0.0"} {
+		cfg := config.DockerConfig{CommonConfig: config.CommonConfig{PortForwards: forwards}, BindAddress: bind}
+		hc, _, err := buildHostConfig(cfg)
+		if err != nil {
+			t.Fatalf("bindAddress %q: %v", bind, err)
+		}
+		for guest, bindings := range hc.PortBindings {
+			for _, b := range bindings {
+				if b.HostIP.String() != want {
+					t.Errorf("bindAddress %q: PortBindings[%s] HostIP %s, want %s", bind, guest, b.HostIP, want)
+				}
+			}
+		}
+	}
+	if _, _, err := buildHostConfig(config.DockerConfig{CommonConfig: config.CommonConfig{PortForwards: forwards}, BindAddress: "::1"}); err == nil {
+		t.Error("an IPv6 bindAddress must be refused")
+	}
+}
+
 // TestBuildHostConfig_ExposedPortsMirrorBindings is the
 // regression guard for issue #16: ExposedPorts must list every
 // guest port that PortBindings carries. The Docker CLI's
