@@ -3,6 +3,10 @@
     "DockerConfig": {
       "additionalProperties": false,
       "properties": {
+        "bindAddress": {
+          "description": "IPv4 address the host port forwards (portForwards) listen on. Default 127.0.0.1. 0.0.0.0 exposes them on every interface of the host.",
+          "type": "string"
+        },
         "context": {
           "default": "local",
           "description": "kubeconfig context name to write.",

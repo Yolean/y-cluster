@@ -175,10 +175,10 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		// we can set Cmd in the same struct.
 		Config: &container.Config{
 			Image: image,
-			// 127.0.0.1 is where the host reaches the published
-			// apiserver port; k3s lists it among its serving
-			// cert SANs already, the flag makes that explicit.
-			Cmd: append([]string{"server", "--tls-san=127.0.0.1"}, k3s.DisableFlags...),
+			// The host reaches the published apiserver port at
+			// hostDialAddress; k3s lists 127.0.0.1 among its
+			// serving cert SANs already, the flag makes it explicit.
+			Cmd: append([]string{"server", "--tls-san=" + hostDialAddress(cfg)}, k3s.DisableFlags...),
 			// ExposedPorts must list every guest port carried by
 			// HostConfig.PortBindings. The Docker CLI auto-fills
 			// this when you `-p`; the moby SDK does not. Engine
@@ -263,7 +263,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:          cfg.Context,
 			GatewayClassName:     cfg.Gateway.ClassName,
-			DNSHintIP:            cfg.HostRoutableIP(),
+			DNSHintIP:            dnsHintIP(cfg),
 			Logger:               logger,
 			ControllerCPURequest: cfg.Gateway.Resources.Controller.CPU,
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
@@ -352,6 +352,14 @@ func dockerHostPorts(cfg config.DockerConfig) []string {
 // are declared. Validation in CommonConfig guarantees a 6443
 // entry exists, so the host's kubectl can reach the API server.
 func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.PortSet, error) {
+	bind := cfg.BindAddress
+	if bind == "" {
+		bind = config.DockerDefaultBindAddress
+	}
+	hostIP, err := netip.ParseAddr(bind)
+	if err != nil || !hostIP.Is4() {
+		return nil, nil, fmt.Errorf("bindAddress %q is not an IPv4 address", bind)
+	}
 	bindings := network.PortMap{}
 	exposed := network.PortSet{}
 	for _, pf := range cfg.PortForwards {
@@ -363,11 +371,11 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 		// The zero value is `invalid IP`, which moby v1.54+
 		// renders as an empty JSON string and the Docker Engine
 		// daemon (28.x) silently drops the binding from
-		// NetworkSettings.Ports. Mirroring `docker run -p ...`
-		// semantics, IPv4Unspecified ("0.0.0.0") binds on every
+		// NetworkSettings.Ports. bindAddress is loopback unless
+		// the config says otherwise; 0.0.0.0 binds on every
 		// interface. HostPort empty lets docker pick a free port.
 		bindings[guest] = append(bindings[guest], network.PortBinding{
-			HostIP:   netip.IPv4Unspecified(),
+			HostIP:   hostIP,
 			HostPort: pf.Host,
 		})
 		// Same guest port lands in ExposedPorts; the daemon
@@ -566,7 +574,22 @@ func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
 	}
-	return k3s.RewriteKubeconfigServer(out, "127.0.0.1:"+c.cfg.HostAPIPort())
+	return k3s.RewriteKubeconfigServer(out, hostDialAddress(c.cfg)+":"+c.cfg.HostAPIPort())
+}
+
+// hostDialAddress is where the host reaches the published ports:
+// bindAddress, or loopback when that is unset or 0.0.0.0.
+func hostDialAddress(cfg config.DockerConfig) string {
+	return config.HostDialAddress(cfg.BindAddress)
+}
+
+// dnsHintIP is the GatewayClass address hint: where the host reaches
+// the published :80, empty when no forward publishes it.
+func dnsHintIP(cfg config.DockerConfig) string {
+	if cfg.HostRoutableIP() == "" {
+		return ""
+	}
+	return hostDialAddress(cfg)
 }
 
 // ContainerName returns the docker container name. Test helpers use
