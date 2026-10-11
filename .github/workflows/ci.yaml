@@ -63,8 +63,14 @@ jobs:
     # expose /dev/kvm, and adding it would force a self-hosted
     # runner. Local devs run the kvm leg via test.sh.
     #
+    # The docker tests write their contexts to $KUBECONFIG, a
+    # throwaway file under the runner's temp dir; without it they
+    # skip. -v puts every test's PASS/SKIP/FAIL line in the log.
+    #
     # Gated on `test` so a broken unit suite short-circuits this
-    # ~5-minute job.
+    # job: about 2 minutes of kwok tests and 4 of docker tests, which
+    # provision three clusters from cold. The 20m timeout leaves
+    # three times that.
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -73,7 +79,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -tags "e2e,docker" -count=1 -timeout=20m ./e2e/
+      - name: e2e (kwok + docker)
+        env:
+          KUBECONFIG: ${{ runner.temp }}/e2e-kubeconfig
+        run: go test -tags "e2e,docker" -count=1 -v -timeout=20m ./e2e/
 
   # No e2e-multipass job here. The Linux multipass install path is
   # snap-only, and snapcraft.io reachability from ubuntu-latest is

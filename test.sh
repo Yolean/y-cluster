@@ -84,7 +84,11 @@ fi
 
 echo
 echo "==> e2e (-tags=$tags)"
-go test -tags "$tags" -count=1 -timeout="$timeout" ./e2e/
+# The provisioner tests write their contexts to $KUBECONFIG and skip
+# without it; a throwaway file keeps the operator's contexts out of it.
+e2e_tests_kubeconfig=$(mktemp)
+KUBECONFIG="$e2e_tests_kubeconfig" go test -tags "$tags" -count=1 -timeout="$timeout" ./e2e/
+rm "$e2e_tests_kubeconfig"
 
 if [[ "$tags" == *kvm* ]]; then
   echo
