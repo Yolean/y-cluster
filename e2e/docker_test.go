@@ -253,6 +253,71 @@ func assertVolumesGone(t *testing.T, volumes []string) {
 	}
 }
 
+// TestDocker_FailedProvisionRemovesContainer: a provision that fails
+// after it created the container removes the container and its
+// volumes, and leaves no context in the kubeconfig. The test
+// cancels the provision as soon as the container exists, which fails it
+// at whatever step comes next (starting the container, waiting for
+// k3s).
+//
+// It needs no KUBECONFIG from the caller: the cluster never becomes
+// usable, so it gets a throwaway one.
+func TestDocker_FailedProvisionRemovesContainer(t *testing.T) {
+	skipIfNoDocker(t)
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eDockerConfig("y-cluster-e2e-failprov", "36446", "y-cluster-e2e-failprov")
+	kcfgPath := filepath.Join(t.TempDir(), "kubeconfig")
+	t.Setenv("KUBECONFIG", kcfgPath)
+
+	// A teardown removes what an earlier run of this test left, the
+	// container and its named volumes, and so does the cleanup.
+	_ = docker.TeardownConfig(*cfg, false, logger)
+	t.Cleanup(func() { _ = docker.TeardownConfig(*cfg, false, logger) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Watch for the container; once it exists with its volumes, note
+	// them and cancel the provision.
+	var volumes []string
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		deadline := time.Now().Add(5 * time.Minute)
+		for time.Now().Before(deadline) && ctx.Err() == nil {
+			out, err := exec.Command("docker", "inspect", "--format",
+				`{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, cfg.Name).Output()
+			if err == nil && len(strings.Fields(string(out))) > 0 {
+				volumes = strings.Fields(string(out))
+				cancel()
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	cluster, err := docker.Provision(ctx, *cfg, logger)
+	cancel()
+	<-watched
+	if err == nil {
+		_ = cluster.Teardown(false)
+		t.Fatal("Provision succeeded although it was cancelled once the container existed")
+	}
+	if len(volumes) == 0 {
+		t.Fatalf("Provision failed before the container existed, so this test proved nothing: %v", err)
+	}
+	t.Logf("provision failed as intended: %v", err)
+
+	if out, err := exec.Command("docker", "inspect", cfg.Name).CombinedOutput(); err == nil {
+		t.Errorf("container %s still exists after the failed provision:\n%.300s", cfg.Name, out)
+	}
+	assertVolumesGone(t, volumes)
+	if b, err := os.ReadFile(kcfgPath); err == nil && strings.Contains(string(b), cfg.Context) {
+		t.Errorf("kubeconfig still names %s after the failed provision:\n%s", cfg.Context, b)
+	}
+}
+
 // TestDocker_Stop is the regression guard for pkg/provision/docker.Stop.
 // Stop is documented to terminate the container while preserving it
 // (no remove) so a follow-up `docker container start` could resume the
