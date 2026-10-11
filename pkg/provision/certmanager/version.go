@@ -1,9 +1,9 @@
 // Package certmanager installs a pinned cert-manager release during
-// provision of clusters that are not local dev clusters (qemu, the
-// provider that targets production), plus a self-signed CA
-// ClusterIssuer for in-cluster certificates. y-cluster owns it because
-// its own features issue certificates: Gateway TLS today comes from
-// pkg/provision/devcert's hand-rolled self-signed certs.
+// provision of qemu and docker clusters (unless certManager.skip is
+// set), plus a self-signed CA ClusterIssuer for in-cluster
+// certificates. y-cluster owns it because its own features issue
+// certificates: Gateway TLS today comes from pkg/provision/devcert's
+// hand-rolled self-signed certs.
 //
 // # Mechanism
 //
@@ -17,9 +17,10 @@
 //
 // # Bumping the pin
 //
-// Replace the constant and provision a qemu cluster: the install waits
-// for the three deployments and for the CA certificate to be issued,
-// which exercises the webhook and the controller.
+// Replace the constant and provision a qemu or docker cluster (the
+// docker e2e does): the install waits for the three deployments and
+// for the CA certificate to be issued, which exercises the webhook and
+// the controller.
 package certmanager
 
 // Version is the pinned cert-manager release. The install manifest is

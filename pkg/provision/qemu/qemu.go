@@ -468,9 +468,10 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		)
 	}
 
-	// qemu is the provider that targets production: its clusters get
-	// cert-manager and y-cluster's CA issuer for in-cluster certificates.
-	// Skipped wholesale when certManager.skip is set in cluster config.
+	// cert-manager and y-cluster's CA issuer for in-cluster certificates,
+	// as on docker: the appliances qemu builds and the local dev clusters
+	// both converge workloads that use them. Skipped wholesale when
+	// certManager.skip is set in cluster config.
 	if cfg.CertManager.Skip {
 		logger.Info("cert-manager install skipped (certManager.skip)")
 	} else {
