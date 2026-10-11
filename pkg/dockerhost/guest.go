@@ -33,6 +33,10 @@ const (
 	// lease and status verbs over ssh.
 	guestIdleCommand  = "/usr/local/sbin/y-cluster-dockerhost-idle"
 	guestSetupCommand = "/usr/local/sbin/y-cluster-dockerhost-setup"
+	// guestSysctlConf raises the inotify limits for k3s-in-docker.
+	// systemd-sysctl applies it on every boot; the setup script applies
+	// it on the first, which runs after systemd-sysctl.
+	guestSysctlConf = "/etc/sysctl.d/90-y-cluster-dockerhost.conf"
 )
 
 type guestTemplateData struct {
@@ -68,6 +72,7 @@ func guestSpec(cloudImage string, tls tlsMaterial, limits reaperLimits) (qemu.Gu
 	)
 	for _, f := range []struct{ path, perm, src string }{
 		{"/etc/apt/keyrings/docker.asc", "0644", "guest/docker-apt.asc"},
+		{guestSysctlConf, "0644", "guest/sysctl.conf"},
 		{"/etc/docker/daemon.json", "0644", "guest/daemon.json.tmpl"},
 		{"/etc/systemd/system/docker.service.d/y-cluster-dockerhost.conf", "0644", "guest/docker-override.conf.tmpl"},
 		{"/etc/buildkit/buildkitd.toml", "0644", "guest/buildkitd.toml.tmpl"},

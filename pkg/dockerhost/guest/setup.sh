@@ -18,6 +18,20 @@ log() { echo "y-cluster-dockerhost-setup: $*"; }
 
 log "docker-ce $DOCKER_DEB_VERSION, containerd.io $CONTAINERD_DEB_VERSION, buildkit $BUILDKIT_VERSION"
 
+# The kernel limits for k3s-in-docker. cloud-init wrote the file after
+# systemd-sysctl ran on this first boot, so apply it now, and fail the
+# boot unless every value took effect; later boots apply it early.
+sysctl_conf=/etc/sysctl.d/90-y-cluster-dockerhost.conf
+sysctl -q -p "$sysctl_conf"
+grep -E '^[a-z]' "$sysctl_conf" | while IFS='= ' read -r key want; do
+  got=$(sysctl -n "$key")
+  if [ "$got" != "$want" ]; then
+    log "$key is $got after applying $sysctl_conf, want $want" >&2
+    exit 1
+  fi
+  log "$key = $got"
+done
+
 # The idle reaper counts the guest's age from here, and a fresh guest
 # starts with a lease.
 install -d -m 0755 /var/lib/y-cluster-dockerhost

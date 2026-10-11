@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +117,59 @@ func TestGuestSpec_Daemons(t *testing.T) {
 	}
 	if !strings.Contains(content[guestSetupCommand], "sha256sum -c") {
 		t.Error("the setup checks BuildKit's digest")
+	}
+}
+
+// TestGuestSpec_InotifyLimits: the guest raises the inotify limits that
+// k3s-in-docker needs, at least the 256 instances y-cluster's docker
+// provisioner checks for, and its first boot applies them and fails
+// unless they took effect (systemd-sysctl ran before cloud-init wrote
+// the file).
+func TestGuestSpec_InotifyLimits(t *testing.T) {
+	content, perms, _, _ := testSpecFiles(t)
+	conf, ok := content[guestSysctlConf]
+	if !ok || perms[guestSysctlConf] != "0644" {
+		t.Fatalf("%s missing or mode %q", guestSysctlConf, perms[guestSysctlConf])
+	}
+	if !strings.HasPrefix(guestSysctlConf, "/etc/sysctl.d/") || !strings.HasSuffix(guestSysctlConf, ".conf") {
+		t.Errorf("systemd-sysctl reads only /etc/sysctl.d/*.conf: %s", guestSysctlConf)
+	}
+	want := map[string]int{
+		"fs.inotify.max_user_instances": 1280,
+		"fs.inotify.max_user_watches":   655360,
+	}
+	got := map[string]int{}
+	for _, line := range strings.Split(conf, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, " = ")
+		n, err := strconv.Atoi(value)
+		if !ok || err != nil {
+			t.Fatalf("line %q is not `key = number`; the setup script parses it so", line)
+		}
+		got[key] = n
+	}
+	for key, n := range want {
+		if got[key] != n {
+			t.Errorf("%s = %d, want %d", key, got[key], n)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("settings %v, want %v", got, want)
+	}
+	if got["fs.inotify.max_user_instances"] < 256 {
+		t.Error("below the docker provisioner's prerequisite of 256 instances")
+	}
+	setup := content[guestSetupCommand]
+	for _, wantLine := range []string{
+		"sysctl_conf=" + guestSysctlConf + "\n",
+		`sysctl -q -p "$sysctl_conf"`,
+		`got=$(sysctl -n "$key")`,
+	} {
+		if !strings.Contains(setup, wantLine) {
+			t.Errorf("the setup script lacks %q", wantLine)
+		}
 	}
 }
 
