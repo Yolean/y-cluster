@@ -84,8 +84,9 @@ fi
 
 echo
 echo "==> e2e (-tags=$tags)"
-# The provisioner tests write their contexts to $KUBECONFIG and skip
-# without it; a throwaway file keeps the operator's contexts out of it.
+# The provisioner tests write their contexts to $KUBECONFIG (the docker
+# ones fail without it, the qemu ones skip); a throwaway file keeps the
+# operator's contexts out of it.
 e2e_tests_kubeconfig=$(mktemp)
 KUBECONFIG="$e2e_tests_kubeconfig" go test -tags "$tags" -count=1 -timeout="$timeout" ./e2e/
 rm "$e2e_tests_kubeconfig"

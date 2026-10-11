@@ -64,8 +64,9 @@ jobs:
     # runner. Local devs run the kvm leg via test.sh.
     #
     # The docker tests write their contexts to $KUBECONFIG, a
-    # throwaway file under the runner's temp dir; without it they
-    # skip. -v puts every test's PASS/SKIP/FAIL line in the log.
+    # throwaway file under the runner's temp dir, and fail rather
+    # than skip without it. -v puts every test's PASS/SKIP/FAIL
+    # line in the log.
     #
     # Gated on `test` so a broken unit suite short-circuits this
     # job: about 2 minutes of kwok tests and 4 of docker tests, which
