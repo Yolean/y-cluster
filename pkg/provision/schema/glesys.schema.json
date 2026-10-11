@@ -1,5 +1,15 @@
 {
   "$defs": {
+    "CertManagerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "skip": {
+          "description": "If true the cert-manager install is skipped entirely: no CRDs / controller / cainjector / webhook and no y-cluster issuers.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "GatewayConfig": {
       "additionalProperties": false,
       "properties": {
@@ -41,6 +51,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "certManager": {
+          "$ref": "#/$defs/CertManagerConfig",
+          "description": "Bundled cert-manager install with y-cluster's CA ClusterIssuer. qemu and docker install it; skip the install entirely (no CRDs / controller / cainjector / webhook / issuers) by setting skip:true. The other providers never install it."
         },
         "cni": {
           "default": "cilium",

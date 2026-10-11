@@ -568,3 +568,16 @@ func TestRenderCloudInitMetaData_UniqueInstanceIDPerProvision(t *testing.T) {
 		t.Errorf("meta-data must carry local-hostname:\n%s", a)
 	}
 }
+
+// TestFromConfig_CertManagerSkip: Provision reads certManager.skip from
+// the runtime Config, so FromConfig must carry it over from the file.
+func TestFromConfig_CertManagerSkip(t *testing.T) {
+	if defaultedRuntimeConfig(t).CertManager.Skip {
+		t.Fatal("cert-manager should be installed by default")
+	}
+	c := &config.QEMUConfig{CommonConfig: config.CommonConfig{CertManager: config.CertManagerConfig{Skip: true}}}
+	c.ApplyDefaults()
+	if !FromConfig(c).CertManager.Skip {
+		t.Fatal("FromConfig dropped certManager.skip")
+	}
+}

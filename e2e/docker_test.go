@@ -19,6 +19,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/provision/certmanager"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
@@ -229,6 +230,17 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 	// cluster via the merged kubeconfig context.
 	assertClusterFeatures(t, cluster.Context(), "docker")
 
+	// cert-manager is installed by default: y-cluster's CA ClusterIssuer
+	// is Ready, which needs the controller, the webhook and the CA
+	// certificate it signs with.
+	ci := exec.CommandContext(ctx, "kubectl", "--context="+cluster.Context(),
+		"get", "clusterissuer", certmanager.CAIssuer,
+		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+	ci.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+	if ciOut, err := ci.CombinedOutput(); err != nil || strings.TrimSpace(string(ciOut)) != "True" {
+		t.Fatalf("ClusterIssuer %s Ready: %q (%v)", certmanager.CAIssuer, ciOut, err)
+	}
+
 	// PortForwards regression: the extra 38080->8080 forward we
 	// added above must show up in `docker port`. We don't ping the
 	// guest port (no service is listening on 8080 inside the
@@ -375,11 +387,17 @@ func TestDocker_FailedProvisionRemovesContainer(t *testing.T) {
 //     (NOT removed; that's Teardown's job)
 //   - kubectl through the merged context fails to reach the apiserver
 //     because the host port forward is gone
+//
+// The cluster is provisioned with certManager.skip, and the test checks
+// that cert-manager is absent before it stops the container.
 func TestDocker_Stop(t *testing.T) {
 	kcfgPath := requireDocker(t)
 
 	logger, _ := zap.NewDevelopment()
 	cfg := e2eDockerConfig("y-cluster-e2e-stop", "36444", "y-cluster-e2e-stop")
+	// Stop needs no certificates; this cluster also covers
+	// certManager.skip, at no extra provision.
+	cfg.CertManager.Skip = true
 
 	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
 
@@ -387,6 +405,19 @@ func TestDocker_Stop(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// certManager.skip: no cert-manager namespace, no CRDs.
+	for _, args := range [][]string{
+		{"get", "namespace", certmanager.Namespace},
+		{"get", "crd", "clusterissuers.cert-manager.io"},
+	} {
+		kc := exec.CommandContext(ctx, "kubectl", append([]string{"--context=" + cluster.Context()}, args...)...)
+		kc.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+		out, err := kc.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "NotFound") {
+			t.Fatalf("certManager.skip: kubectl %s: want NotFound, got %q (%v)", strings.Join(args, " "), out, err)
+		}
+	}
 
 	// Stop the running container. docker.Stop preserves the container
 	// for a follow-up start; it should NOT remove it.

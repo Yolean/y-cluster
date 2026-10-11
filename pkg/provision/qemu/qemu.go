@@ -60,14 +60,15 @@ type Config struct {
 	// existed, when qemu bound the wildcard.
 	BindAddress string
 	// Tap is set in network.mode tap and nil in user mode.
-	Tap        *TapNetwork
-	Context    string
-	CacheDir   string
-	Kubeconfig string
-	K3s        K3s
-	Registries config.Registries
-	Gateway    config.GatewayConfig
-	Storage    config.StorageConfig
+	Tap         *TapNetwork
+	Context     string
+	CacheDir    string
+	Kubeconfig  string
+	K3s         K3s
+	Registries  config.Registries
+	Gateway     config.GatewayConfig
+	CertManager config.CertManagerConfig
+	Storage     config.StorageConfig
 
 	// DataDisk is the operator-owned external qcow2 attached as a
 	// labeled `y-cluster-data` volume at /data/yolean. Empty means
@@ -164,6 +165,7 @@ func FromConfig(c *config.QEMUConfig) Config {
 		},
 		Registries:   c.Registries,
 		Gateway:      c.Gateway,
+		CertManager:  c.CertManager,
 		Storage:      c.Storage,
 		DataDisk:     dataDisk,
 		DataDiskSize: dataDiskSize,
@@ -468,10 +470,15 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 
 	// qemu is the provider that targets production: its clusters get
 	// cert-manager and y-cluster's CA issuer for in-cluster certificates.
-	if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
-		return nil, fmt.Errorf("install cert-manager: %w", err)
+	// Skipped wholesale when certManager.skip is set in cluster config.
+	if cfg.CertManager.Skip {
+		logger.Info("cert-manager install skipped (certManager.skip)")
+	} else {
+		if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
+			return nil, fmt.Errorf("install cert-manager: %w", err)
+		}
+		logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 	}
-	logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 
 	return c, nil
 }

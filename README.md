@@ -26,7 +26,11 @@ Subcommand groups:
 
 - **provision / teardown** -- bring a k3s cluster up with Envoy
   Gateway and local-path storage installed, or remove it. `teardown`
-  without `-c` lists the clusters this host knows about.
+  without `-c` lists the clusters this host knows about. qemu and
+  docker clusters also get cert-manager with y-cluster's CA
+  ClusterIssuer (`y-cluster-ca`); `certManager: {skip: true}` in
+  `y-cluster-provision.yaml` leaves it out, as `gateway: {skip: true}`
+  does Envoy Gateway.
 - **stop / start / pause / resume** -- keep the disk, drop the
   compute. `stop` works on every provider; the rest are qemu-only
   (`start` also handles hetzner).
