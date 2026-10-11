@@ -504,11 +504,12 @@ func (c *Cluster) Teardown(keepDisk bool) error {
 	return TeardownConfig(c.cfg, keepDisk, c.logger)
 }
 
-// TeardownConfig removes the container by config without a running
-// Cluster instance. dockerexec.Remove treats NotFound as success,
-// so tearing down an already-gone container is a no-op. keepDisk
-// is ignored -- k3s state lives entirely inside the container, so
-// there is no persistent disk to keep across teardowns.
+// TeardownConfig removes the container and its volumes by config
+// without a running Cluster instance. dockerexec.Remove treats
+// NotFound as success, so tearing down an already-gone container is a
+// no-op. keepDisk is ignored: k3s state lives in the cluster's named
+// volumes, and a provision removes them before it creates a container
+// (see removeVolumes), so there is no disk a later provision could use.
 func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) error {
 	_ = keepDisk // ignored
 	if logger == nil {

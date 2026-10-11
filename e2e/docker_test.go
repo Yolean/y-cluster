@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +210,45 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 	for _, want := range []string{"y-cluster-e2e-mirror.invalid", "literal-test-token", "oauth2accesstoken"} {
 		if !strings.Contains(string(regOut), want) {
 			t.Fatalf("registries.yaml missing %q.\nGot:\n%s", want, regOut)
+		}
+	}
+
+	// Teardown removes the cluster's volumes with its container. The
+	// k3s image declares four VOLUMEs; the provisioner mounts a volume
+	// named after the cluster at each, and Remove drops any anonymous
+	// one on top. The cluster's images and state in them came to 0.6
+	// to 1 GB per cluster, left behind by every teardown before.
+	volumes := containerVolumes(t, cfg.Name)
+	for purpose := range docker.VolumeTargets {
+		if want := docker.VolumeName(cfg.Name, purpose); !slices.Contains(volumes, want) {
+			t.Errorf("container %s does not mount volume %s; it mounts %v", cfg.Name, want, volumes)
+		}
+	}
+	if err := cluster.Teardown(false); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	assertVolumesGone(t, volumes)
+}
+
+// containerVolumes lists the names of the container's volume mounts:
+// the cluster's named volumes, and any anonymous volume of an image
+// VOLUME the provisioner does not name.
+func containerVolumes(t *testing.T, name string) []string {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "--format",
+		`{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect %s: %s: %v", name, out, err)
+	}
+	return strings.Fields(string(out))
+}
+
+// assertVolumesGone fails for every volume the daemon still has.
+func assertVolumesGone(t *testing.T, volumes []string) {
+	t.Helper()
+	for _, v := range volumes {
+		if out, err := exec.Command("docker", "volume", "inspect", v).CombinedOutput(); err == nil {
+			t.Errorf("volume %s still exists after teardown:\n%s", v, out)
 		}
 	}
 }
