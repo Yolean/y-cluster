@@ -14,11 +14,13 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	"go.uber.org/zap"
@@ -146,6 +148,9 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		_ = cli.Close()
 		return nil, err
 	}
+	// A provision is a fresh cluster, so the previous one's state goes
+	// with its container (see removeVolumes).
+	removeVolumes(ctx, cli, cfg.Name, logger)
 	kubecfg.CleanupStale()
 
 	hostConfig, exposedPorts, err := buildHostConfig(cfg)
@@ -390,6 +395,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 			"/var/run": "",
 		},
 		PortBindings: bindings,
+		Mounts:       volumeMounts(cfg.Name),
 	}
 	if cfg.Memory != "" {
 		mb, err := strconv.Atoi(cfg.Memory)
@@ -408,6 +414,57 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 		hc.NanoCPUs = int64(n) * 1_000_000_000
 	}
 	return hc, exposed, nil
+}
+
+// VolumeTargets are the paths the k3s image declares VOLUME for. Left
+// to docker they become anonymous volumes with hex names: nothing says
+// which cluster they belong to, and the k3s one holds the image store
+// and is gigabytes. We mount a named volume at each instead, so
+// `docker volume ls` reads like `docker ps` and a leftover is
+// attributable to the cluster that made it.
+var VolumeTargets = map[string]string{
+	"k3s":     "/var/lib/rancher/k3s",
+	"kubelet": "/var/lib/kubelet",
+	"cni":     "/var/lib/cni",
+	"varlog":  "/var/log",
+}
+
+// VolumeName is the volume of a cluster, named after it as the
+// container is: cluster "local" owns "local-k3s" and its siblings.
+func VolumeName(cluster, purpose string) string { return cluster + "-" + purpose }
+
+// volumeMounts is VolumeTargets as mounts, in a stable order so that
+// two calls produce the same container spec.
+func volumeMounts(cluster string) []mount.Mount {
+	purposes := make([]string, 0, len(VolumeTargets))
+	for purpose := range VolumeTargets {
+		purposes = append(purposes, purpose)
+	}
+	sort.Strings(purposes)
+	mounts := make([]mount.Mount, 0, len(purposes))
+	for _, purpose := range purposes {
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: VolumeName(cluster, purpose),
+			Target: VolumeTargets[purpose],
+		})
+	}
+	return mounts
+}
+
+// removeVolumes deletes the cluster's named volumes. Named volumes
+// outlive their container (that is what naming one means), so a
+// teardown has to say so, and a provision has to as well: a cluster
+// that came back with the last one's k3s state would not be the fresh
+// one the caller asked for. In use or missing is not an error here --
+// the container is already gone by the time this runs.
+func removeVolumes(ctx context.Context, cli *client.Client, cluster string, logger *zap.Logger) {
+	for purpose := range VolumeTargets {
+		name := VolumeName(cluster, purpose)
+		if _, err := cli.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true}); err != nil {
+			logger.Debug("volume not removed", zap.String("volume", name), zap.Error(err))
+		}
+	}
 }
 
 // Stop gracefully shuts down the docker container. The Docker
@@ -466,6 +523,7 @@ func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) 
 	if err := dockerexec.Remove(context.Background(), cli, cfg.Name); err != nil {
 		return err
 	}
+	removeVolumes(context.Background(), cli, cfg.Name, logger)
 	if kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger); err == nil {
 		kubecfg.CleanupStale()
 	}

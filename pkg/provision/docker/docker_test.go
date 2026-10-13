@@ -202,3 +202,53 @@ func TestPollHostAPIServerReadyz_ContextCanceled(t *testing.T) {
 		t.Fatalf("expected context.DeadlineExceeded, got: %v", err)
 	}
 }
+
+// The k3s image's VOLUME paths get a named volume each, named after the
+// cluster as the container is, so a leftover says which cluster made it.
+func TestBuildHostConfig_NamedVolumesPerCluster(t *testing.T) {
+	cfg := config.DockerConfig{CommonConfig: config.CommonConfig{Name: "local"}}
+	hc, _, err := buildHostConfig(cfg)
+	if err != nil {
+		t.Fatalf("buildHostConfig: %v", err)
+	}
+	if got, want := len(hc.Mounts), len(VolumeTargets); got != want {
+		t.Fatalf("Mounts: got %d, want one per VOLUME path (%d)", got, want)
+	}
+	byTarget := map[string]string{}
+	for _, m := range hc.Mounts {
+		if m.Type != "volume" {
+			t.Errorf("mount at %s is %q, want a volume", m.Target, m.Type)
+		}
+		byTarget[m.Target] = m.Source
+	}
+	for purpose, target := range VolumeTargets {
+		if got, want := byTarget[target], "local-"+purpose; got != want {
+			t.Errorf("volume at %s: got %q, want %q", target, got, want)
+		}
+	}
+	// k3s holds the image store, the one that made the leak worth fixing.
+	if byTarget["/var/lib/rancher/k3s"] != "local-k3s" {
+		t.Errorf("the k3s state volume is %q", byTarget["/var/lib/rancher/k3s"])
+	}
+}
+
+// Two calls must describe the same container, or a re-provision would
+// differ for no reason.
+func TestBuildHostConfig_VolumeOrderIsStable(t *testing.T) {
+	cfg := config.DockerConfig{CommonConfig: config.CommonConfig{Name: "y-cluster"}}
+	first, _, err := buildHostConfig(cfg)
+	if err != nil {
+		t.Fatalf("buildHostConfig: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		again, _, err := buildHostConfig(cfg)
+		if err != nil {
+			t.Fatalf("buildHostConfig: %v", err)
+		}
+		for n := range again.Mounts {
+			if again.Mounts[n] != first.Mounts[n] {
+				t.Fatalf("mount %d differs between calls: %v vs %v", n, again.Mounts[n], first.Mounts[n])
+			}
+		}
+	}
+}
