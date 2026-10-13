@@ -37,11 +37,19 @@ func New() (*client.Client, error) {
 	return client.New(client.FromEnv)
 }
 
-// Remove force-removes the named container. NotFound is treated
-// as success because the operation is idempotent and that's how
-// every caller wants it.
+// Remove force-removes the named container and the anonymous
+// volumes it owns. NotFound is treated as success because the
+// operation is idempotent and that's how every caller wants it.
+//
+// RemoveVolumes: the k3s image declares VOLUME for /var/log,
+// /var/lib/cni, /var/lib/kubelet and /var/lib/rancher/k3s, so every
+// container leaves four anonymous volumes behind - the k3s one holds
+// the image store and is gigabytes. Without this a teardown plus a
+// provision leaks all four each time, and nothing ever refers to them
+// again. Only anonymous volumes go: a named volume, which someone
+// asked for by name, is never removed with its container.
 func Remove(ctx context.Context, cli *client.Client, name string) error {
-	_, err := cli.ContainerRemove(ctx, name, client.ContainerRemoveOptions{Force: true})
+	_, err := cli.ContainerRemove(ctx, name, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
 	if err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("remove %s: %w", name, err)
 	}
