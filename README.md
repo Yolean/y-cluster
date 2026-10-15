@@ -161,6 +161,16 @@ that address and k3s gets it as a TLS SAN. A cluster provisioned
 before this option existed keeps its wildcard forwards across
 `stop`/`start`; re-provision to move it to loopback.
 
+**docker: published ports listen on loopback too.** The docker
+provider publishes `portForwards` on `bindAddress`, default
+`127.0.0.1`, so the k3s API and the ingress on 80/443 are not reachable
+from other networks the host is on. `0.0.0.0` publishes them on every
+interface; a specific host address works too, and the kubeconfig then
+names that address. Each cluster keeps its k3s state in volumes named
+after it (`<name>-k3s`, `<name>-kubelet`, `<name>-cni`,
+`<name>-varlog`), which `teardown` and the next `provision` of the same
+name remove.
+
 ## Specs
 
 Design notes, migration recipes, and the still-pending feature
