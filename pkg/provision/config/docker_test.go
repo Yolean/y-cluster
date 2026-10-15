@@ -117,3 +117,30 @@ func TestLoadProvision_K3sInDocker(t *testing.T) {
 		t.Fatalf("Provider: %q", c.Provider)
 	}
 }
+
+func TestDocker_BindAddress(t *testing.T) {
+	c := &DockerConfig{CommonConfig: CommonConfig{Provider: ProviderDocker}}
+	c.ApplyDefaults()
+	if c.BindAddress != "127.0.0.1" {
+		t.Fatalf("BindAddress default: %q, want loopback", c.BindAddress)
+	}
+	for _, tc := range []struct {
+		bind, wantErr string
+	}{
+		{"127.0.0.1", ""},
+		{"0.0.0.0", ""},
+		{"192.168.1.10", ""},
+		{"localhost", "bindAddress"},
+		{"::1", "bindAddress"},
+	} {
+		c := &DockerConfig{CommonConfig: CommonConfig{Provider: ProviderDocker}, BindAddress: tc.bind}
+		c.ApplyDefaults()
+		err := c.Validate()
+		if tc.wantErr == "" && err != nil {
+			t.Errorf("%s: unexpected %v", tc.bind, err)
+		}
+		if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("%s: want error naming %s, got %v", tc.bind, tc.wantErr, err)
+		}
+	}
+}

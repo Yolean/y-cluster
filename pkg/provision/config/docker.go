@@ -11,9 +11,19 @@ package config
 type DockerConfig struct {
 	CommonConfig `yaml:",inline" json:",inline"`
 
+	// BindAddress is where docker publishes PortForwards on the host.
+	// The default is loopback, as for qemu's user-mode forwards: a
+	// published port is otherwise reachable from every network the
+	// host is on, the k3s API included.
+	BindAddress string `yaml:"bindAddress,omitempty" json:"bindAddress,omitempty" jsonschema:"description=IPv4 address the host port forwards (portForwards) listen on. Default 127.0.0.1. 0.0.0.0 exposes them on every interface of the host."`
+
 	// Dir is filled at load time. Not part of the schema.
 	Dir string `yaml:"-" json:"-" jsonschema:"-"`
 }
+
+// DockerDefaultBindAddress is the host address published ports listen
+// on when bindAddress is not set.
+const DockerDefaultBindAddress = "127.0.0.1"
 
 // SetDir satisfies configfile.DirAware.
 func (c *DockerConfig) SetDir(dir string) { c.Dir = dir }
@@ -28,6 +38,9 @@ func (c *DockerConfig) ApplyDefaults() {
 	}
 	applyTagDefaults(c)
 	c.applyCommonDefaults()
+	if c.BindAddress == "" {
+		c.BindAddress = DockerDefaultBindAddress
+	}
 }
 
 // Validate checks the discriminator and docker-specific invariants.
@@ -37,6 +50,9 @@ func (c *DockerConfig) ApplyDefaults() {
 func (c *DockerConfig) Validate() error {
 	if err := c.validateCommon(ProviderDocker); err != nil {
 		return err
+	}
+	if !isIPv4Literal(c.BindAddress) {
+		return errInvalid("bindAddress must be an IPv4 address such as 127.0.0.1 or 0.0.0.0, got %q", c.BindAddress)
 	}
 	return c.requireHostAPIPort()
 }

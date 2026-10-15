@@ -14,11 +14,13 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	"go.uber.org/zap"
@@ -146,6 +148,9 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		_ = cli.Close()
 		return nil, err
 	}
+	// A provision is a fresh cluster, so the previous one's state goes
+	// with its container (see removeVolumes).
+	removeVolumes(ctx, cli, cfg.Name, logger)
 	kubecfg.CleanupStale()
 
 	hostConfig, exposedPorts, err := buildHostConfig(cfg)
@@ -175,10 +180,10 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		// we can set Cmd in the same struct.
 		Config: &container.Config{
 			Image: image,
-			// 127.0.0.1 is where the host reaches the published
-			// apiserver port; k3s lists it among its serving
-			// cert SANs already, the flag makes that explicit.
-			Cmd: append([]string{"server", "--tls-san=127.0.0.1"}, k3s.DisableFlags...),
+			// The host reaches the published apiserver port at
+			// hostDialAddress; k3s lists 127.0.0.1 among its
+			// serving cert SANs already, the flag makes it explicit.
+			Cmd: append([]string{"server", "--tls-san=" + hostDialAddress(cfg)}, k3s.DisableFlags...),
 			// ExposedPorts must list every guest port carried by
 			// HostConfig.PortBindings. The Docker CLI auto-fills
 			// this when you `-p`; the moby SDK does not. Engine
@@ -263,7 +268,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		if err := envoygateway.Install(ctx, envoygateway.Options{
 			ContextName:          cfg.Context,
 			GatewayClassName:     cfg.Gateway.ClassName,
-			DNSHintIP:            cfg.HostRoutableIP(),
+			DNSHintIP:            dnsHintIP(cfg),
 			Logger:               logger,
 			ControllerCPURequest: cfg.Gateway.Resources.Controller.CPU,
 			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
@@ -352,6 +357,14 @@ func dockerHostPorts(cfg config.DockerConfig) []string {
 // are declared. Validation in CommonConfig guarantees a 6443
 // entry exists, so the host's kubectl can reach the API server.
 func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.PortSet, error) {
+	bind := cfg.BindAddress
+	if bind == "" {
+		bind = config.DockerDefaultBindAddress
+	}
+	hostIP, err := netip.ParseAddr(bind)
+	if err != nil || !hostIP.Is4() {
+		return nil, nil, fmt.Errorf("bindAddress %q is not an IPv4 address", bind)
+	}
 	bindings := network.PortMap{}
 	exposed := network.PortSet{}
 	for _, pf := range cfg.PortForwards {
@@ -363,11 +376,11 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 		// The zero value is `invalid IP`, which moby v1.54+
 		// renders as an empty JSON string and the Docker Engine
 		// daemon (28.x) silently drops the binding from
-		// NetworkSettings.Ports. Mirroring `docker run -p ...`
-		// semantics, IPv4Unspecified ("0.0.0.0") binds on every
+		// NetworkSettings.Ports. bindAddress is loopback unless
+		// the config says otherwise; 0.0.0.0 binds on every
 		// interface. HostPort empty lets docker pick a free port.
 		bindings[guest] = append(bindings[guest], network.PortBinding{
-			HostIP:   netip.IPv4Unspecified(),
+			HostIP:   hostIP,
 			HostPort: pf.Host,
 		})
 		// Same guest port lands in ExposedPorts; the daemon
@@ -382,6 +395,7 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 			"/var/run": "",
 		},
 		PortBindings: bindings,
+		Mounts:       volumeMounts(cfg.Name),
 	}
 	if cfg.Memory != "" {
 		mb, err := strconv.Atoi(cfg.Memory)
@@ -400,6 +414,57 @@ func buildHostConfig(cfg config.DockerConfig) (*container.HostConfig, network.Po
 		hc.NanoCPUs = int64(n) * 1_000_000_000
 	}
 	return hc, exposed, nil
+}
+
+// VolumeTargets are the paths the k3s image declares VOLUME for. Left
+// to docker they become anonymous volumes with hex names: nothing says
+// which cluster they belong to, and the k3s one holds the image store
+// and is gigabytes. We mount a named volume at each instead, so
+// `docker volume ls` reads like `docker ps` and a leftover is
+// attributable to the cluster that made it.
+var VolumeTargets = map[string]string{
+	"k3s":     "/var/lib/rancher/k3s",
+	"kubelet": "/var/lib/kubelet",
+	"cni":     "/var/lib/cni",
+	"varlog":  "/var/log",
+}
+
+// VolumeName is the volume of a cluster, named after it as the
+// container is: cluster "local" owns "local-k3s" and its siblings.
+func VolumeName(cluster, purpose string) string { return cluster + "-" + purpose }
+
+// volumeMounts is VolumeTargets as mounts, in a stable order so that
+// two calls produce the same container spec.
+func volumeMounts(cluster string) []mount.Mount {
+	purposes := make([]string, 0, len(VolumeTargets))
+	for purpose := range VolumeTargets {
+		purposes = append(purposes, purpose)
+	}
+	sort.Strings(purposes)
+	mounts := make([]mount.Mount, 0, len(purposes))
+	for _, purpose := range purposes {
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: VolumeName(cluster, purpose),
+			Target: VolumeTargets[purpose],
+		})
+	}
+	return mounts
+}
+
+// removeVolumes deletes the cluster's named volumes. Named volumes
+// outlive their container (that is what naming one means), so a
+// teardown has to say so, and a provision has to as well: a cluster
+// that came back with the last one's k3s state would not be the fresh
+// one the caller asked for. In use or missing is not an error here --
+// the container is already gone by the time this runs.
+func removeVolumes(ctx context.Context, cli *client.Client, cluster string, logger *zap.Logger) {
+	for purpose := range VolumeTargets {
+		name := VolumeName(cluster, purpose)
+		if _, err := cli.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true}); err != nil {
+			logger.Debug("volume not removed", zap.String("volume", name), zap.Error(err))
+		}
+	}
 }
 
 // Stop gracefully shuts down the docker container. The Docker
@@ -458,6 +523,7 @@ func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) 
 	if err := dockerexec.Remove(context.Background(), cli, cfg.Name); err != nil {
 		return err
 	}
+	removeVolumes(context.Background(), cli, cfg.Name, logger)
 	if kubecfg, err := kubeconfig.FromEnv(cfg.Context, cfg.Name, logger); err == nil {
 		kubecfg.CleanupStale()
 	}
@@ -566,7 +632,22 @@ func (c *Cluster) extractKubeconfig(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read kubeconfig: %s: %w", out, err)
 	}
-	return k3s.RewriteKubeconfigServer(out, "127.0.0.1:"+c.cfg.HostAPIPort())
+	return k3s.RewriteKubeconfigServer(out, hostDialAddress(c.cfg)+":"+c.cfg.HostAPIPort())
+}
+
+// hostDialAddress is where the host reaches the published ports:
+// bindAddress, or loopback when that is unset or 0.0.0.0.
+func hostDialAddress(cfg config.DockerConfig) string {
+	return config.HostDialAddress(cfg.BindAddress)
+}
+
+// dnsHintIP is the GatewayClass address hint: where the host reaches
+// the published :80, empty when no forward publishes it.
+func dnsHintIP(cfg config.DockerConfig) string {
+	if cfg.HostRoutableIP() == "" {
+		return ""
+	}
+	return hostDialAddress(cfg)
 }
 
 // ContainerName returns the docker container name. Test helpers use
