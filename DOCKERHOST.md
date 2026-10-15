@@ -4,13 +4,13 @@
 them, so that builds and Testcontainers suites run unchanged on the host as clients.
 
 It is for machines that must not run a container daemon on the host: hardened hosts, where
-the daemon would be root-equivalent for the bot user, and the appliance QA machine (checkit
-#7986: "we don't run docker directly on that machine"). Those hosts have KVM.
+the daemon would be root-equivalent for the user, and machines where policy says the container
+daemon must not run on the host itself. Those hosts have KVM.
 
 Status: implemented. The guest, its daemons, TLS, the lifecycle and the idle reaper are tested
 on a real KVM guest behind the test harness's loopback forwards (Testing). The product path,
-a guest on a tap device that root prepared, had its first run on qahost on 2026-10-07, with the
-CLI and the exposure checks by hand (Exposure checks); `TestDockerhost_Tap` has not run yet.
+a guest on a tap device that root prepared, has been run with the CLI and the exposure checks
+by hand (Exposure checks); `TestDockerhost_Tap` automates both.
 
 ## Using it
 
@@ -19,19 +19,19 @@ guest names it in `~/.config/y-cluster/dockerhost.yaml`:
 
 ```yaml
 network:
-  ifname: ycd0                # tap owned by this user; may be a port of a bridge
+  ifname: ycd0                    # tap owned by this user; may be a port of a bridge
   guestAddress: 192.168.123.2/24  # static; clients reach the daemons here
   # gateway: 192.168.123.1        # default: first host address of the subnet
-  # dns: [1.1.1.1, 9.9.9.9]   # default; must be reachable through the host's NAT
-# memory: 6144                # MB
+  # dns: [1.1.1.1, 9.9.9.9]       # default; must be reachable through the host's NAT
+# memory: 6144                    # MB
 # cpus: 4
-# diskSize: 60G               # sparse qcow2: the image store and build caches
-# idleTimeout: 8h             # the guest powers itself off after this long unused; "0" = never
-# maxAge: 336h                # the guest is recreated from the newest image after this (at most 1440h)
+# diskSize: 60G                   # sparse qcow2: the image store and build caches
+# idleTimeout: 8h                 # the guest powers itself off after this long unused; "0" = never
+# maxAge: 336h                    # the guest is recreated from the newest image after this (at most 1440h)
 ```
 
 The network has no default: which device and subnet are the guest's is the host's decision.
-The values above are qahost's.
+The values above are examples.
 
 Then, in any session:
 
@@ -60,9 +60,8 @@ and both daemon ports refuse a client without one.
 
 No secrets are baked into images or build contexts; build secrets go through BuildKit's secret
 mounts only. y-cluster mounts no host directory into the guest and copies nothing into it but
-the files it generates (the guest definition below). Nothing from a credentials directory such as
-the bots device directory (`~/Yolean/.yolean-bots-device`) is ever mounted or copied into the
-guest, by y-cluster or by a build: build contexts are what a client sends, and the client
+the files it generates (the guest definition below). Nothing from a credentials directory on the host
+is ever mounted or copied into the guest, by y-cluster or by a build: build contexts are what a client sends, and the client
 decides what that is.
 
 ## End goals
@@ -81,16 +80,16 @@ decides what that is.
 
 | Decision | Choice | Why |
 |---|---|---|
-| Instances | At most one dockerhost per machine; no name option | As host Docker has always been: one daemon shared by all sessions. Random mapped ports never collide on one daemon; image and build caches stay warm. (Staffan, 2026-10-04) |
+| Instances | At most one dockerhost per machine; no name option | As host Docker has always been: one daemon shared by all sessions. Random mapped ports never collide on one daemon; image and build caches stay warm. |
 | Discovery | Environment variables, printed by `dockerhost env` | The only mechanism every client honours. |
 | Docker contexts | Not used | Testcontainers Java 2.0.5, Go v0.42.0 and Node 11.13.0 all ignore them and silently use `/var/run/docker.sock`, while the docker CLI follows the context. A context pointing at the guest would split CLI and tests between two daemons. |
-| Daemon access | tcp + TLS client certificates | A plain TCP port is open to every local user, and the Docker API is root in the guest. tcp+TLS needs only `DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH`, which checkit's turbo.json already passes through. |
+| Daemon access | tcp + TLS client certificates | A plain TCP port is open to every local user, and the Docker API is root in the guest. tcp+TLS needs only `DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH`, which a build tool such as turbo can pass through to tasks. |
 | Published ports | Reached at the guest's own address, found through `DOCKER_HOST` | Testcontainers derives `getHost()` from a tcp `DOCKER_HOST`. No 127.0.0.1 assumption, no port forwarding of published ports. |
 | Network | A tap device root prepared, by name and subnet | y-cluster never creates network devices, never runs as root and never changes the host's firewall. |
 | buildkitd | Rootful in the guest | Guest root is not host root, as for dockerd; the rootless variant buys nothing inside a disposable guest and depends on the guest kernel's unprivileged user namespaces. |
 | Idle reaper | In the guest | Needs no host scheduler: hardened hosts have no systemd user manager for the user (no linger) and no `at`. |
 | In-cluster BuildKit | ystack's rootless buildkitd stays as it is | dockerhost is for builds outside a cluster. |
-| Testcontainers Cloud, Docker Build Cloud | Out | New supplier, outside the EU by default (compliance recommendation). |
+| Testcontainers Cloud, Docker Build Cloud | Out | A new third-party service, outside the EU by default. |
 
 ## The environment contract
 
@@ -107,9 +106,9 @@ export BUILDKIT_TLS_DIR='<client dir>'
 - `DOCKER_CERT_PATH` and `BUILDKIT_TLS_DIR` are the same directory, `~/.cache/y-cluster-dockerhost/client`:
   `ca.pem`, `cert.pem`, `key.pem`, the directory 0700 and the files 0600.
 - 2376 is Docker's port for TLS. 8547 is the port of ystack's in-cluster buildkitd.
-- `BUILDKIT_TLS_DIR` is read by `y-cluster buildctl`, and by ystack's `y-buildctl` (branch
-  `YoleanAgents/ystack:y-build-tls`, PR to Yolean/ystack pending); both pass it as
-  `buildctl --tlsdir`, since buildctl takes TLS files only as flags.
+- `BUILDKIT_TLS_DIR` is read by `y-cluster buildctl`, and by ystack's `y-buildctl` (from the
+  version that supports TLS); both pass it as `buildctl --tlsdir`, since buildctl takes TLS
+  files only as flags.
 - **`y-cluster buildctl`** is BuildKit's buildctl compiled into y-cluster, at the `BuildKitVersion`
   the guest runs (`pkg/dockerhost/versions.go`), so the client never drifts from the server and
   nothing is downloaded. Arguments pass through untouched. Without `--addr` or `BUILDKIT_HOST` it
@@ -119,11 +118,11 @@ export BUILDKIT_TLS_DIR='<client dir>'
   `pkg/buildctl` after a `BuildKitVersion` bump; the rest of BuildKit is the module at that version.
 - **Builds go through BuildKit, not `docker build`.** The docker client y-cluster expects has no
   buildx plugin, and without it `docker build` falls back to the legacy builder, which rejects
-  `RUN --mount` (mirror-v3's Dockerfile, for one). Repos build with `y-cluster buildctl build
+  `RUN --mount`. Repos build with `y-cluster buildctl build
   --frontend dockerfile.v0 ...` (or y-build) and adapt where they assumed `docker build`.
 - No `TESTCONTAINERS_*` variables are needed. `TESTCONTAINERS_RYUK_DISABLED` stays unset: Ryuk works.
 - **Without a running guest, `env` prints nothing** (open question 5, decided). A machine with
-  plain Docker, or with a `DOCKER_HOST` someone set on purpose (cicd-v1's `tcp://dockerd:2375`),
+  plain Docker, or with a `DOCKER_HOST` someone set on purpose (a CI environment's `tcp://dockerd:2375`, say),
   keeps what it has; `unset` lines would take that away from every shell that runs `env`. The one
   exception: a shell that still carries this dockerhost's own variables (`DOCKER_CERT_PATH` or
   `BUILDKIT_TLS_DIR` is this machine's client directory) gets
@@ -150,7 +149,7 @@ cluster node, without k3s and without a kubeconfig context. The guest definition
 | aspect | built |
 |---|---|
 | image | Ubuntu 24.04 (noble) cloud image, `noble/current`. Every new guest starts from the newest one: provision fetches `SHA256SUMS` and `SHA256SUMS.gpg`, verifies the signature against Ubuntu's cloud image keys embedded in y-cluster (from the `ubuntu-keyring` package, fingerprints pinned in a test), and downloads the image only into a file named by the signed digest, checking the digest as it writes. Booted with `-machine accel=kvm` as the unprivileged user (group `kvm`). |
-| network | A tap device by name, with a static address on its subnet (`network-config` in the seed); the tap may be a port of a bridge that carries the gateway address. The guest reaches the internet through the host's NAT and resolves through public resolvers (default 1.1.1.1 and 9.9.9.9, the same as qahost's cluster guest on `yct0`; the host's own resolver is unreachable from the guest by design). |
+| network | A tap device by name, with a static address on its subnet (`network-config` in the seed); the tap may be a port of a bridge that carries the gateway address. The guest reaches the internet through the host's NAT and resolves through public resolvers (default 1.1.1.1 and 9.9.9.9; the host's own resolver is unreachable from the guest by design). |
 | dockerd | `docker-ce` 29.8.2 and `containerd.io` 2.3.6 from Docker's apt repository, whose signature apt checks with Docker's key (written by cloud-init, fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` pinned in a test). The packages are held. Rootful in the guest; `-H fd:// -H tcp://0.0.0.0:2376` with `tls`, `tlsverify` and the CA in `daemon.json`. The unix socket stays root's, inside the guest. Logs rotate (json-file, 3 × 20 MB per container). |
 | buildkitd | BuildKit v0.33.1 from the GitHub release, unpacked only after its SHA-256 matched the pin. Rootful in the guest, OCI worker (runc), garbage collection on; `tcp://0.0.0.0:8547` with the server certificate and client verification against the same CA. RUN steps use the guest's network namespace (BuildKit's default without CNI). |
 | BuildKit in dockerd | Serves `docker build`/`buildx` and `docker compose build` with the client's buildx. |
@@ -219,19 +218,17 @@ and frees the memory; the disk stays for the next provision.
 - **Inside the guest, unattended-upgrades stays on** (the cloud image's default: daily, Ubuntu's
   security origins), for the Ubuntu packages around the pinned ones. It does not reboot the guest;
   a new kernel arrives with the recreate cycle.
-- **Who follows advisories for the pinned versions: the y-cluster maintainer** -- the
-  owner of the y-cluster repository -- for Docker Engine (moby), containerd and
-  BuildKit (their GitHub security advisories and release notes), with a y-cluster release that
-  bumps the pins as the response. Ubuntu's own advisories are covered by unattended-upgrades in
-  the guest and by the recreate cycle.
+- **Advisories for the pinned versions** are followed by the y-cluster maintainers for Docker
+  Engine (moby), containerd and BuildKit (their GitHub security advisories and release notes),
+  with a y-cluster release that bumps the pins as the response. Ubuntu's own advisories are
+  covered by unattended-upgrades in the guest and by the recreate cycle.
 
 ## Logging
 
-The guest's journal is not shipped: the host's pipeline does not exist yet on qahost. The
-dockerhost is to be listed in the host baseline as an exception, with the reason: a development guest,
-no customer data, recreated at least every 14 days. The guest keeps its own journal (persistent,
-until the guest is recreated); the host keeps the guest's console log next to its disk until
-teardown.
+The guest's journal is not shipped by y-cluster. A site that ships logs from its hosts decides
+whether the guest is covered; the guest is a development guest with no customer data, recreated
+at least every 14 days by default. The guest keeps its own journal (persistent, until the guest
+is recreated); the host keeps the guest's console log next to its disk until teardown.
 
 ## Exposure checks
 
@@ -247,38 +244,30 @@ them on the prepared tap and logs each result:
 - both TLS ports refuse a client without a certificate, a certificate from another CA, and plain
   HTTP.
 
-Other guests on the host (the cluster guest at 192.168.122.2 on qahost) are not probed: the private
-ranges check covers their subnet, and a check that reached them would touch them.
+Other guests on the host are not probed: the private ranges check covers their subnet, and a
+check that reached them would touch them.
 
-Status: run by hand on qahost on 2026-10-07/08 against a guest made by `y-cluster dockerhost
-provision` on `ycd0` (4 vCPU, 6 GB, 40G), all as above: the guest's qemu owns no host socket; a
-container reaches 1.1.1.1:443 and 9.9.9.9:53 but not the host at 192.168.123.1 or its public address,
-the `yct0` guest, the four private ranges or 169.254.169.254; a published port answers at
-192.168.123.2; both TLS ports refuse plain HTTP, a client without a certificate and one from another
-CA. `TestDockerhost_Tap` itself has not run on the tap yet. The same TLS and refusal checks, and the
-loopback-only host listeners, pass in the test harness (Testing).
+The same TLS and refusal checks, and the loopback-only host listeners, pass in the test harness
+(Testing).
 
 ## One-time root setup
 
 y-cluster never does this: it consumes the tap by name, never runs as root and never changes
-the host's firewall or sysctls. A human runs it once per machine -- on a hardened host, from
-outside the host's own sessions (bots `hardened-host`), since the hardening of a host is not
-changed from inside it.
+the host's firewall or sysctls. A human runs it once per machine, on a hardened host from
+outside the host's own sessions, since the hardening of a host is not changed from inside it.
 
 The guest network must keep:
 
 - no forward from the public interface to the dockerhost guest (no DNAT, no published ports);
-- the guest denied private ranges and the metadata address on egress, as for the cluster guest;
+- the guest denied private ranges and the metadata address on egress;
 - no reach from the dockerhost guest to other guests, or from them to it;
 - no new connections from the guest to the host (replies only), so the host's own services,
   its resolver included, are not reachable from the guest. The host connects to the guest.
 
-### On a hardened host (qahost, bots `hardened-host`)
+### With systemd-networkd and nftables
 
-The `guest_network` role gives one guest (`yct0`) a tap and `table inet guestnat`; the dockerhost
-is a second guest, a development guest that the host baseline #guest-network has to name. Until the
-role takes a second guest, root adds it by hand (on qahost: `ycd0`, gateway `192.168.123.1/24`, guest
-`192.168.123.2`):
+Example for a tap `ycd0`, gateway `192.168.123.1/24`, guest `192.168.123.2`, with `<user>` the
+account that runs the guest.
 
 `/etc/systemd/network/61-ycd0.netdev` (any name)
 
@@ -308,10 +297,9 @@ IPv6AcceptRA=no
 RequiredForOnline=no
 ```
 
-and these lines in `/etc/hardened-host/guestnat.nft`, in the existing chains of
-`table inet guestnat` -- not in a table of their own: guestnat's forward chain has policy drop and
-drops every forwarded packet it does not name, so a second table could accept nothing. This is
-what was applied on qahost on 2026-10-05 (public interface `eth0`):
+On a host that already has an nftables table for guest NAT, add these lines to its existing
+chains rather than a table of their own: when the forward chain has policy drop and drops every
+forwarded packet it does not name, a second table could accept nothing.
 
 ```
   chain postrouting {   # add
@@ -326,15 +314,15 @@ what was applied on qahost on 2026-10-05 (public interface `eth0`):
   }
 ```
 
-then `networkctl reload` and `systemctl reload guestnat`. No DNAT rule: nothing from the public
-interface reaches the dockerhost. The forward chain's policy drop keeps `yct0` and `ycd0` apart in
-both directions. guestnat.service already turns on IPv4 forwarding. `guestnat.nft` is managed by
-the role, so `hh converge` overwrites a hand edit until the role itself takes the second guest.
+then `networkctl reload` and reload the firewall. No DNAT rule: nothing from the public
+interface reaches the dockerhost. The forward chain's policy drop keeps guests on different taps
+apart in both directions. IPv4 forwarding must be on. If the ruleset is managed by a
+configuration tool, make the change there, or the tool overwrites a hand edit.
 
 ### On another Linux machine
 
-`scripts/qemu-tap-host-setup.sh ycd0 10.89.0.1/24` creates a transient tap owned by the invoking
-user (`sudo`), with the gateway address and IPv4 forwarding; for persistence use the
+`scripts/qemu-tap-host-setup.sh ycd0 10.89.0.1/24` creates a transient tap owned by the
+invoking user (`sudo`), with the gateway address and IPv4 forwarding; for persistence use the
 systemd-networkd files above. Without a firewall that already has a forward policy, an own table
 gives the same guarantees:
 
@@ -368,54 +356,50 @@ gateway address on the bridge.
 
 ## Portability rules for consumers
 
-Hold for host Docker, cicd-v1's `tcp://dockerd:2375`, and the dockerhost alike.
+Hold for host Docker, a CI environment's `tcp://dockerd:2375`, and the dockerhost alike.
 
 1. Address containers with `getHost()`/`Host(ctx)` and the mapped port. Never `localhost`/`127.0.0.1`.
 2. No bind mounts of host paths. Copy files in (`withCopyFileToContainer`, `Files:`) or use named
-   volumes and `exec` (checkit `logs/nodes-to-gcs` bans `withBindMounts` in eslint for this reason).
+   volumes and `exec`. A lint rule against `withBindMounts` helps keep this.
 3. Prefer random host ports. A fixed port must be advertised with the daemon's host, not
    localhost, and collides with any concurrent run on the same daemon (and with a run less than
    ~10 s earlier, before Ryuk reaps).
 4. No `host.docker.internal`; use Testcontainers host access.
 5. testcontainers-go host access needs the fix in testcontainers/testcontainers-go#3877 (merged
-   2026-09-04, not in v0.44.0): checkit gateway-v4 pins `v0.44.1-0.20260904110317-daa2901077f5`
-   (checkit #7986).
+   2026-09-04, not in v0.44.0), so a consumer pins a testcontainers-go version that has it.
 
 ## Consumer status (verified against a stand-in daemon, before the guest existed)
 
-| consumer | remote daemon | notes |
+A downstream repository's integration tests were run against a stand-in remote daemon (see
+below). Which of them work follows the rules above:
+
+| kind of test | remote daemon | notes |
 |---|---|---|
-| checkit gateway-v4 controlplane itest | works with #7986 | host 96-103 s, remote 111 s |
-| checkit logs/nodes-to-gcs itest (turbo) | works | 17 s / 20 s |
-| checkit live-v3 build-contract | works unchanged | 212 s / 228 s; images via `contain --tarball` + `docker load` |
-| bots gitea review-workflow itest | works | |
-| y-build (BuildKit over TLS) | works with the y-build-tls branch | keycloak-v3: 173 s TLS vs 178 s plaintext, cold |
-| docker buildx: OCI to client, `--load`, `docker-image://` contexts, `docker save` | works | same timings as host |
-| checkit kube/cautionary-bot itest | fails: Kafka advertised at `localhost:39092` | fix planned (rule 3) |
-| checkit orgsetup-v2 client-js k3s itest | fails: kubeconfig `127.0.0.1:6443`, fixed port | fix planned (rules 1, 3) |
-| checkit live-v3 k3s itest | fails on host Docker too | skipped, never worked |
-| ystack yconverge itest | fails: `docker port` + 127.0.0.1 | rule 1 |
-| bots agentlogs fluentbit e2e | fails: data bind mounts | rule 2; local by design today |
-| Quarkus Dev Services tests (checkit, manual) | not run | fixed localhost ports (45180, 9999, 3306) |
+| Testcontainers suites that follow the rules above, Java, Go and Node | work | timings within a few percent of the host daemon |
+| image builds with `contain --tarball` + `docker load` | work unchanged | |
+| y-build (BuildKit over TLS) | works with a y-build that supports TLS | cold build 173 s over TLS vs 178 s plaintext |
+| docker buildx: OCI to client, `--load`, `docker-image://` contexts, `docker save` | work | same timings as host |
+| a service advertising `localhost:<port>` (a Kafka broker, say) | fails | rule 3 |
+| a k3s container with a kubeconfig for `127.0.0.1:6443` and a fixed port | fails | rules 1, 3 |
+| `docker port` plus 127.0.0.1 | fails | rule 1 |
+| tests with data bind mounts | fail | rule 2 |
+| Quarkus Dev Services tests | not run | fixed localhost ports |
 | k3d / y-cluster docker provider based tests | out of scope | they provision clusters on localhost ports; the qemu provider covers KVM hosts |
 
-The stand-in was dind on host Docker with TLS on a bridge address (`ghcr.io/yolean/dockerd:29.4.1-dind`)
-and `moby/buildkit:v0.33.0` with TLS. The consumers have not yet run against the KVM guest.
+The stand-in was a docker-in-docker daemon on host Docker with TLS on a bridge address, and
+BuildKit v0.33.0 with TLS. The consumers have not yet run against the KVM guest.
 
 ## Open questions
 
-1. Guest network: decided for qahost (`ycd0`, created by hand, to move into bots `hardened-host`).
-   Pending: the host baseline #guest-network naming the development guest.
-2. Timings in a real KVM guest: measured in the test harness on qahost (Testing). Consumer suites
-   against the guest: not yet run.
-3. Guest memory: qemu's resident memory was 1.9 GB after the first boot with a 4 GB guest, the
+1. Consumer suites against the guest: not yet run.
+2. Guest memory: qemu's resident memory was 1.9 GB after the first boot with a 4 GB guest, the
    same after a container run and a build, and 1.0 GB after a restart (Testing). The proof of
    concept measured 1.2 GB idle and 2.9 GB after tests.
-4. Exposure checks on a real guest: passed by hand on qahost (Exposure checks); `TestDockerhost_Tap`
-   pending its first run.
-5. `env` without a guest: decided -- nothing, except `unset` lines for a shell that still carries
+3. Exposure checks on a real guest: pass by hand (Exposure checks); `TestDockerhost_Tap` runs
+   them on a prepared tap.
+4. `env` without a guest: decided -- nothing, except `unset` lines for a shell that still carries
    this dockerhost's own variables.
-6. buildkitd rootful or rootless in the guest: decided -- rootful.
+5. buildkitd rootful or rootless in the guest: decided -- rootful.
 
 ## Testing
 
@@ -438,15 +422,7 @@ directories, no CA key and no client key in the guest), idempotent provision, th
 powering the guest off, `env` after that, the restart from the disk with its image cache, and
 teardown.
 
-Measured on qahost (2026-10-05, 4 GB / 2 vCPU guest, image already downloaded): a new guest
+Measured on a development host (4 GB / 2 vCPU guest, image already downloaded): a new guest
 in 1m23s, of which the first boot (apt install of the pinned packages, the BuildKit download,
 both daemons up) took 52 s; a reused guest in 0.27 s; a restart after the idle reaper in 23 s; a
 cold `docker run busybox` 2 s and a cold `buildctl build` 2 s.
-
-## Evidence
-
-- Inventory of Docker/BuildKit use cases in ~/Yolean/* repos, and the stand-in probe results with
-  logs: devhost `~/Yolean/tmp/dockerhost/` (`INVENTORY.md`, `CONFIRMATIONS.md`, `runs/`). Not
-  in git.
-- The compliance recommendation this builds on, and the compliance review of this design with
-  conditions D-a to D-g: the compliance coordinator's work on qahost. Not in git.
