@@ -115,17 +115,18 @@ func NewProviderConfig(provider string) ProviderConfig {
 // Per-provider Validate() must call validateCommon to enforce the
 // shared invariants (provider discriminator, k3s.version present).
 type CommonConfig struct {
-	Provider     string         `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -> multipass; Linux+/dev/kvm+qemu-system-x86_64 -> qemu; else reachable docker daemon -> docker). Per-provider schemas narrow this to a single literal and keep it required."`
-	Name         string         `yaml:"name,omitempty"         json:"name,omitempty"         jsonschema:"default=y-cluster,description=Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files."`
-	Context      string         `yaml:"context,omitempty"      json:"context,omitempty"      jsonschema:"default=local,description=kubeconfig context name to write."`
-	Memory       string         `yaml:"memory,omitempty"       json:"memory,omitempty"       jsonschema:"default=8192,description=Memory in MB. qemu allocates this to the VM; docker passes it to --memory."`
-	CPUs         string         `yaml:"cpus,omitempty"         json:"cpus,omitempty"         jsonschema:"default=4,description=vCPU count. qemu sets -smp; docker passes --cpus."`
-	K3s          K3sConfig      `yaml:"k3s,omitempty"          json:"k3s,omitempty"          jsonschema:"description=k3s install settings. Defaults track pkg/provision/config/k3s.yaml."`
-	PortForwards []PortForward  `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
-	Registries   Registries     `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
-	Gateway      GatewayConfig  `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
-	Storage      StorageConfig  `yaml:"storage,omitempty"      json:"storage,omitempty"      jsonschema:"description=Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/<ns>_<pvc>) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."`
-	Lifetime     LifetimeConfig `yaml:"lifetime,omitempty"    json:"lifetime,omitempty"     jsonschema:"description=Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."`
+	Provider     string            `yaml:"provider"               json:"provider"               jsonschema:"description=Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -> multipass; Linux+/dev/kvm+qemu-system-x86_64 -> qemu; else reachable docker daemon -> docker). Per-provider schemas narrow this to a single literal and keep it required."`
+	Name         string            `yaml:"name,omitempty"         json:"name,omitempty"         jsonschema:"default=y-cluster,description=Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files."`
+	Context      string            `yaml:"context,omitempty"      json:"context,omitempty"      jsonschema:"default=local,description=kubeconfig context name to write."`
+	Memory       string            `yaml:"memory,omitempty"       json:"memory,omitempty"       jsonschema:"default=8192,description=Memory in MB. qemu allocates this to the VM; docker passes it to --memory."`
+	CPUs         string            `yaml:"cpus,omitempty"         json:"cpus,omitempty"         jsonschema:"default=4,description=vCPU count. qemu sets -smp; docker passes --cpus."`
+	K3s          K3sConfig         `yaml:"k3s,omitempty"          json:"k3s,omitempty"          jsonschema:"description=k3s install settings. Defaults track pkg/provision/config/k3s.yaml."`
+	PortForwards []PortForward     `yaml:"portForwards,omitempty" json:"portForwards,omitempty" jsonschema:"description=Host->guest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server."`
+	Registries   Registries        `yaml:"registries,omitempty"   json:"registries,omitempty"   jsonschema:"description=k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."`
+	Gateway      GatewayConfig     `yaml:"gateway,omitempty"      json:"gateway,omitempty"      jsonschema:"description=Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."`
+	CertManager  CertManagerConfig `yaml:"certManager,omitempty"  json:"certManager,omitempty"  jsonschema:"description=Bundled cert-manager install with y-cluster's CA ClusterIssuer. qemu and docker install it; skip the install entirely (no CRDs / controller / cainjector / webhook / issuers) by setting skip:true. The other providers never install it."`
+	Storage      StorageConfig     `yaml:"storage,omitempty"      json:"storage,omitempty"      jsonschema:"description=Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/<ns>_<pvc>) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."`
+	Lifetime     LifetimeConfig    `yaml:"lifetime,omitempty"    json:"lifetime,omitempty"     jsonschema:"description=Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."`
 }
 
 // LifetimeConfig is the cluster-level cost-control policy. A dev
@@ -282,6 +283,25 @@ type GatewayConfig struct {
 	// 100m/512Mi (proxy), which oversubscribe a 2GB-RAM
 	// appliance node.
 	Resources GatewayResources `yaml:"resources,omitempty" json:"resources,omitempty" jsonschema:"description=Resource requests for the bundled EG install. Defaults: controller 10m/64Mi and proxy 10m/128Mi. Limits are left as upstream sets them."`
+}
+
+// CertManagerConfig controls the bundled cert-manager install
+// (pkg/provision/certmanager): the pinned upstream release and
+// y-cluster's issuers, a self-signed CA ClusterIssuer for in-cluster
+// certificates. One knob:
+//
+//   - skip: false (default)  install cert-manager and the issuers
+//   - skip: true             no cert-manager CRDs, deployments, or issuers
+//
+// qemu and docker install it. multipass, hetzner and glesys never do,
+// so skip:true holds on every provider and the key stays portable.
+type CertManagerConfig struct {
+	// Skip omits the entire install. Useful for test clusters that
+	// issue no certificates: saves the release manifest download, three
+	// image pulls and the rollout and CA waits. Workloads that create
+	// cert-manager resources, or reference y-cluster's CA issuer, fail
+	// to apply on such a cluster.
+	Skip bool `yaml:"skip,omitempty" json:"skip,omitempty" jsonschema:"description=If true the cert-manager install is skipped entirely: no CRDs / controller / cainjector / webhook and no y-cluster issuers."`
 }
 
 // GatewayResources groups the two pods whose resource requests

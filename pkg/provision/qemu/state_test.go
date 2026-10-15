@@ -16,6 +16,7 @@ var configFieldsNotPersisted = map[string]string{
 	"Kubeconfig":   "environmental; re-resolved from $KUBECONFIG on load",
 	"Registries":   "cluster state; written into the guest at provision",
 	"Gateway":      "cluster state; installed into the cluster at provision",
+	"CertManager":  "cluster state; installed into the cluster at provision",
 	"Storage":      "cluster state; installed into the cluster at provision",
 	"DataDiskSize": "only used to create a missing data disk at provision",
 }

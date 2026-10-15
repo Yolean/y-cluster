@@ -308,10 +308,15 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	// On macOS docker is the provider for the local dev clusters that qemu
 	// provisions on Linux, and they converge the same workloads, whose
 	// certificates come from y-cluster's CA issuer.
-	if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
-		return nil, fmt.Errorf("install cert-manager: %w", err)
+	// Skipped wholesale when certManager.skip is set in cluster config.
+	if cfg.CertManager.Skip {
+		logger.Info("cert-manager install skipped (certManager.skip)")
+	} else {
+		if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
+			return nil, fmt.Errorf("install cert-manager: %w", err)
+		}
+		logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 	}
-	logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 
 	return c, nil
 }

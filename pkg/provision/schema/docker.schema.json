@@ -1,11 +1,25 @@
 {
   "$defs": {
+    "CertManagerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "skip": {
+          "description": "If true the cert-manager install is skipped entirely: no CRDs / controller / cainjector / webhook and no y-cluster issuers.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "DockerConfig": {
       "additionalProperties": false,
       "properties": {
         "bindAddress": {
           "description": "IPv4 address the host port forwards (portForwards) listen on. Default 127.0.0.1. 0.0.0.0 exposes them on every interface of the host.",
           "type": "string"
+        },
+        "certManager": {
+          "$ref": "#/$defs/CertManagerConfig",
+          "description": "Bundled cert-manager install with y-cluster's CA ClusterIssuer. qemu and docker install it; skip the install entirely (no CRDs / controller / cainjector / webhook / issuers) by setting skip:true. The other providers never install it."
         },
         "context": {
           "default": "local",

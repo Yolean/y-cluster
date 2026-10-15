@@ -2,7 +2,8 @@
 
 // docker e2e. Provisions a k3s cluster via the new
 // docker provisioner, asserts that the merged kubeconfig works,
-// then tears down. Gated on `docker info` succeeding.
+// then tears down. Requires a Docker daemon and KUBECONFIG, and fails
+// without them (see requireDocker).
 package e2e
 
 import (
@@ -18,6 +19,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Yolean/y-cluster/pkg/provision/certmanager"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
 	"github.com/Yolean/y-cluster/pkg/provision/docker"
 	"github.com/Yolean/y-cluster/pkg/yconverge"
@@ -48,18 +50,71 @@ func e2eDockerConfig(name, apiPort, ctxName string) *config.DockerConfig {
 	return c
 }
 
-func skipIfNoDocker(t *testing.T) {
+// requireDocker fails the test when this host cannot run it, and
+// returns the kubeconfig the test's cluster context goes to.
+//
+// The docker build tag is the opt-in to these tests: CI's e2e job and
+// test.sh set it only where a Docker daemon runs, and give the run a
+// throwaway KUBECONFIG. A host that sets the tag and lacks either is
+// misconfigured, and a skip would hide it -- the CI job once ran none of
+// these tests for want of KUBECONFIG, and its log still read ok. So the
+// tests fail instead. KUBECONFIG stays required rather than defaulted so
+// that no test writes contexts to a kubeconfig nobody named.
+func requireDocker(t *testing.T) string {
+	t.Helper()
+	requireDockerDaemon(t)
+	kcfgPath := os.Getenv("KUBECONFIG")
+	if kcfgPath == "" {
+		t.Fatal("the docker build tag is set but KUBECONFIG is not; point it at a throwaway file, which the tests write their cluster contexts to")
+	}
+	return kcfgPath
+}
+
+// requireDockerDaemon is requireDocker's daemon half, for a test that
+// brings its own throwaway KUBECONFIG.
+func requireDockerDaemon(t *testing.T) {
 	t.Helper()
 	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("docker tests require a working Docker daemon")
+		t.Fatalf("the docker build tag is set but `docker info` fails (%v); run these tests where a Docker daemon runs", err)
 	}
 	if err := docker.CheckPrerequisites(); err != nil {
-		t.Skipf("docker prerequisite failed: %v", err)
+		t.Fatalf("docker prerequisite failed: %v", err)
 	}
 }
 
+// dockerProvisionTimeout bounds one docker.Provision from cold: the k3s
+// image pull and start, local-path-provisioner, Envoy Gateway, and
+// cert-manager (the release manifest from GitHub, three images from
+// quay.io, three rollouts, the issuers and the CA certificate).
+//
+// Measured on a 4-vCPU guest with an empty image store and cache: 80s,
+// of which k3s with its image pull 19s, local-path-provisioner and
+// Envoy Gateway 45s, cert-manager 16s; 48s with certManager.skip. The
+// bound leaves a slow registry or runner several times that, without
+// waiting out every one of cert-manager's own 3-minute ready timeouts.
+const dockerProvisionTimeout = 10 * time.Minute
+
+// provisionDocker provisions cfg under dockerProvisionTimeout, logs how
+// long it took, and tears the cluster down when the test ends.
+func provisionDocker(t *testing.T, cfg *config.DockerConfig, logger *zap.Logger) *docker.Cluster {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), dockerProvisionTimeout)
+	defer cancel()
+	started := time.Now()
+	cluster, err := docker.Provision(ctx, *cfg, logger)
+	if err != nil {
+		t.Fatalf("provision %s after %s: %v", cfg.Name, time.Since(started).Round(time.Second), err)
+	}
+	t.Logf("provisioned %s in %s", cfg.Name, time.Since(started).Round(time.Second))
+	// Teardown removes the container even after Stop -- ContainerRemove
+	// is force=true -- so a Stop-without-Teardown regression doesn't
+	// leak a stopped container into the next test.
+	t.Cleanup(func() { _ = cluster.Teardown(false) })
+	return cluster
+}
+
 func TestDocker_ProvisionTeardown(t *testing.T) {
-	skipIfNoDocker(t)
+	kcfgPath := requireDocker(t)
 
 	logger, _ := zap.NewDevelopment()
 	cfg := e2eDockerConfig("y-cluster-e2e-k3s", "36443", "y-cluster-e2e-k3s")
@@ -93,11 +148,6 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 		},
 	}
 
-	kcfgPath := os.Getenv("KUBECONFIG")
-	if kcfgPath == "" {
-		t.Skip("KUBECONFIG must be set")
-	}
-
 	// Clean any leftover container from a previous failed run.
 	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
 
@@ -115,14 +165,10 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 		_ = exec.Command("docker", "rmi", "-f", img).Run()
 	}
 
+	cluster := provisionDocker(t, cfg, logger)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-
-	cluster, err := docker.Provision(ctx, *cfg, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cluster.Teardown(false) })
 
 	// Sanity: NodeExec works.
 	out, err := cluster.NodeExec(ctx, "k3s --version | head -1", nil)
@@ -183,6 +229,17 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 	// detect / ctr / crictl must work against the running
 	// cluster via the merged kubeconfig context.
 	assertClusterFeatures(t, cluster.Context(), "docker")
+
+	// cert-manager is installed by default: y-cluster's CA ClusterIssuer
+	// is Ready, which needs the controller, the webhook and the CA
+	// certificate it signs with.
+	ci := exec.CommandContext(ctx, "kubectl", "--context="+cluster.Context(),
+		"get", "clusterissuer", certmanager.CAIssuer,
+		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+	ci.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+	if ciOut, err := ci.CombinedOutput(); err != nil || strings.TrimSpace(string(ciOut)) != "True" {
+		t.Fatalf("ClusterIssuer %s Ready: %q (%v)", certmanager.CAIssuer, ciOut, err)
+	}
 
 	// PortForwards regression: the extra 38080->8080 forward we
 	// added above must show up in `docker port`. We don't ping the
@@ -263,7 +320,7 @@ func assertVolumesGone(t *testing.T, volumes []string) {
 // It needs no KUBECONFIG from the caller: the cluster never becomes
 // usable, so it gets a throwaway one.
 func TestDocker_FailedProvisionRemovesContainer(t *testing.T) {
-	skipIfNoDocker(t)
+	requireDockerDaemon(t)
 
 	logger, _ := zap.NewDevelopment()
 	cfg := e2eDockerConfig("y-cluster-e2e-failprov", "36446", "y-cluster-e2e-failprov")
@@ -330,30 +387,37 @@ func TestDocker_FailedProvisionRemovesContainer(t *testing.T) {
 //     (NOT removed; that's Teardown's job)
 //   - kubectl through the merged context fails to reach the apiserver
 //     because the host port forward is gone
+//
+// The cluster is provisioned with certManager.skip, and the test checks
+// that cert-manager is absent before it stops the container.
 func TestDocker_Stop(t *testing.T) {
-	skipIfNoDocker(t)
+	kcfgPath := requireDocker(t)
 
 	logger, _ := zap.NewDevelopment()
 	cfg := e2eDockerConfig("y-cluster-e2e-stop", "36444", "y-cluster-e2e-stop")
-
-	kcfgPath := os.Getenv("KUBECONFIG")
-	if kcfgPath == "" {
-		t.Skip("KUBECONFIG must be set")
-	}
+	// Stop needs no certificates; this cluster also covers
+	// certManager.skip, at no extra provision.
+	cfg.CertManager.Skip = true
 
 	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
+
+	cluster := provisionDocker(t, cfg, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cluster, err := docker.Provision(ctx, *cfg, logger)
-	if err != nil {
-		t.Fatal(err)
+	// certManager.skip: no cert-manager namespace, no CRDs.
+	for _, args := range [][]string{
+		{"get", "namespace", certmanager.Namespace},
+		{"get", "crd", "clusterissuers.cert-manager.io"},
+	} {
+		kc := exec.CommandContext(ctx, "kubectl", append([]string{"--context=" + cluster.Context()}, args...)...)
+		kc.Env = append(os.Environ(), "KUBECONFIG="+kcfgPath)
+		out, err := kc.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "NotFound") {
+			t.Fatalf("certManager.skip: kubectl %s: want NotFound, got %q (%v)", strings.Join(args, " "), out, err)
+		}
 	}
-	// Teardown removes the container even after Stop -- ContainerRemove
-	// is force=true. Cleanup is unconditional so a Stop-without-Teardown
-	// regression doesn't leak a stopped container into the next test.
-	t.Cleanup(func() { _ = cluster.Teardown(false) })
 
 	// Stop the running container. docker.Stop preserves the container
 	// for a follow-up start; it should NOT remove it.
@@ -393,26 +457,18 @@ func TestDocker_Stop(t *testing.T) {
 // Doubles as the only consumer of testdata/appliance-stateful/, which
 // the PR ships referenced only by an export.go comment otherwise.
 func TestDocker_ApplianceStateful(t *testing.T) {
-	skipIfNoDocker(t)
+	kcfgPath := requireDocker(t)
 
 	logger, _ := zap.NewDevelopment()
 	cfg := e2eDockerConfig("y-cluster-e2e-appstate", "36445", "y-cluster-e2e-appstate")
 
-	kcfgPath := os.Getenv("KUBECONFIG")
-	if kcfgPath == "" {
-		t.Skip("KUBECONFIG must be set")
-	}
-
 	_ = exec.Command("docker", "rm", "-f", cfg.Name).Run()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
+	cluster := provisionDocker(t, cfg, logger)
 
-	cluster, err := docker.Provision(ctx, *cfg, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cluster.Teardown(false) })
+	// The converge below waits up to 180s for the StatefulSet rollout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	// Resolve testdata path relative to this test file.
 	wd, err := os.Getwd()
