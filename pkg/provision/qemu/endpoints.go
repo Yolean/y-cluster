@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 
 	"github.com/Yolean/y-cluster/pkg/provision/config"
-	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -73,7 +72,7 @@ func (c Config) SSHCommand() string {
 
 // apiAddress is the apiserver address for the host's kubeconfig. TLS
 // validates against it because k3s lists 127.0.0.1 among its serving
-// cert SANs by default and k3sServerFlags adds any other APIHost.
+// cert SANs by default and K3sBundleSpec adds any other APIHost.
 func (e endpoints) apiAddress() (string, error) {
 	if e.APIPort == "" {
 		return "", fmt.Errorf("portForwards has no guest:6443 entry; cannot reach k3s API")
@@ -97,18 +96,6 @@ func netdevArg(cfg Config) string {
 		netdev += fmt.Sprintf(",hostfwd=tcp:%s:%s-:%s", cfg.BindAddress, pf.Host, pf.Guest)
 	}
 	return netdev
-}
-
-// k3sServerFlags is the INSTALL_K3S_EXEC value. The kubeconfig
-// written on the host names the apiserver by APIHost. k3s only puts
-// 127.0.0.1 and the node's own addresses in its serving cert, so any
-// other host address has to be added as a SAN.
-func k3sServerFlags(e endpoints) string {
-	extra := append([]string{}, k3s.CiliumFlags...)
-	if e.APIHost != "127.0.0.1" {
-		extra = append(extra, "--tls-san="+e.APIHost)
-	}
-	return k3s.ServerFlags(extra...)
 }
 
 const netdevID = "net0"
