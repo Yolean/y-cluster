@@ -16,15 +16,14 @@ func writeConfig(t *testing.T, content string) string {
 	return path
 }
 
-// The values of qahost's guest network,
-// as an operator would write them.
-const qahostConfig = `network:
+// Example values of a guest network, as an operator would write them.
+const exampleHostConfig = `network:
   ifname: ycd0
   guestAddress: 192.168.123.2/24
 `
 
 func TestLoadConfig_DefaultsAndTap(t *testing.T) {
-	c, err := LoadConfig(writeConfig(t, qahostConfig))
+	c, err := LoadConfig(writeConfig(t, exampleHostConfig))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,14 +63,14 @@ func TestLoadConfig_Errors(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
 		{"no file", "", "does not exist"},
 		{"no network", "memory: 4096\n", "network.ifname and network.guestAddress are required"},
-		{"unknown key", qahostConfig + "memroy: 4096\n", "memroy"},
+		{"unknown key", exampleHostConfig + "memroy: 4096\n", "memroy"},
 		{"address without prefix", "network: {ifname: ycd0, guestAddress: 192.168.123.2}\n", "guestAddress"},
 		{"gateway outside subnet", "network: {ifname: ycd0, guestAddress: 192.168.123.2/24, gateway: 192.168.124.1}\n", "outside"},
 		{"bad ifname", "network: {ifname: 'a b', guestAddress: 192.168.123.2/24}\n", "not a valid interface name"},
-		{"max age too long", qahostConfig + "maxAge: 2000h\n", "at most"},
-		{"max age unparseable", qahostConfig + "maxAge: 14d\n", "maxAge"},
-		{"idle too short", qahostConfig + "idleTimeout: 1m\n", "at least"},
-		{"too little memory", qahostConfig + "memory: 512\n", "1024"},
+		{"max age too long", exampleHostConfig + "maxAge: 2000h\n", "at most"},
+		{"max age unparseable", exampleHostConfig + "maxAge: 14d\n", "maxAge"},
+		{"idle too short", exampleHostConfig + "idleTimeout: 1m\n", "at least"},
+		{"too little memory", exampleHostConfig + "memory: 512\n", "1024"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "missing.yaml")
@@ -87,7 +86,7 @@ func TestLoadConfig_Errors(t *testing.T) {
 }
 
 func TestLoadConfig_IdleReaperOff(t *testing.T) {
-	c, err := LoadConfig(writeConfig(t, qahostConfig+"idleTimeout: \"0\"\n"))
+	c, err := LoadConfig(writeConfig(t, exampleHostConfig+"idleTimeout: \"0\"\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,7 @@ func TestPublishHost(t *testing.T) {
 	for host, want := range map[string]string{
 		"":                            "127.0.0.1",
 		"unix:///var/run/docker.sock": "127.0.0.1",
-		"tcp://192.168.123.2:2376":        "192.168.123.2",
+		"tcp://192.168.123.2:2376":    "192.168.123.2",
 		"tcp://dockerd:2375":          "dockerd",
 		"ssh://user@host":             "127.0.0.1",
 	} {

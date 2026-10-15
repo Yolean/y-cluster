@@ -34,7 +34,7 @@ func TestConfigTags_YAMLAndJSONNamesAgree(t *testing.T) {
 			}
 		}
 	}
-	for _, cfg := range []any{QEMUConfig{}, DockerConfig{}, MultipassConfig{}, HetznerConfig{}} {
+	for _, cfg := range []any{QEMUConfig{}, DockerConfig{}, MultipassConfig{}, HetznerConfig{}, HostConfig{}} {
 		typ := reflect.TypeOf(cfg)
 		walk(t, typ, typ.Name())
 	}

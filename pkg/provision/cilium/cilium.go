@@ -42,8 +42,10 @@ var k3sManifest []byte
 // containerd looks for CNI plugins once k3s runs without flannel
 // (/opt/cni/bin, containerd's default). The target is k3s's own
 // per-plugin symlink, which k3s repoints on upgrade; the plugin is a
-// multi-call binary that dispatches on the name it is run as.
-const K3sPortmapCommand = "sudo mkdir -p /opt/cni/bin && sudo ln -sfn /var/lib/rancher/k3s/data/cni/portmap /opt/cni/bin/portmap"
+// multi-call binary that dispatches on the name it is run as. The link
+// may be made before k3s has unpacked its data dir. It runs as root:
+// a k3s node bundle lists it as a post-install command.
+const K3sPortmapCommand = "mkdir -p /opt/cni/bin && ln -sfn /var/lib/rancher/k3s/data/cni/portmap /opt/cni/bin/portmap"
 
 // Manifest returns the embedded manifest of a variant.
 func Manifest(v Variant) ([]byte, error) {

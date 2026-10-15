@@ -1,0 +1,333 @@
+{
+  "$defs": {
+    "CertManagerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "skip": {
+          "description": "If true the cert-manager install is skipped entirely: no CRDs / controller / cainjector / webhook and no y-cluster issuers.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GatewayConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "className": {
+          "description": "GatewayClass name. Default y-cluster. Consumer Gateway resources reference this via gatewayClassName. Ignored and left empty when skip is true.",
+          "type": "string"
+        },
+        "dnsHintIP": {
+          "description": "Provider host only. The IP address at which clients reach ports 80 and 443 of the host (the node's own address or that of a NAT in front of it which keeps the client address). Published on the GatewayClass as the yolean.se/dns-hint-ip annotation; empty publishes none. The other providers derive it from their port forwards.",
+          "type": "string"
+        },
+        "resources": {
+          "$ref": "#/$defs/GatewayResources",
+          "description": "Resource requests for the bundled EG install. Defaults: controller 10m/64Mi and proxy 10m/128Mi. Limits are left as upstream sets them."
+        },
+        "skip": {
+          "description": "If true the Envoy Gateway install is skipped entirely. k3s still runs with --disable=traefik.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GatewayResources": {
+      "additionalProperties": false,
+      "properties": {
+        "controller": {
+          "$ref": "#/$defs/ResourceRequests",
+          "description": "EG controller container requests. Default cpu 10m and memory 64Mi."
+        },
+        "proxy": {
+          "$ref": "#/$defs/ResourceRequests",
+          "description": "Per-Gateway envoy proxy container requests. Default cpu 10m and memory 128Mi."
+        }
+      },
+      "type": "object"
+    },
+    "HostConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "default": "amd64",
+          "description": "CPU architecture of the node: which k3s binary and airgap images the bundle carries. Applying a bundle checks it against the node.",
+          "enum": [
+            "amd64",
+            "arm64"
+          ],
+          "type": "string"
+        },
+        "certManager": {
+          "$ref": "#/$defs/CertManagerConfig",
+          "description": "Bundled cert-manager install with y-cluster's CA ClusterIssuer. qemu and docker install it; skip the install entirely (no CRDs / controller / cainjector / webhook / issuers) by setting skip:true. The other providers never install it."
+        },
+        "context": {
+          "default": "local",
+          "description": "kubeconfig context name to write.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": "4",
+          "description": "vCPU count. qemu sets -smp; docker passes --cpus.",
+          "type": "string"
+        },
+        "gateway": {
+          "$ref": "#/$defs/GatewayConfig",
+          "description": "Bundled Envoy Gateway install. Skip the install entirely (no CRDs / controller / GatewayClass) by setting skip:true; rename the default GatewayClass via name."
+        },
+        "k3s": {
+          "$ref": "#/$defs/K3sConfig",
+          "description": "k3s install settings. Defaults track pkg/provision/config/k3s.yaml."
+        },
+        "lifetime": {
+          "$ref": "#/$defs/LifetimeConfig",
+          "description": "Cost-control auto-expiry. maxRun sets a wall-clock budget counted from when the cluster STARTS (not from provision); on expiry a local cluster runs onExpiry (stop by default) and a GCP appliance is deleted by GCP-native max-run-duration. Empty maxRun disables."
+        },
+        "memory": {
+          "default": "8192",
+          "description": "Memory in MB. qemu allocates this to the VM; docker passes it to --memory.",
+          "type": "string"
+        },
+        "name": {
+          "default": "y-cluster",
+          "description": "Cluster instance identifier; used as the docker container name / qemu -name / kubeconfig cluster name / prefix for cache files.",
+          "type": "string"
+        },
+        "portForwards": {
+          "description": "Host-\u003eguest TCP port forwards. Defaults to 6443/80/443 when omitted. Must include a guest:6443 entry so the host's kubectl can reach the API server.",
+          "items": {
+            "$ref": "#/$defs/PortForward"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "const": "host",
+          "description": "Provisioner to use. Optional in the common schema -- when omitted at provision time the host is probed (multipass daemon reachable -\u003e multipass; Linux+/dev/kvm+qemu-system-x86_64 -\u003e qemu; else reachable docker daemon -\u003e docker). Per-provider schemas narrow this to a single literal and keep it required.",
+          "type": "string"
+        },
+        "registries": {
+          "$ref": "#/$defs/Registries",
+          "description": "k3s registries.yaml content. Written to /etc/rancher/k3s/registries.yaml on the node before k3s starts. ${VAR} substitution is supported on credential and endpoint fields."
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig",
+          "description": "Bundled local-path-provisioner install. Defaults give a predictable on-disk layout (/data/yolean/\u003cns\u003e_\u003cpvc\u003e) and Retain reclaim so PV content survives PVC delete and an appliance upgrade rebinds the same directory by name."
+        },
+        "tlsSANs": {
+          "description": "Addresses (IPs or DNS names) besides 127.0.0.1 and the node's own interface addresses at which clients reach the k3s API. They go into the bundle's config.yaml as tls-san. 127.0.0.1 covers an ssh tunnel to the node.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "K3sConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "install": {
+          "default": "airgap",
+          "description": "Install strategy. airgap copies the k3s binary and its images and installer from the host cache to the node; script has the installer download the release binary on the node (on multipass and hetzner the node fetches the installer too). Default airgap on qemu and script on multipass; hetzner and glesys accept script only; docker runs the k3s image and ignores this.",
+          "enum": [
+            "airgap",
+            "script"
+          ],
+          "type": "string"
+        },
+        "serverConfig": {
+          "description": "qemu and host only. Additional k3s server settings in config.yaml form (flag names without dashes; values are strings or booleans or lists of strings) merged over y-cluster's: a key y-cluster sets as a default (write-kubeconfig-mode) is replaced; disable and tls-san entries are appended; flannel-backend and disable-network-policy and data-dir and write-kubeconfig and https-listen-port are refused because the platform depends on them. Example: {secrets-encryption: true}.",
+          "type": "object"
+        },
+        "version": {
+          "default": "v1.37.0+k3s1",
+          "description": "k3s release version e.g. vX.Y.Z+k3sN.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "LifetimeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "maxRun": {
+          "description": "Wall-clock budget as a Go duration such as 8h or 90m. Counted from cluster start. Empty disables auto-expiry.",
+          "type": "string"
+        },
+        "onExpiry": {
+          "default": "stop",
+          "description": "Local action on expiry. Ignored on the GCP appliance path (always deletes the instance).",
+          "enum": [
+            "stop",
+            "pause",
+            "teardown"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PortForward": {
+      "additionalProperties": false,
+      "properties": {
+        "guest": {
+          "description": "Guest port to forward to.",
+          "type": "string"
+        },
+        "host": {
+          "description": "Host port. docker: an empty string lets docker pick one. qemu: required; qemu rejects a forward without a host port.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "guest"
+      ],
+      "type": "object"
+    },
+    "Registries": {
+      "additionalProperties": false,
+      "properties": {
+        "configs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RegistryConfig"
+          },
+          "description": "Per-host TLS and auth settings. Keys match the registry hostname (the original host or a mirror endpoint host).",
+          "type": "object"
+        },
+        "mirrors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RegistryMirror"
+          },
+          "description": "Per-host mirror redirects. Keys are the original registry hostname requested by containerd.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryAuth": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "description": "Pre-encoded Authorization header; ${VAR} supported.",
+          "type": "string"
+        },
+        "identitytoken": {
+          "description": "Bearer identity token; ${VAR} supported.",
+          "type": "string"
+        },
+        "password": {
+          "description": "Basic auth password; ${VAR} supported. Common pattern: oauth2accesstoken with ${GCP_ACCESS_TOKEN}.",
+          "type": "string"
+        },
+        "username": {
+          "description": "Basic auth username; ${VAR} supported.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/RegistryAuth",
+          "description": "Username/password or token credentials for this host."
+        },
+        "tls": {
+          "$ref": "#/$defs/RegistryTLS",
+          "description": "Client TLS settings for this host."
+        }
+      },
+      "type": "object"
+    },
+    "RegistryMirror": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "description": "Mirror endpoints to try in order. ${VAR} substitution supported.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rewrite": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Regex rewrite rules applied to the request path before forwarding to the mirror.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryTLS": {
+      "additionalProperties": false,
+      "properties": {
+        "ca_file": {
+          "description": "Path to CA file on the node.",
+          "type": "string"
+        },
+        "cert_file": {
+          "description": "Path to client cert file on the node.",
+          "type": "string"
+        },
+        "insecure_skip_verify": {
+          "description": "Disable TLS verification for this host. Off by default.",
+          "type": "boolean"
+        },
+        "key_file": {
+          "description": "Path to client key file on the node.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ResourceRequests": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "description": "CPU request in Kubernetes notation (e.g. 10m or 0.5 or 1).",
+          "type": "string"
+        },
+        "memory": {
+          "description": "Memory request in Kubernetes notation (e.g. 64Mi or 256Mi or 1Gi).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "StorageConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "/data/yolean",
+          "description": "Root directory under which local-path-provisioner allocates one subdirectory per PV. Customers who attach a separate data disk should mount it here.",
+          "type": "string"
+        },
+        "pathPattern": {
+          "default": "{{ .PVC.Namespace }}_{{ .PVC.Name }}",
+          "description": "Per-PV subdirectory template (Go text/template; vars: .PVName / .PVC.Namespace / .PVC.Name / .PVC.UID). Drop .PVName for predictable upgrade rebinding; keep it if you need uniqueness across PVC delete+recreate cycles under Retain.",
+          "type": "string"
+        },
+        "reclaimPolicy": {
+          "default": "Retain",
+          "description": "Reclaim policy on the y-cluster StorageClass. Retain preserves PV directories on PVC delete; Delete (the upstream k3s default) wipes them.",
+          "enum": [
+            "Retain",
+            "Delete"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/Yolean/y-cluster/pkg/provision/config/host-config",
+  "$ref": "#/$defs/HostConfig",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

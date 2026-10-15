@@ -39,8 +39,7 @@ import (
 // a docker run and a buildctl build, idempotent provision, the idle
 // reaper powering the guest off, and the restart from its disk.
 //
-// TestDockerhost_Tap is the product path and the exposure checks of the
-// compliance review (D-e). It needs the tap that root prepared
+// TestDockerhost_Tap is the product path and the exposure checks. It needs the tap that root prepared
 // (DOCKERHOST.md, One-time root setup) and skips without:
 //
 //	Y_CLUSTER_E2E_DOCKERHOST_IFNAME=ycd0 Y_CLUSTER_E2E_DOCKERHOST_GUEST_ADDRESS=192.168.123.2/24 \
@@ -156,7 +155,7 @@ func guestExec(t *testing.T, dir, command string) string {
 	return string(out)
 }
 
-// assertRefusesWithoutCertificate checks D-b and D-e: both ports talk
+// assertRefusesWithoutCertificate checks that both ports talk
 // TLS only, and only to a client with a certificate from the guest's
 // CA.
 func assertRefusesWithoutCertificate(t *testing.T, address, dockerPort, buildkitPort, clientDir string) {
@@ -524,7 +523,7 @@ func freePorts(t *testing.T, n int) []string {
 }
 
 // TestDockerhost_Tap is the product path on a prepared tap, with the
-// exposure checks of the compliance review (D-e): what the host
+// exposure checks: what the host
 // listens on, what a container in the guest reaches, and both TLS
 // ports refusing a client without a certificate. Its log is the
 // record of the checks.
@@ -575,9 +574,9 @@ func TestDockerhost_Tap(t *testing.T) {
 	pid, _ := qemu.GuestPID(vmDir, "dockerhost")
 	logGuestMemory(t, "after provision", pid)
 
-	// D-e: nothing new listens on the host's wildcard; qemu on a tap
+	// Nothing new listens on the host's wildcard; qemu on a tap
 	// listens on nothing at all. Other processes on a shared host come and
-	// go meanwhile (on qahost a user-mode qemu guest opened a udp socket on
+	// go meanwhile (on one host a user-mode qemu guest opened a udp socket on
 	// 0.0.0.0 during the first run), so a new wildcard listener fails the
 	// test only when it is this test's or the guest's; others are logged.
 	after := hostListeners(t)
@@ -611,7 +610,7 @@ func TestDockerhost_Tap(t *testing.T) {
 	if want := "tcp://" + guestIP.String() + ":8547"; vars["BUILDKIT_HOST"] != want {
 		t.Errorf("BUILDKIT_HOST=%q, want %q", vars["BUILDKIT_HOST"], want)
 	}
-	// D-e: both TLS ports refuse a client without a certificate.
+	// Both TLS ports refuse a client without a certificate.
 	assertRefusesWithoutCertificate(t, guestIP.String(), dockerhost.DockerPort, dockerhost.BuildkitPort, vars["DOCKER_CERT_PATH"])
 
 	env := clientEnv(vars)
@@ -640,7 +639,7 @@ func TestDockerhost_Tap(t *testing.T) {
 	}
 	_, _ = runClient(t, env, docker, "rm", "-f", "e2e-published")
 
-	// D-e: what a container in the guest reaches. The positive control
+	// What a container in the guest reaches. The positive control
 	// proves the probe works and egress through the host's NAT is open,
 	// so the refusals below are the filter's.
 	probe := func(host, port string) bool {

@@ -31,7 +31,7 @@ func readyState() State {
 	}
 }
 
-func qahost() Config {
+func exampleHost() Config {
 	c := Config{Network: Network{Ifname: "ycd0", GuestAddress: "192.168.123.2/24"}}
 	c.ApplyDefaults()
 	return c
@@ -47,12 +47,12 @@ func TestDecideExisting(t *testing.T) {
 	otherPins.Pins.Docker = "29.0.0"
 	notReady := st
 	notReady.ReadyAt = time.Time{}
-	bigger := qahost()
+	bigger := exampleHost()
 	bigger.MemoryMB = 8192
-	moved := qahost()
-	moved.Network.GuestAddress = "192.168.124.2/24"
+	moved := exampleHost()
+	moved.Network.GuestAddress = "10.88.2.2/24"
 	moved.ApplyDefaults()
-	longer := qahost()
+	longer := exampleHost()
 	longer.IdleTimeout = "12h"
 
 	for _, tc := range []struct {
@@ -65,19 +65,19 @@ func TestDecideExisting(t *testing.T) {
 		want    action
 		reason  string
 	}{
-		{"healthy candidate", st, qahost(), true, young, false, actReuse, ""},
+		{"healthy candidate", st, exampleHost(), true, young, false, actReuse, ""},
 		{"limits are not drift", st, longer, true, young, false, actReuse, ""},
-		{"powered off by the reaper", st, qahost(), false, young, false, actRestart, "stopped"},
-		{"first boot never finished", notReady, qahost(), true, young, false, actReplace, "first boot"},
+		{"powered off by the reaper", st, exampleHost(), false, young, false, actRestart, "stopped"},
+		{"first boot never finished", notReady, exampleHost(), true, young, false, actReplace, "first boot"},
 		{"more memory", st, bigger, true, young, true, actReplace, "size"},
 		{"another address", st, moved, true, young, true, actReplace, "network"},
-		{"past max age, idle", st, qahost(), true, old, false, actReplace, "past the maximum age"},
-		{"past max age, in use", st, qahost(), true, old, true, actReuse, "past the maximum age"},
-		{"past max age, stopped", st, qahost(), false, old, false, actReplace, "past the maximum age"},
-		{"a day past max age, in use", st, qahost(), true, ancient, true, actReplace, "a day past"},
-		{"new pins, idle", otherPins, qahost(), true, young, false, actReplace, "pins"},
-		{"new pins, in use", otherPins, qahost(), true, young, true, actReuse, "pins"},
-		{"new pins, stopped", otherPins, qahost(), false, young, false, actReplace, "pins"},
+		{"past max age, idle", st, exampleHost(), true, old, false, actReplace, "past the maximum age"},
+		{"past max age, in use", st, exampleHost(), true, old, true, actReuse, "past the maximum age"},
+		{"past max age, stopped", st, exampleHost(), false, old, false, actReplace, "past the maximum age"},
+		{"a day past max age, in use", st, exampleHost(), true, ancient, true, actReplace, "a day past"},
+		{"new pins, idle", otherPins, exampleHost(), true, young, false, actReplace, "pins"},
+		{"new pins, in use", otherPins, exampleHost(), true, young, true, actReuse, "pins"},
+		{"new pins, stopped", otherPins, exampleHost(), false, young, false, actReplace, "pins"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asked := false

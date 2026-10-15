@@ -192,18 +192,3 @@ func TestVMArgs(t *testing.T) {
 		}
 	})
 }
-
-// The host kubeconfig names the apiserver by APIHost, so an APIHost
-// k3s would not put in its serving cert by itself needs a SAN.
-func TestK3sServerFlags(t *testing.T) {
-	base := "--write-kubeconfig-mode=644 --disable=traefik --disable=local-storage --disable=gateway-api-crd --flannel-backend=none --disable-network-policy"
-	if got := k3sServerFlags(Config{BindAddress: "127.0.0.1"}.endpoints()); got != base {
-		t.Errorf("loopback: %q", got)
-	}
-	if got := k3sServerFlags(Config{BindAddress: "0.0.0.0"}.endpoints()); got != base {
-		t.Errorf("wildcard is dialed over loopback: %q", got)
-	}
-	if got := k3sServerFlags(Config{BindAddress: "192.168.1.10"}.endpoints()); got != base+" --tls-san=192.168.1.10" {
-		t.Errorf("specific address: %q", got)
-	}
-}

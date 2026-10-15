@@ -22,12 +22,8 @@ import (
 	"github.com/Yolean/y-cluster/pkg/cache"
 	"github.com/Yolean/y-cluster/pkg/kubeconfig"
 	"github.com/Yolean/y-cluster/pkg/provision"
-	"github.com/Yolean/y-cluster/pkg/provision/certmanager"
-	"github.com/Yolean/y-cluster/pkg/provision/cilium"
 	"github.com/Yolean/y-cluster/pkg/provision/config"
-	"github.com/Yolean/y-cluster/pkg/provision/envoygateway"
-	"github.com/Yolean/y-cluster/pkg/provision/localstorage"
-	"github.com/Yolean/y-cluster/pkg/provision/registries"
+	"github.com/Yolean/y-cluster/pkg/provision/platform"
 	"github.com/Yolean/y-cluster/pkg/sshexec"
 )
 
@@ -94,6 +90,11 @@ type Config struct {
 type K3s struct {
 	Version string
 	Install string
+	// ServerConfig is k3s.serverConfig: settings merged over
+	// y-cluster's in the node's config.yaml. Omitted from the state
+	// sidecar when empty, which keeps its shape for every cluster that
+	// sets none.
+	ServerConfig map[string]any `json:",omitempty"`
 }
 
 // preflightHostPorts gathers every host port the qemu Provision
@@ -160,8 +161,9 @@ func FromConfig(c *config.QEMUConfig) Config {
 		CacheDir:     cacheDir,
 		Kubeconfig:   os.Getenv("KUBECONFIG"),
 		K3s: K3s{
-			Version: c.K3s.Version,
-			Install: c.K3s.Install,
+			Version:      c.K3s.Version,
+			Install:      c.K3s.Install,
+			ServerConfig: c.K3s.ServerConfig,
 		},
 		Registries:   c.Registries,
 		Gateway:      c.Gateway,
@@ -386,15 +388,12 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		return c, nil
 	}
 
-	// Stage /etc/rancher/k3s/registries.yaml before installing k3s
-	// so containerd reads it on first start. Skipped when the user
-	// hasn't configured any mirrors or auth.
-	if err := registries.WriteToNode(ctx, c.NodeExec, c.cfg.Registries, c.logger); err != nil {
-		return nil, fmt.Errorf("write registries: %w", err)
-	}
-
-	// Install k3s. Method (script vs airgap) and version come from
-	// the user's QEMUConfig.K3s (defaulted by the config package).
+	// The node bundle (k3s, its airgap images and installer, the
+	// server config.yaml and registries.yaml, the portmap link Cilium
+	// needs) goes on over ssh, as `y-cluster k3s bundle` writes it for
+	// any root-capable tool to apply on a host y-cluster did not
+	// create. Method (script vs airgap) and version come from the
+	// user's QEMUConfig.K3s (defaulted by the config package).
 	if cfg.endpoints().APIPort == "" {
 		return nil, fmt.Errorf("portForwards must include a guest:6443 entry to reach k3s from the host")
 	}
@@ -405,80 +404,17 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 	// Pull kubeconfig out of /etc/rancher/k3s/k3s.yaml, rewrite the
 	// server URL to the host-mapped port, and merge into the host's
 	// kubeconfig under the configured context name.
-	rawKubeconfig, err := c.extractKubeconfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("extract kubeconfig: %w", err)
-	}
-	if err := kubecfg.Import(rawKubeconfig); err != nil {
-		return nil, fmt.Errorf("merge kubeconfig: %w", err)
+	if err := c.importKubeconfig(ctx); err != nil {
+		return nil, fmt.Errorf("import kubeconfig: %w", err)
 	}
 	logger.Info("k3s ready", zap.String("context", cfg.Context))
 
-	// k3s runs without flannel (k3s.CiliumFlags): the node is NotReady
-	// and nothing schedules until the CNI is up, so Cilium comes before
-	// any workload install.
-	if out, err := c.NodeExec(ctx, cilium.K3sPortmapCommand, nil); err != nil {
-		return nil, fmt.Errorf("link portmap for cilium: %s: %w", out, err)
-	}
-	if err := cilium.Install(ctx, cilium.K3s, cfg.Context, 1, ciliumReadyTimeout, logger); err != nil {
-		return nil, fmt.Errorf("install cilium: %w", err)
-	}
-
-	// Install the bundled local-path-provisioner (replaces k3s's
-	// disabled local-storage addon). Runs before any workload
-	// install so the StorageClass exists when consumer PVCs land.
-	if err := localstorage.Install(ctx, localstorage.Options{
-		ContextName:   cfg.Context,
-		Path:          cfg.Storage.Path,
-		Pattern:       cfg.Storage.PathPattern,
-		ReclaimPolicy: cfg.Storage.ReclaimPolicy,
-		Logger:        logger,
-	}); err != nil {
-		return nil, fmt.Errorf("install local-path-provisioner: %w", err)
-	}
-
-	// Install the bundled Envoy Gateway (CRDs + controller +
-	// default GatewayClass). Replaces the Traefik k3s would
-	// otherwise have run; --disable=traefik passed to k3s above
-	// keeps that one out of the picture. Skipped wholesale when
-	// gateway.skip is set in cluster config -- the cluster comes
-	// up with no ingress controller (k3s still has --disable=traefik
-	// so traefik doesn't sneak back in).
-	if cfg.Gateway.Skip {
-		logger.Info("envoy gateway install skipped (gateway.skip)")
-	} else {
-		if err := envoygateway.Install(ctx, envoygateway.Options{
-			ContextName:          cfg.Context,
-			GatewayClassName:     cfg.Gateway.ClassName,
-			DNSHintIP:            cfg.endpoints().IngressIP,
-			Logger:               logger,
-			ControllerCPURequest: cfg.Gateway.Resources.Controller.CPU,
-			ControllerMemRequest: cfg.Gateway.Resources.Controller.Memory,
-			ProxyCPURequest:      cfg.Gateway.Resources.Proxy.CPU,
-			ProxyMemRequest:      cfg.Gateway.Resources.Proxy.Memory,
-			// One node, ServiceLB: Gateways beyond y-cluster's own
-			// (ystack's, a site's) must share the proxy on :80/:443.
-			MergeGateways: true,
-		}); err != nil {
-			return nil, fmt.Errorf("install envoy gateway: %w", err)
-		}
-		logger.Info("envoy gateway ready",
-			zap.String("version", envoygateway.Version),
-			zap.String("gatewayClass", cfg.Gateway.ClassName),
-		)
-	}
-
-	// cert-manager and y-cluster's CA issuer for in-cluster certificates,
-	// as on docker: the appliances qemu builds and the local dev clusters
-	// both converge workloads that use them. Skipped wholesale when
-	// certManager.skip is set in cluster config.
-	if cfg.CertManager.Skip {
-		logger.Info("cert-manager install skipped (certManager.skip)")
-	} else {
-		if err := certmanager.Install(ctx, certmanager.Options{ContextName: cfg.Context, Logger: logger}); err != nil {
-			return nil, fmt.Errorf("install cert-manager: %w", err)
-		}
-		logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
+	// The platform: Cilium (k3s runs without flannel, so nothing
+	// schedules before it), local-path storage, Envoy Gateway and
+	// cert-manager unless the config skips them. The same function
+	// is `y-cluster platform install`.
+	if err := platform.Install(ctx, cfg.PlatformOptions(logger)); err != nil {
+		return nil, err
 	}
 
 	return c, nil
@@ -542,6 +478,15 @@ func TeardownConfig(cfg Config, keepDisk bool, logger *zap.Logger) error {
 		return nil
 	}
 	var removed []string
+	// Provision removes its node bundle once applied; one is left
+	// only by a provision that was killed mid-way.
+	if _, err := os.Stat(cfg.bundleDir()); err == nil {
+		if err := os.RemoveAll(cfg.bundleDir()); err != nil {
+			logger.Warn("teardown could not remove the node bundle", zap.String("path", cfg.bundleDir()), zap.Error(err))
+		} else {
+			removed = append(removed, filepath.Base(cfg.bundleDir()))
+		}
+	}
 	for _, p := range perVMArtefacts(cfg.CacheDir, cfg.Name) {
 		err := os.Remove(p)
 		switch {

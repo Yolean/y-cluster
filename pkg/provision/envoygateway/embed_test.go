@@ -105,40 +105,6 @@ func TestEnvoyProxyYAML_ShapesResources(t *testing.T) {
 	}
 }
 
-// TestControllerResourcesPatch_RequestsOnly pins the
-// strategic-merge patch shape: starts at `spec:` (no
-// apiVersion/kind/metadata wrapper, since kubectl patch
-// identifies the target via CLI args), container matched by
-// name so the merge targets the right container, no
-// limits/image/env claimed (so upstream owners keep them through
-// the merge).
-func TestControllerResourcesPatch_RequestsOnly(t *testing.T) {
-	got := string(ControllerResourcesPatch("10m", "64Mi"))
-	for _, want := range []string{
-		"- name: envoy-gateway",
-		"cpu: 10m",
-		"memory: 64Mi",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q:\n%s", want, got)
-		}
-	}
-	// Patch body must NOT carry an apiVersion/kind/metadata
-	// header -- kubectl patch identifies the target via CLI args
-	// and would fail to parse a manifest-shaped body.
-	for _, banned := range []string{"apiVersion:", "kind:", "metadata:"} {
-		if strings.Contains(got, banned) {
-			t.Errorf("patch body must not include %q:\n%s", banned, got)
-		}
-	}
-	if strings.Contains(got, "limits:") {
-		t.Errorf("patch should declare requests only:\n%s", got)
-	}
-	if strings.Contains(got, "image:") {
-		t.Errorf("patch must not claim image (would fight upstream owner):\n%s", got)
-	}
-}
-
 // Workloads seeing the real client address rests on this field; see
 // EnvoyProxyYAML. Parsed rather than substring-matched so the field
 // cannot silently move to a path Envoy Gateway ignores.

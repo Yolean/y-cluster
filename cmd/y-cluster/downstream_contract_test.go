@@ -38,6 +38,9 @@ var downstreamCLI = []struct {
 	{"checkit", "manifests add", []string{"context"}},
 	{"checkit", "manifests rm", []string{"context"}},
 	{"checkit", "gateway hostnames", []string{"context", "csv"}},
+	{"checkit (hosts y-cluster does not create)", "k3s bundle", []string{"config", "out", "without-registries"}},
+	{"checkit (hosts y-cluster does not create)", "kubeconfig import", []string{"context", "server"}},
+	{"checkit (hosts y-cluster does not create)", "platform install", []string{"config", "context", "check"}},
 	{"y-cluster scripts", "echo render", nil},
 	{"y-cluster scripts", "lifetime gcp-flags", []string{"config"}},
 }
@@ -184,6 +187,19 @@ func TestProviders_RegisteredEverywhere(t *testing.T) {
 	}
 	for _, name := range config.AllProviders {
 		ops, ok := providers[name]
+		if config.ExistingHost(name) {
+			// Never provisioned, so never looked up as a backend:
+			// its context is reached through kubectl only.
+			if ok || backends[name] {
+				t.Errorf("provider %q describes a host y-cluster does not create, but has CLI adapters (%v) or a backend (%v)", name, ok, backends[name])
+			}
+			cfg := config.NewProviderConfig(name)
+			cfg.ApplyDefaults()
+			if _, err := opsFor(cfg); err == nil || !strings.Contains(err.Error(), "platform install") {
+				t.Errorf("provider %q: provision and teardown should point at the verbs that do apply: %v", name, err)
+			}
+			continue
+		}
 		if config.ConfigOnly(name) {
 			// The day a provisioner lands, this is what says to take
 			// the provider out of the config-only set.

@@ -253,3 +253,31 @@ func TestRewriteKubeconfigServer_RefusesUnexpectedInput(t *testing.T) {
 		}
 	}
 }
+
+type recordingImporter struct{ got []byte }
+
+func (r *recordingImporter) Import(raw []byte) error { r.got = raw; return nil }
+
+func TestImportKubeconfig(t *testing.T) {
+	raw := []byte("clusters:\n- cluster:\n    server: https://127.0.0.1:6443\n  name: default\n")
+	for _, server := range []string{"https://127.0.0.1:16443", "https://127.0.0.1:16443/", "127.0.0.1:16443"} {
+		m := &recordingImporter{}
+		if err := ImportKubeconfig(m, raw, server); err != nil {
+			t.Fatalf("%s: %v", server, err)
+		}
+		if !strings.Contains(string(m.got), "server: https://127.0.0.1:16443\n") {
+			t.Errorf("%s: merged %s", server, m.got)
+		}
+	}
+	for _, server := range []string{"http://127.0.0.1:16443", "https://127.0.0.1", "127.0.0.1", "https://127.0.0.1:16443/api", ""} {
+		m := &recordingImporter{}
+		if err := ImportKubeconfig(m, raw, server); err == nil || m.got != nil {
+			t.Errorf("server %q accepted", server)
+		}
+	}
+	// Not a k3s kubeconfig: nothing is merged.
+	m := &recordingImporter{}
+	if err := ImportKubeconfig(m, []byte("sudo: a password is required\n"), "https://127.0.0.1:16443"); err == nil || m.got != nil {
+		t.Errorf("non-kubeconfig input merged: %v", err)
+	}
+}

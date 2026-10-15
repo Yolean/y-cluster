@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -76,8 +77,12 @@ func TestTap_KubeconfigAndTLSSAN(t *testing.T) {
 	if got != "192.168.122.2:6443" {
 		t.Fatalf("kubeconfig would name %s", got)
 	}
-	if flags := k3sServerFlags(e); !strings.HasSuffix(flags, " --tls-san=192.168.122.2") {
-		t.Fatalf("k3s flags: %s", flags)
+	spec, err := tapConfig(t).K3sBundleSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sans := spec.Server["tls-san"]; !reflect.DeepEqual(sans, []string{"192.168.122.2"}) {
+		t.Fatalf("k3s tls-san: %v", sans)
 	}
 }
 

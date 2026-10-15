@@ -306,7 +306,10 @@ func TestQEMU_Network_Validate(t *testing.T) {
 		{"unknown mode", user(func(c *QEMUConfig) { c.Network.Mode = "bridge" }), "network.mode"},
 
 		{"tap: minimal", tap(nil), ""},
-		{"tap: explicit gateway and dns", tap(func(c *QEMUConfig) { c.Network.Gateway = "192.168.122.254"; c.Network.DNS = []string{"192.168.122.254"} }), ""},
+		{"tap: explicit gateway and dns", tap(func(c *QEMUConfig) {
+			c.Network.Gateway = "192.168.122.254"
+			c.Network.DNS = []string{"192.168.122.254"}
+		}), ""},
 		{"tap: ifname missing", tap(func(c *QEMUConfig) { c.Network.Ifname = "" }), "network.ifname is required"},
 		{"tap: ifname too long", tap(func(c *QEMUConfig) { c.Network.Ifname = "sixteen-chars-xx" }), "not a valid interface name"},
 		{"tap: ifname would inject a netdev option", tap(func(c *QEMUConfig) { c.Network.Ifname = "a,script=x" }), "not a valid interface name"},

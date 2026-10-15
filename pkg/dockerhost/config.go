@@ -21,15 +21,15 @@ import (
 // and never creates, configures or filters a network device.
 //
 //	network:
-//	  ifname: ycd0               # tap owned by this user; may be a bridge port
+//	  ifname: ycd0                   # tap owned by this user; may be a bridge port
 //	  guestAddress: 192.168.123.2/24 # static; clients reach the daemons here
 //	  # gateway: 192.168.123.1       # default: first host address of the subnet
-//	  # dns: [1.1.1.1, 9.9.9.9]  # default; must be reachable through the host's NAT
-//	# memory: 6144               # MB
+//	  # dns: [1.1.1.1, 9.9.9.9]      # default; must be reachable through the host's NAT
+//	# memory: 6144                   # MB
 //	# cpus: 4
-//	# diskSize: 60G              # sparse qcow2: images and build cache
-//	# idleTimeout: 8h            # guest powers off after this long unused; 0 = never
-//	# maxAge: 336h               # guest is recreated from the newest image after this
+//	# diskSize: 60G                  # sparse qcow2: images and build cache
+//	# idleTimeout: 8h                # guest powers off after this long unused; 0 = never
+//	# maxAge: 336h                   # guest is recreated from the newest image after this
 type Config struct {
 	Network     Network `json:"network"`
 	MemoryMB    int     `json:"memory,omitempty"`
