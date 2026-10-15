@@ -36,8 +36,8 @@ type providerOps struct {
 	stop func(ctx context.Context, contextName, clusterName string, logger *zap.Logger) error
 }
 
-// providers has one entry per config.AllProviders that is not
-// config.ConfigOnly; a test holds that.
+// providers has one entry per config.AllProviders that is neither
+// config.ConfigOnly nor config.ExistingHost; a test holds that.
 // Each adapter asserts its own config type, which LoadProvision
 // guarantees for the provider name it was looked up by.
 var providers = map[string]providerOps{
@@ -157,6 +157,9 @@ var providers = map[string]providerOps{
 // that is all this binary can do with it.
 func opsFor(cfg config.ProviderConfig) (providerOps, error) {
 	name := cfg.Common().Provider
+	if config.ExistingHost(name) {
+		return providerOps{}, fmt.Errorf("provider %q is a k3s host y-cluster does not create or remove: write its node bundle with `y-cluster k3s bundle`, apply that as root on the host, then run `y-cluster kubeconfig import` and `y-cluster platform install`", name)
+	}
 	ops, ok := providers[name]
 	if !ok {
 		return providerOps{}, fmt.Errorf("provider %q: the config is valid, but this build of y-cluster has no provisioner for it yet", name)

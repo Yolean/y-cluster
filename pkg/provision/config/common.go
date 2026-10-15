@@ -33,6 +33,8 @@ package config
 import (
 	"sort"
 	"time"
+
+	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 )
 
 // Provider IDs. Single source of truth for both the per-provider
@@ -46,6 +48,7 @@ const (
 	ProviderMultipass = "multipass"
 	ProviderHetzner   = "hetzner"
 	ProviderGlesys    = "glesys"
+	ProviderHost      = "host"
 )
 
 // ProviderConfig is one provider's y-cluster-provision.yaml, as
@@ -74,6 +77,7 @@ var providerConfigs = map[string]func() ProviderConfig{
 	ProviderMultipass: func() ProviderConfig { return &MultipassConfig{} },
 	ProviderHetzner:   func() ProviderConfig { return &HetznerConfig{} },
 	ProviderGlesys:    func() ProviderConfig { return &GlesysConfig{} },
+	ProviderHost:      func() ProviderConfig { return &HostConfig{} },
 }
 
 // configOnly lists providers whose config type, validation and schema
@@ -85,6 +89,12 @@ var configOnly = map[string]bool{}
 // ConfigOnly reports whether provider is registered without a
 // provisioner.
 func ConfigOnly(provider string) bool { return configOnly[provider] }
+
+// ExistingHost reports whether provider describes a k3s host that
+// y-cluster does not create or remove, so it has no provisioner and
+// never will: the k3s bundle, kubeconfig import and platform install
+// verbs are what y-cluster does for it.
+func ExistingHost(provider string) bool { return provider == ProviderHost }
 
 // AllProviders is the canonical list, sorted, used by schemagen for
 // the common-schema enum and by error messages that need to list
@@ -237,7 +247,7 @@ type StorageConfig struct {
 }
 
 // GatewayConfig controls the bundled Envoy Gateway install
-// (pkg/provision/envoygateway). Two knobs:
+// (pkg/provision/envoygateway). The knobs:
 //
 //   - skip: false (default)                      install CRDs, controller, default GatewayClass
 //   - skip: true                                 no CRDs, controller, or GatewayClass
@@ -248,12 +258,13 @@ type StorageConfig struct {
 // GatewayClass should also ship their own controller install.
 //
 // The host-side dial address (where /etc/hosts on the developer
-// machine should resolve gateway hostnames to) is intentionally NOT
-// a field here. It's derived from PortForwards via HostRoutableIP
-// and exposed to consumers as the yolean.se/dns-hint-ip annotation
-// on the GatewayClass. No user-facing knob -- the value is a
-// physical fact about the host/guest port-forward layer, not a
-// preference.
+// machine should resolve gateway hostnames to) is exposed to
+// consumers as the yolean.se/dns-hint-ip annotation on the
+// GatewayClass. On the providers y-cluster runs it is derived from
+// PortForwards via HostRoutableIP, a physical fact about the
+// host/guest port-forward layer, not a preference. Only provider host
+// sets it, as dnsHintIP: y-cluster knows nothing of how traffic reaches
+// a host it did not create.
 type GatewayConfig struct {
 	// Skip omits the entire Envoy Gateway install (CRDs, controller,
 	// GatewayClass). Useful for test clusters that don't need HTTP
@@ -283,6 +294,10 @@ type GatewayConfig struct {
 	// 100m/512Mi (proxy), which oversubscribe a 2GB-RAM
 	// appliance node.
 	Resources GatewayResources `yaml:"resources,omitempty" json:"resources,omitempty" jsonschema:"description=Resource requests for the bundled EG install. Defaults: controller 10m/64Mi and proxy 10m/128Mi. Limits are left as upstream sets them."`
+
+	// DNSHintIP is published as the GatewayClass's
+	// yolean.se/dns-hint-ip annotation. Provider host only.
+	DNSHintIP string `yaml:"dnsHintIP,omitempty" json:"dnsHintIP,omitempty" jsonschema:"description=Provider host only. The IP address at which clients reach ports 80 and 443 of the host (the node's own address or that of a NAT in front of it which keeps the client address). Published on the GatewayClass as the yolean.se/dns-hint-ip annotation; empty publishes none. The other providers derive it from their port forwards."`
 }
 
 // CertManagerConfig controls the bundled cert-manager install
@@ -419,7 +434,12 @@ func (c CommonConfig) HostAPIPort() string {
 // flows to: GHA mirror, schema default, runtime default.
 type K3sConfig struct {
 	Version string `yaml:"version,omitempty" json:"version,omitempty" jsonschema:"default=__K3S_TAG__,description=k3s release version e.g. vX.Y.Z+k3sN."`
-	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and its images and installer from the host cache to the node; script lets the node download the installer and binary of the release from GitHub. Default airgap on qemu and script on multipass; hetzner and glesys accept script only; docker runs the k3s image and ignores this."`
+	Install string `yaml:"install,omitempty" json:"install,omitempty" jsonschema:"enum=airgap,enum=script,default=airgap,description=Install strategy. airgap copies the k3s binary and its images and installer from the host cache to the node; script has the installer download the release binary on the node (on multipass and hetzner the node fetches the installer too). Default airgap on qemu and script on multipass; hetzner and glesys accept script only; docker runs the k3s image and ignores this."`
+
+	// ServerConfig is merged over y-cluster's k3s server settings by
+	// pkg/provision/k3s.CiliumServerSettings, which also says what
+	// is refused.
+	ServerConfig map[string]any `yaml:"serverConfig,omitempty" json:"serverConfig,omitempty" jsonschema:"description=qemu and host only. Additional k3s server settings in config.yaml form (flag names without dashes; values are strings or booleans or lists of strings) merged over y-cluster's: a key y-cluster sets as a default (write-kubeconfig-mode) is replaced; disable and tls-san entries are appended; flannel-backend and disable-network-policy and data-dir and write-kubeconfig and https-listen-port are refused because the platform depends on them. Example: {secrets-encryption: true}."`
 }
 
 // applyCommonDefaults fills defaults that the reflective tag-default
@@ -492,6 +512,22 @@ func (c *CommonConfig) validateCommon(expected string) error {
 	case "Retain", "Delete":
 	default:
 		return errInvalid("storage.reclaimPolicy must be Retain or Delete, got %q", c.Storage.ReclaimPolicy)
+	}
+	if len(c.K3s.ServerConfig) > 0 {
+		if expected != ProviderQEMU && expected != ProviderHost {
+			return errInvalid("k3s.serverConfig applies to providers %q and %q only; %q starts k3s its own way", ProviderQEMU, ProviderHost, expected)
+		}
+		if err := k3s.ValidateAdditions(c.K3s.ServerConfig); err != nil {
+			return errInvalid("%v", err)
+		}
+	}
+	if c.Gateway.DNSHintIP != "" {
+		if expected != ProviderHost {
+			return errInvalid("gateway.dnsHintIP applies to provider %q only; %q derives the hint from its port forwards", ProviderHost, expected)
+		}
+		if !validDNSHintIP(c.Gateway.DNSHintIP) {
+			return errInvalid("gateway.dnsHintIP %q must be an IP address", c.Gateway.DNSHintIP)
+		}
 	}
 	return c.validatePortForwards()
 }
