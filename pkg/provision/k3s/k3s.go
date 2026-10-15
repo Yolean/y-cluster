@@ -12,6 +12,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -163,4 +165,52 @@ func RewriteKubeconfigServer(raw []byte, hostPort string) ([]byte, error) {
 		return nil, fmt.Errorf("k3s kubeconfig does not name %s as its server; cannot point it at %s", nodeAPIServer, hostPort)
 	}
 	return bytes.ReplaceAll(raw, []byte(nodeAPIServer), []byte(hostPort)), nil
+}
+
+// KubeconfigImporter merges a kubeconfig into the operator's under
+// its own context and cluster names: *kubeconfig.Manager.
+type KubeconfigImporter interface {
+	Import(rawKubeconfig []byte) error
+}
+
+// ImportKubeconfig points a kubeconfig as k3s writes it (KubeconfigPath,
+// read off the node by whoever may read it) at server and merges it
+// through m. server is where the operator reaches the apiserver, as
+// https://host:port or host:port: a forwarded port, an ssh tunnel's
+// local end, the node's own address. TLS validates only when host is
+// one of the serving cert's SANs (see ReadKubeconfig).
+func ImportKubeconfig(m KubeconfigImporter, raw []byte, server string) error {
+	hostPort, err := ServerHostPort(server)
+	if err != nil {
+		return err
+	}
+	rewritten, err := RewriteKubeconfigServer(raw, hostPort)
+	if err != nil {
+		return err
+	}
+	if err := m.Import(rewritten); err != nil {
+		return fmt.Errorf("merge kubeconfig: %w", err)
+	}
+	return nil
+}
+
+// ServerHostPort reduces an apiserver address to host:port. A URL
+// must be https and name nothing but scheme, host and port.
+func ServerHostPort(server string) (string, error) {
+	hostPort := server
+	if strings.Contains(server, "://") {
+		u, err := url.Parse(server)
+		if err != nil {
+			return "", fmt.Errorf("server %q: %w", server, err)
+		}
+		if u.Scheme != "https" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+			return "", fmt.Errorf("server %q: want https://host:port", server)
+		}
+		hostPort = u.Host
+	}
+	host, port, err := net.SplitHostPort(hostPort)
+	if err != nil || host == "" || port == "" {
+		return "", fmt.Errorf("server %q: want https://host:port or host:port", server)
+	}
+	return hostPort, nil
 }
