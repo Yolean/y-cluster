@@ -148,35 +148,3 @@ spec:
               memory: %s
 `, EnvoyProxyName, Namespace, merge, service, fleet, cpuRequest, memRequest))
 }
-
-// ControllerResourcesPatch is a strategic-merge patch body for
-// the envoy-gateway controller container's resources.requests.
-// Applied via `kubectl patch deployment envoy-gateway -n
-// envoy-gateway-system --type=strategic --patch '<this>'`.
-//
-// We use kubectl patch rather than `kubectl apply --server-side`
-// with a partial Deployment because the Deployment kind has
-// required fields (spec.selector, template.metadata.labels,
-// containers[*].image) that kubectl validates client-side before
-// sending -- a partial SSA manifest fails with "Required value"
-// errors even when SSA semantics would otherwise have merged
-// cleanly. Strategic merge patch only validates the merge
-// RESULT, which keeps the existing required fields intact.
-//
-// Strategic merge handles the containers list by merge key
-// (name): the existing container's image, env, ports, args stay
-// intact; only resources.requests fields land. Limits aren't
-// declared, so the upstream limit (currently 1Gi memory, no
-// CPU cap) stays in effect.
-func ControllerResourcesPatch(cpuRequest, memRequest string) []byte {
-	return []byte(fmt.Sprintf(`spec:
-  template:
-    spec:
-      containers:
-      - name: envoy-gateway
-        resources:
-          requests:
-            cpu: %s
-            memory: %s
-`, cpuRequest, memRequest))
-}

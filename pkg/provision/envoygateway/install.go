@@ -97,27 +97,103 @@ type Options struct {
 	MergeGateways bool
 }
 
-// Install resolves the per-version install.yaml from cache
-// (downloading on first need), applies it to the cluster, waits
-// for the controller Deployment to roll out, and applies the
-// default `eg` GatewayClass.
+// Rendered is what Install applies, in order. EnvoyProxy and
+// GatewayClass are nil when Install applies none.
+type Rendered struct {
+	Version      string
+	Install      []byte
+	EnvoyProxy   []byte
+	GatewayClass []byte
+}
+
+// Render resolves the per-version install.yaml from cache (downloading
+// on first need) and renders every manifest Install applies, without
+// changing the cluster. It reads the cluster once: which controller
+// image runs, which decides whether the chart's hook Jobs are applied
+// (see RenderInstall).
+func Render(ctx context.Context, opts Options) (Rendered, error) {
+	if opts.ContextName == "" {
+		return Rendered{}, fmt.Errorf("envoygateway: ContextName is required")
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	version := opts.Version
+	if version == "" {
+		version = Version
+	}
+	installPath, err := Ensure(ctx, EnsureOptions{
+		Version:       version,
+		CacheOverride: opts.CacheOverride,
+		Logger:        logger,
+	})
+	if err != nil {
+		return Rendered{}, err
+	}
+	upstream, err := os.ReadFile(installPath)
+	if err != nil {
+		return Rendered{}, fmt.Errorf("read %s: %w", installPath, err)
+	}
+	live, err := liveControllerImage(ctx, opts.ContextName)
+	if err != nil {
+		return Rendered{}, err
+	}
+	install, err := RenderInstall(upstream, opts.ControllerCPURequest, opts.ControllerMemRequest, live)
+	if err != nil {
+		return Rendered{}, err
+	}
+	r := Rendered{Version: version, Install: install}
+	// EnvoyProxy is applied before the GatewayClass so its
+	// parametersRef resolves on first reconcile. Without proxy
+	// settings there is no CR and the GatewayClass has no
+	// parametersRef: EG uses its built-in defaults.
+	envoyProxyName := ""
+	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet || opts.MergeGateways {
+		envoyProxyName = EnvoyProxyName
+		r.EnvoyProxy = EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet, opts.MergeGateways)
+	}
+	if opts.GatewayClassName != "" {
+		r.GatewayClass = GatewayClassYAML(opts.GatewayClassName, opts.DNSHintIP, envoyProxyName)
+	}
+	return r, nil
+}
+
+// liveControllerImage is the image of the controller Deployment on the
+// cluster, or empty when there is none.
+func liveControllerImage(ctx context.Context, contextName string) (string, error) {
+	out, err := exec.CommandContext(ctx, "kubectl", "--context="+contextName,
+		"-n", Namespace, "get", "deployment", DeploymentName, "--ignore-not-found",
+		"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="`+DeploymentName+`")].image}`).Output()
+	if err != nil {
+		var stderr []byte
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = ee.Stderr
+		}
+		return "", fmt.Errorf("read the live envoy-gateway Deployment: %s: %w", bytes.TrimSpace(stderr), err)
+	}
+	return string(bytes.TrimSpace(out)), nil
+}
+
+// Install applies what Render renders and waits for the controller
+// Deployment to roll out before the EnvoyProxy and the GatewayClass.
 //
-// Idempotent: re-running on a cluster that already has EG
-// installed reconciles via SSA. The cache lookup is cheap when
-// the version directory already holds install.yaml.
+// Idempotent: a re-run with the same options on a cluster that has
+// this release changes nothing (see RenderInstall). The cache lookup
+// is cheap when the version directory already holds install.yaml.
 //
 // Order:
 //
-//  1. Ensure install.yaml is cached for the resolved version.
-//  2. kubectl apply --server-side --force-conflicts install.yaml.
+//  1. kubectl apply --server-side --force-conflicts install.yaml.
 //     kubectl handles CRD-then-CR ordering by retrying on
 //     RESTMapping errors -- the upstream EG manifest puts CRDs
 //     first so the second pass picks up the in-namespace objects
 //     once the CRDs are registered.
-//  3. kubectl rollout status deployment/envoy-gateway in
+//  2. kubectl rollout status deployment/envoy-gateway in
 //     envoy-gateway-system (skipped when ReadyTimeout < 0).
-//  4. kubectl apply the default GatewayClass with the configured
-//     name (skipped when GatewayClassName is empty).
+//  3. the EnvoyProxy CR, when proxy settings ask for one.
+//  4. the default GatewayClass with the configured name (skipped
+//     when GatewayClassName is empty).
 //
 // Everything goes through kubectl shellouts, which keeps
 // k8s.io/client-go out of the binary. Stdout / stderr are
@@ -131,46 +207,19 @@ func Install(ctx context.Context, opts Options) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	version := opts.Version
-	if version == "" {
-		version = Version
-	}
-
-	installPath, err := Ensure(ctx, EnsureOptions{
-		Version:       version,
-		CacheOverride: opts.CacheOverride,
-		Logger:        logger,
-	})
+	r, err := Render(ctx, opts)
 	if err != nil {
 		return err
 	}
-	manifest, err := os.ReadFile(installPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", installPath, err)
-	}
 
 	logger.Info("applying envoy-gateway install manifest",
-		zap.String("version", version),
+		zap.String("version", r.Version),
 		zap.String("namespace", Namespace),
+		zap.String("controllerCPU", opts.ControllerCPURequest),
+		zap.String("controllerMemory", opts.ControllerMemRequest),
 	)
-	if err := kubectlApplyStdin(ctx, opts.ContextName, manifest); err != nil {
+	if err := kubectlApplyStdin(ctx, opts.ContextName, r.Install); err != nil {
 		return fmt.Errorf("apply install.yaml: %w", err)
-	}
-
-	// Patch the controller container's resource requests before
-	// the rollout wait so the wait sees the ReplicaSet we shaped.
-	// Empty strings here mean "leave upstream alone" -- a test
-	// path or a config that explicitly wants stock requests.
-	if opts.ControllerCPURequest != "" || opts.ControllerMemRequest != "" {
-		logger.Info("patching envoy-gateway controller resources",
-			zap.String("cpu", opts.ControllerCPURequest),
-			zap.String("memory", opts.ControllerMemRequest),
-		)
-		if err := kubectlPatch(ctx, opts.ContextName, "deployment", DeploymentName, Namespace,
-			ControllerResourcesPatch(opts.ControllerCPURequest, opts.ControllerMemRequest),
-		); err != nil {
-			return fmt.Errorf("patch controller resources: %w", err)
-		}
 	}
 
 	if opts.ReadyTimeout >= 0 {
@@ -188,35 +237,26 @@ func Install(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// Apply EnvoyProxy first so the GatewayClass.parametersRef
-	// resolves on first reconcile. When proxy resources aren't
-	// configured we skip the CR and leave the GatewayClass
-	// parametersRef-less -- EG uses its built-in defaults.
-	envoyProxyName := ""
-	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet || opts.MergeGateways {
-		envoyProxyName = EnvoyProxyName
+	if r.EnvoyProxy != nil {
 		logger.Info("applying EnvoyProxy CR",
-			zap.String("name", envoyProxyName),
+			zap.String("name", EnvoyProxyName),
 			zap.String("cpu", opts.ProxyCPURequest),
 			zap.String("memory", opts.ProxyMemRequest),
 			zap.Strings("externalIPs", opts.ExternalIPs),
 			zap.Bool("daemonSet", opts.DaemonSet),
 			zap.Bool("mergeGateways", opts.MergeGateways),
 		)
-		if err := kubectlApplyStdin(ctx, opts.ContextName,
-			EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet, opts.MergeGateways),
-		); err != nil {
+		if err := kubectlApplyStdin(ctx, opts.ContextName, r.EnvoyProxy); err != nil {
 			return fmt.Errorf("apply EnvoyProxy: %w", err)
 		}
 	}
 
-	if opts.GatewayClassName != "" {
+	if r.GatewayClass != nil {
 		logger.Info("applying default GatewayClass",
 			zap.String("name", opts.GatewayClassName),
 			zap.String("dnsHintIP", opts.DNSHintIP),
-			zap.String("envoyProxyRef", envoyProxyName),
 		)
-		if err := kubectlApplyStdin(ctx, opts.ContextName, GatewayClassYAML(opts.GatewayClassName, opts.DNSHintIP, envoyProxyName)); err != nil {
+		if err := kubectlApplyStdin(ctx, opts.ContextName, r.GatewayClass); err != nil {
 			return fmt.Errorf("apply GatewayClass: %w", err)
 		}
 	}
@@ -248,33 +288,6 @@ func kubectlApplyStdin(ctx context.Context, contextName string, manifest []byte)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("kubectl apply --server-side: %w", err)
-	}
-	return nil
-}
-
-// kubectlPatch applies a strategic-merge patch to a named
-// resource via `kubectl patch <kind> <name> -n <ns> --type=strategic
-// --patch <yaml>`. Used for the controller resources tweak
-// where a full SSA-apply of a partial Deployment fails kubectl's
-// client-side schema validation (selector / image required).
-//
-// The patch is passed as a flag value (not stdin) because
-// `kubectl patch` doesn't read the body from stdin by default;
-// `--patch-file=/dev/stdin` works but the inline form keeps the
-// shellout symmetric with kubectlApplyStdin.
-func kubectlPatch(ctx context.Context, contextName, kind, name, namespace string, patch []byte) error {
-	cmd := exec.CommandContext(ctx, "kubectl",
-		"--context="+contextName,
-		"patch", kind, name,
-		"-n", namespace,
-		"--type=strategic",
-		"--patch", string(patch),
-		"--field-manager=y-cluster",
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("kubectl patch: %w", err)
 	}
 	return nil
 }

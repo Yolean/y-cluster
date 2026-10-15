@@ -35,21 +35,18 @@ func sharedEnvoyGatewayCache(t *testing.T) string {
 }
 
 // TestEnvoyGateway_InstallAgainstKwok exercises the full Install
-// path -- CRDs first, then the install manifest, then the
-// controller-resources strategic-merge patch, then the EnvoyProxy
-// CR, then the default GatewayClass with parametersRef --
+// path -- the install manifest with the controller's resource
+// requests set in its Deployment, then the EnvoyProxy CR, then the
+// default GatewayClass with parametersRef --
 // against the shared kwok cluster. The Deployment rollout wait
 // is skipped (ReadyTimeout=-1) because kwok stages pods through
 // its own controller, not the real one, and we only need to
 // prove the apply path produces the right object graph.
 //
 // Resource requests are non-zero by design: they exercise the
-// kubectl-patch branch (controller) and the EnvoyProxy CR
+// rendering of the controller Deployment and the EnvoyProxy CR
 // branch (proxy) which production CommonConfig defaults flow
-// through. Pre-fix the patch step failed with kubectl's
-// client-side schema validation -- PR-CI didn't catch it
-// because this test was calling Install without the resource
-// fields set, short-circuiting both branches.
+// through.
 //
 // Coverage assertions afterwards use kubectl directly so we can
 // verify what landed without making the test depend on every
@@ -135,23 +132,20 @@ func TestEnvoyGateway_InstallAgainstKwok(t *testing.T) {
 			envoygateway.DNSHintIPAnnotation, hintOut)
 	}
 
-	// Controller-resources strategic-merge patch landed. The
-	// kubectl-patch step would fail outright pre-fix (kubectl
-	// rejected the partial SSA-apply manifest), so reaching this
-	// assertion at all proves the patch verb works; reading the
-	// requests back proves the merge target is the right
-	// container and the values stuck.
+	// The controller's requests were rendered into the applied
+	// Deployment: reading them back proves the right container got
+	// them and the apply kept them.
 	cpuOut := kubectl(t, "get", "deployment", envoygateway.DeploymentName,
 		"-n", envoygateway.Namespace,
 		"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="envoy-gateway")].resources.requests.cpu}`)
 	if cpuOut != ctrlCPU {
-		t.Errorf("controller resources.requests.cpu = %q, want %q (patch step landed?)", cpuOut, ctrlCPU)
+		t.Errorf("controller resources.requests.cpu = %q, want %q (rendered into the Deployment?)", cpuOut, ctrlCPU)
 	}
 	memOut := kubectl(t, "get", "deployment", envoygateway.DeploymentName,
 		"-n", envoygateway.Namespace,
 		"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="envoy-gateway")].resources.requests.memory}`)
 	if memOut != ctrlMem {
-		t.Errorf("controller resources.requests.memory = %q, want %q (patch step landed?)", memOut, ctrlMem)
+		t.Errorf("controller resources.requests.memory = %q, want %q (rendered into the Deployment?)", memOut, ctrlMem)
 	}
 
 	// EnvoyProxy CR was applied with the proxy resource values.
