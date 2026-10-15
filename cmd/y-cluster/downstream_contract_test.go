@@ -38,6 +38,9 @@ var downstreamCLI = []struct {
 	{"checkit", "manifests add", []string{"context"}},
 	{"checkit", "manifests rm", []string{"context"}},
 	{"checkit", "gateway hostnames", []string{"context", "csv"}},
+	{"checkit (hosts y-cluster does not create)", "k3s bundle", []string{"config", "out", "without-registries"}},
+	{"checkit (hosts y-cluster does not create)", "kubeconfig import", []string{"context", "server"}},
+	{"checkit (hosts y-cluster does not create)", "platform install", []string{"config", "context", "check"}},
 	{"y-cluster scripts", "echo render", nil},
 	{"y-cluster scripts", "lifetime gcp-flags", []string{"config"}},
 }

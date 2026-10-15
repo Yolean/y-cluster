@@ -21,6 +21,7 @@ discovered when omitted: multipass, then qemu, then docker):
 | `multipass` | k3s in a Multipass VM | macOS and Linux |
 | `hetzner` | k3s on a Hetzner Cloud server | paid; tears itself down in-cluster when `lifetime` expires |
 | `glesys` | Talos Linux on a GleSYS KVM server | paid; the node and a kubeconfig context, nothing installed on top; `talosctl` for node access |
+| `host` | k3s on a machine y-cluster does not create | the machine's own tooling applies `k3s bundle` as root; `kubeconfig import` and `platform install` do the rest; `provision` and `teardown` refuse it |
 
 Subcommand groups:
 
@@ -31,6 +32,13 @@ Subcommand groups:
   ClusterIssuer (`y-cluster-ca`); `certManager: {skip: true}` in
   `y-cluster-provision.yaml` leaves it out, as `gateway: {skip: true}`
   does Envoy Gateway.
+- **k3s bundle / kubeconfig import / platform install** -- the
+  three steps qemu provision makes after the VM is up, for a k3s host
+  y-cluster did not create (`provider: host`, see below): the files a
+  server node needs with a manifest of where they go, the node's
+  `k3s.yaml` merged under a context, and Cilium, local-path storage,
+  Envoy Gateway and cert-manager installed through that context.
+  `platform install --check` reports drift without applying.
 - **stop / start / pause / resume** -- keep the disk, drop the
   compute. `stop` works on every provider; the rest are qemu-only
   (`start` also handles hetzner).
@@ -174,6 +182,45 @@ names that address. Each cluster keeps its k3s state in volumes named
 after it (`<name>-k3s`, `<name>-kubelet`, `<name>-cni`,
 `<name>-varlog`), which `teardown` and the next `provision` of the same
 name remove.
+
+**A k3s host y-cluster did not create: three steps, each its own
+verb.** `provider: host` describes a machine that other tooling
+manages, with privileges y-cluster never gets (a sudo that asks for a
+password, an API reachable only through an ssh tunnel). y-cluster
+writes and installs, the operator's tooling does what needs root:
+
+```yaml
+provider: host
+context: edge                     # required: the context the steps write and use
+tlsSANs: [192.0.2.10]             # addresses besides 127.0.0.1 and the node's own
+k3s:
+  serverConfig:                   # merged over y-cluster's server settings
+    secrets-encryption: true
+    write-kubeconfig-mode: "0600"
+gateway:
+  dnsHintIP: 192.0.2.10           # where clients reach 80/443; published on the GatewayClass
+```
+
+```
+y-cluster k3s bundle -c <dir> --out bundle/      # no root, no node contact
+# as root on the host: install bundle/ per manifest.yaml (files with
+# dest, mode and sha256; then install.sh with install.env; then
+# postInstall)
+ssh -N -L 16443:127.0.0.1:6443 <host> &
+ssh <host> sudo cat /etc/rancher/k3s/k3s.yaml | \
+  y-cluster kubeconfig import --context edge --server https://127.0.0.1:16443
+y-cluster platform install -c <dir>              # again or --check: no change
+```
+
+The bundle's `config.yaml` holds every server option, so the k3s unit
+runs plain `k3s server`; `config.yaml.d/` is left to the host's
+tooling. `registries.yaml` is in the bundle only when `registries` is
+configured (and `--without-registries` is not given); a host whose
+tooling writes that file keeps it. qemu provision applies the same
+bundle over ssh and calls the same platform install, and both verbs
+also take a qemu config. `k3s.serverConfig` works for qemu too; keys
+the platform depends on (`flannel-backend`, `disable-network-policy`,
+`data-dir`, `write-kubeconfig`, `https-listen-port`) are refused.
 
 ## Specs
 

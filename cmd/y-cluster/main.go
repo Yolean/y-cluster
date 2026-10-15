@@ -141,6 +141,9 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(gatewayCmd())
 	root.AddCommand(localstorageCmd())
 	root.AddCommand(dockerhostCmd())
+	root.AddCommand(k3sCmd())
+	root.AddCommand(kubeconfigCmd())
+	root.AddCommand(platformCmd())
 
 	return root
 }
