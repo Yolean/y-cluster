@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -210,6 +211,110 @@ func TestDocker_ProvisionTeardown(t *testing.T) {
 		if !strings.Contains(string(regOut), want) {
 			t.Fatalf("registries.yaml missing %q.\nGot:\n%s", want, regOut)
 		}
+	}
+
+	// Teardown removes the cluster's volumes with its container. The
+	// k3s image declares four VOLUMEs; the provisioner mounts a volume
+	// named after the cluster at each, and Remove drops any anonymous
+	// one on top. The cluster's images and state in them came to 0.6
+	// to 1 GB per cluster, left behind by every teardown before.
+	volumes := containerVolumes(t, cfg.Name)
+	for purpose := range docker.VolumeTargets {
+		if want := docker.VolumeName(cfg.Name, purpose); !slices.Contains(volumes, want) {
+			t.Errorf("container %s does not mount volume %s; it mounts %v", cfg.Name, want, volumes)
+		}
+	}
+	if err := cluster.Teardown(false); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	assertVolumesGone(t, volumes)
+}
+
+// containerVolumes lists the names of the container's volume mounts:
+// the cluster's named volumes, and any anonymous volume of an image
+// VOLUME the provisioner does not name.
+func containerVolumes(t *testing.T, name string) []string {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "--format",
+		`{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect %s: %s: %v", name, out, err)
+	}
+	return strings.Fields(string(out))
+}
+
+// assertVolumesGone fails for every volume the daemon still has.
+func assertVolumesGone(t *testing.T, volumes []string) {
+	t.Helper()
+	for _, v := range volumes {
+		if out, err := exec.Command("docker", "volume", "inspect", v).CombinedOutput(); err == nil {
+			t.Errorf("volume %s still exists after teardown:\n%s", v, out)
+		}
+	}
+}
+
+// TestDocker_FailedProvisionRemovesContainer: a provision that fails
+// after it created the container removes the container and its
+// volumes, and leaves no context in the kubeconfig. The test
+// cancels the provision as soon as the container exists, which fails it
+// at whatever step comes next (starting the container, waiting for
+// k3s).
+//
+// It needs no KUBECONFIG from the caller: the cluster never becomes
+// usable, so it gets a throwaway one.
+func TestDocker_FailedProvisionRemovesContainer(t *testing.T) {
+	skipIfNoDocker(t)
+
+	logger, _ := zap.NewDevelopment()
+	cfg := e2eDockerConfig("y-cluster-e2e-failprov", "36446", "y-cluster-e2e-failprov")
+	kcfgPath := filepath.Join(t.TempDir(), "kubeconfig")
+	t.Setenv("KUBECONFIG", kcfgPath)
+
+	// A teardown removes what an earlier run of this test left, the
+	// container and its named volumes, and so does the cleanup.
+	_ = docker.TeardownConfig(*cfg, false, logger)
+	t.Cleanup(func() { _ = docker.TeardownConfig(*cfg, false, logger) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Watch for the container; once it exists with its volumes, note
+	// them and cancel the provision.
+	var volumes []string
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		deadline := time.Now().Add(5 * time.Minute)
+		for time.Now().Before(deadline) && ctx.Err() == nil {
+			out, err := exec.Command("docker", "inspect", "--format",
+				`{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, cfg.Name).Output()
+			if err == nil && len(strings.Fields(string(out))) > 0 {
+				volumes = strings.Fields(string(out))
+				cancel()
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	cluster, err := docker.Provision(ctx, *cfg, logger)
+	cancel()
+	<-watched
+	if err == nil {
+		_ = cluster.Teardown(false)
+		t.Fatal("Provision succeeded although it was cancelled once the container existed")
+	}
+	if len(volumes) == 0 {
+		t.Fatalf("Provision failed before the container existed, so this test proved nothing: %v", err)
+	}
+	t.Logf("provision failed as intended: %v", err)
+
+	if out, err := exec.Command("docker", "inspect", cfg.Name).CombinedOutput(); err == nil {
+		t.Errorf("container %s still exists after the failed provision:\n%.300s", cfg.Name, out)
+	}
+	assertVolumesGone(t, volumes)
+	if b, err := os.ReadFile(kcfgPath); err == nil && strings.Contains(string(b), cfg.Context) {
+		t.Errorf("kubeconfig still names %s after the failed provision:\n%s", cfg.Context, b)
 	}
 }
 

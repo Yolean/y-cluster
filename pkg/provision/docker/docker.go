@@ -97,7 +97,7 @@ func readFirstLine(path string) (string, error) {
 // apiserver to write its kubeconfig, extracts that kubeconfig and
 // merges it into the host's KUBECONFIG under the configured
 // context. Returns when the cluster is reachable from the host.
-func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger) (*Cluster, error) {
+func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger) (_ *Cluster, retErr error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -201,16 +201,35 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		_ = cli.Close()
 		return nil, fmt.Errorf("create %s: %w", cfg.Name, err)
 	}
+	// From here on the container exists, and a provision that fails
+	// removes it, with its named and anonymous volumes and any
+	// kubeconfig entries it merged.
+	// Keeping it would serve no retry -- the next Provision removes a
+	// container of this name before it creates one -- and where k3s
+	// itself fails to come up the error carries the container's logs.
+	// The removal gets its own context: ctx may be what ran out.
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		logger.Warn("docker provision failed; removing the container", zap.String("name", cfg.Name), zap.Error(retErr))
+		rmCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := dockerexec.Remove(rmCtx, cli, cfg.Name); err != nil {
+			logger.Warn("removing the container after the failed provision failed too", zap.Error(err))
+		}
+		removeVolumes(rmCtx, cli, cfg.Name, logger)
+		kubecfg.CleanupStale()
+		_ = cli.Close()
+	}()
 	// Stage /etc/rancher/k3s/registries.yaml inside the container
 	// before starting it so containerd reads the file on first
 	// startup. Skipped when the config carries no registries
 	// entries, in which case k3s falls back to its defaults.
 	if err := writeRegistriesToContainer(ctx, cli, createRes.ID, cfg.Registries); err != nil {
-		_ = cli.Close()
 		return nil, fmt.Errorf("write registries: %w", err)
 	}
 	if _, err := cli.ContainerStart(ctx, createRes.ID, client.ContainerStartOptions{}); err != nil {
-		_ = cli.Close()
 		return nil, fmt.Errorf("start %s: %w", cfg.Name, err)
 	}
 
@@ -218,7 +237,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 
 	if err := c.waitForKubeconfig(ctx); err != nil {
 		// Capture container logs for diagnosis before returning.
-		dlogs, _ := dockerexec.Logs(ctx, cli, cfg.Name, "100")
+		dlogs := containerLogs(cli, cfg.Name)
 		return nil, fmt.Errorf("wait for k3s: %w\ncontainer logs:\n%s", err, dlogs)
 	}
 
@@ -239,7 +258,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	// through the merged kubeconfig until /readyz succeeds before
 	// declaring readiness.
 	if err := c.waitForHostAPIServer(ctx); err != nil {
-		dlogs, _ := dockerexec.Logs(ctx, cli, cfg.Name, "100")
+		dlogs := containerLogs(cli, cfg.Name)
 		return nil, fmt.Errorf("wait for host apiserver: %w\ncontainer logs:\n%s", err, dlogs)
 	}
 
@@ -295,6 +314,16 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 	logger.Info("cert-manager ready", zap.String("version", certmanager.Version), zap.String("issuer", certmanager.CAIssuer))
 
 	return c, nil
+}
+
+// containerLogs returns the container's last 100 log lines for an
+// error message. It has its own context, as the provision's may be what
+// ran out, and the failed container is removed right after.
+func containerLogs(cli *client.Client, name string) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	logs, _ := dockerexec.Logs(ctx, cli, name, "100")
+	return logs
 }
 
 // writeRegistriesToContainer stages the configured registries.yaml
@@ -504,11 +533,12 @@ func (c *Cluster) Teardown(keepDisk bool) error {
 	return TeardownConfig(c.cfg, keepDisk, c.logger)
 }
 
-// TeardownConfig removes the container by config without a running
-// Cluster instance. dockerexec.Remove treats NotFound as success,
-// so tearing down an already-gone container is a no-op. keepDisk
-// is ignored -- k3s state lives entirely inside the container, so
-// there is no persistent disk to keep across teardowns.
+// TeardownConfig removes the container and its volumes by config
+// without a running Cluster instance. dockerexec.Remove treats
+// NotFound as success, so tearing down an already-gone container is a
+// no-op. keepDisk is ignored: k3s state lives in the cluster's named
+// volumes, and a provision removes them before it creates a container
+// (see removeVolumes), so there is no disk a later provision could use.
 func TeardownConfig(cfg config.DockerConfig, keepDisk bool, logger *zap.Logger) error {
 	_ = keepDisk // ignored
 	if logger == nil {

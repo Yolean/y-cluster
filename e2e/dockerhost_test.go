@@ -393,6 +393,10 @@ func assertGuestDefinition(t *testing.T, dir, clientDir string) {
 	if out := guestExec(t, dir, "cloud-init status"); !strings.Contains(out, "status: done") {
 		t.Errorf("cloud-init: %s", out)
 	}
+	// The inotify limits k3s-in-docker needs, as on GitHub's runners.
+	if out := guestExec(t, dir, "sysctl -n fs.inotify.max_user_instances fs.inotify.max_user_watches"); strings.Join(strings.Fields(out), " ") != "1280 655360" {
+		t.Errorf("inotify limits: %q, want 1280 instances and 655360 watches", out)
+	}
 	held := guestExec(t, dir, "apt-mark showhold")
 	for _, p := range []string{"docker-ce", "docker-ce-cli", "containerd.io"} {
 		if !strings.Contains(held, p) {
