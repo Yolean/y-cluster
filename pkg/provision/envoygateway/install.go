@@ -40,7 +40,10 @@ type Options struct {
 	InstallSHA256 string
 	// AllowMinor lets a cluster that runs an older minor of the same
 	// major move to Version. Without it that move is refused, like a
-	// downgrade (pkg/provision/upgrade).
+	// downgrade (pkg/provision/upgrade). platform install sets it from
+	// --gateway-allow-minor; the provisioners never do, since they
+	// install on a new cluster, so a running cluster moves a minor only
+	// through platform install.
 	AllowMinor bool
 	// CacheOverride redirects the per-version cache root. Empty
 	// -> pkg/cache resolution order (XDG default).
@@ -160,7 +163,10 @@ func move(ctx context.Context, opts Options) (live, installed string, step upgra
 
 // ReleaseOf is the release tag of a controller image, v1.9.1 of
 // docker.io/envoyproxy/gateway:v1.9.1 or of a mirror's
-// <registry>/envoyproxy/gateway:v1.9.1@sha256:<digest>.
+// <registry>/envoyproxy/gateway:v1.9.1@sha256:<digest>. The repository
+// must end in envoyproxy/gateway: the tag of any other image says
+// nothing y-cluster can trust about the release, so a mirror that
+// renames the repository makes Move refuse.
 func ReleaseOf(image string) (string, error) {
 	ref, _, _ := strings.Cut(image, "@")
 	i := strings.LastIndex(ref, ":")

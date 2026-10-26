@@ -251,13 +251,26 @@ Deployment's image, and allows: an install where there is none, the
 same release again (which changes nothing), or a newer patch of the
 same minor. A newer minor of the same major is refused unless
 `platform install --gateway-allow-minor` is given, and is best-effort
-then: CRDs and defaults may change. A downgrade or another major is
-refused. A refusal names both releases and changes nothing, and
-`--check` reports it as a failure, not as a diff. Nothing is pruned: an
-object that an older release had and a newer one no longer ships stays
-on the cluster, which is one reason minors are best-effort. A config
-without `gateway.version` follows the pin: after a y-cluster upgrade
-that bumps it, the next converge moves the cluster, by the same rule.
+then: CRDs and defaults may change. That flag is the only way a running
+cluster moves to a newer minor; provision has none, since it installs
+on a new cluster. A downgrade or another major is refused. A refusal
+names both releases and changes nothing, and `--check` reports it as a
+failure, not as a diff. Nothing is pruned: an object that an older
+release had and a newer one no longer ships stays on the cluster, which
+is one reason minors are best-effort.
+
+A config without `gateway.version` follows the pin: after a y-cluster
+upgrade that bumps it, the next converge moves the cluster, by the same
+rule. A pin that moves to a newer minor then fails every converge
+without `--gateway-allow-minor` until someone decides. Pin
+`gateway.version` in a production config, so that a y-cluster upgrade
+does not move its gateway.
+
+The image's repository must end in `envoyproxy/gateway` for its tag to
+be read as the release. A mirror that keeps that path works
+(`registry.example/envoyproxy/gateway:v1.9.2`); one that renames the
+repository makes y-cluster refuse to apply, which is safe, but an
+airgapped setup needs to keep the name.
 
 `gateway.proxyImage`, `repository:tag@sha256:<digest>`, replaces the
 envoy image that the release runs for the proxy, for an Envoy fix that
