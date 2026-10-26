@@ -285,6 +285,9 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 		logger.Info("envoy gateway install skipped (gateway.skip)")
 	} else {
 		if err := envoygateway.Install(ctx, envoygateway.Options{
+			Version:              cfg.Gateway.Version,
+			InstallSHA256:        cfg.Gateway.InstallSHA256,
+			ProxyImage:           cfg.Gateway.ProxyImage,
 			ContextName:          cfg.Context,
 			GatewayClassName:     cfg.Gateway.ClassName,
 			DNSHintIP:            dnsHintIP(cfg),
@@ -300,7 +303,7 @@ func Provision(ctx context.Context, cfg config.DockerConfig, logger *zap.Logger)
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}
 		logger.Info("envoy gateway ready",
-			zap.String("version", envoygateway.Version),
+			zap.String("version", envoygateway.Release(cfg.Gateway.Version)),
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 		)
 	}

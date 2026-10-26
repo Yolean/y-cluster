@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"go.uber.org/zap"
 
@@ -13,22 +14,29 @@ import (
 )
 
 // Images extracts the container image references declared by an
-// EG install.yaml stream, deduplicated and in YAML stream order.
-// Pass an open reader -- typically os.Open of the path Ensure
-// returned, or an embedded test fixture.
-func Images(r io.Reader) ([]string, error) {
+// EG install.yaml stream, deduplicated and in YAML stream order,
+// followed by proxyImage (gateway.proxyImage) when it is set. Pass an
+// open reader -- typically os.Open of the path Ensure returned, or an
+// embedded test fixture.
+//
+// The proxy image the release runs by default is not among them:
+// Envoy Gateway has it compiled in, not in install.yaml.
+func Images(r io.Reader, proxyImage string) ([]string, error) {
 	refs, err := images.ListYAML(r)
 	if err != nil {
 		return nil, fmt.Errorf("list images from install.yaml: %w", err)
 	}
+	if proxyImage != "" && !slices.Contains(refs, proxyImage) {
+		refs = append(refs, proxyImage)
+	}
 	return refs, nil
 }
 
-// CacheImages pre-pulls every image referenced by install.yaml
-// into the per-version cache directory. Each image lands under
-// <version>/images/<digest>/ as a standard OCI v1 layout, so a
-// future ctr-import-from-layout step can stream the bytes onto
-// the node without re-fetching from upstream.
+// CacheImages pre-pulls every image referenced by install.yaml, and
+// proxyImage when it is set, into the per-version cache directory.
+// Each image lands under <version>/images/<digest>/ as a standard OCI
+// v1 layout, so a future ctr-import-from-layout step can stream the
+// bytes onto the node without re-fetching from upstream.
 //
 // Idempotent: pkg/images.Cache no-ops on a digest already on
 // disk. The first pre-cache after an EG version bump pays the
@@ -37,7 +45,7 @@ func Images(r io.Reader) ([]string, error) {
 // Returns the list of digest-pinned references actually cached
 // (post-resolution from the tag refs in install.yaml), so the
 // caller can record what the per-version dir contains.
-func CacheImages(ctx context.Context, opts EnsureOptions) ([]string, error) {
+func CacheImages(ctx context.Context, opts EnsureOptions, proxyImage string) ([]string, error) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -48,6 +56,7 @@ func CacheImages(ctx context.Context, opts EnsureOptions) ([]string, error) {
 	}
 	installPath, err := Ensure(ctx, EnsureOptions{
 		Version:       version,
+		InstallSHA256: opts.InstallSHA256,
 		CacheOverride: opts.CacheOverride,
 		Logger:        logger,
 	})
@@ -59,7 +68,7 @@ func CacheImages(ctx context.Context, opts EnsureOptions) ([]string, error) {
 		return nil, fmt.Errorf("open %s: %w", installPath, err)
 	}
 	defer f.Close()
-	refs, err := Images(f)
+	refs, err := Images(f, proxyImage)
 	if err != nil {
 		return nil, err
 	}

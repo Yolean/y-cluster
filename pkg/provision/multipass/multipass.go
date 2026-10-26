@@ -206,6 +206,9 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 		// non-tunnel-NAT path the CHANGE_REQUEST_HINT_IP migration
 		// names).
 		if err := envoygateway.Install(ctx, envoygateway.Options{
+			Version:              cfg.Gateway.Version,
+			InstallSHA256:        cfg.Gateway.InstallSHA256,
+			ProxyImage:           cfg.Gateway.ProxyImage,
 			ContextName:          cfg.Context,
 			GatewayClassName:     cfg.Gateway.ClassName,
 			Logger:               logger,
@@ -217,7 +220,7 @@ func Provision(ctx context.Context, cfg Config, logger *zap.Logger) (*Cluster, e
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}
 		logger.Info("envoy gateway ready",
-			zap.String("version", envoygateway.Version),
+			zap.String("version", envoygateway.Release(cfg.Gateway.Version)),
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 		)
 	}

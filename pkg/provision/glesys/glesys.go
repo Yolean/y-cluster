@@ -358,6 +358,9 @@ func (c *Cluster) installGateway(ctx context.Context) error {
 	}
 	ingress := c.ingressAddresses()
 	if err := envoygateway.Install(ctx, envoygateway.Options{
+		Version:              c.cfg.Gateway.Version,
+		InstallSHA256:        c.cfg.Gateway.InstallSHA256,
+		ProxyImage:           c.cfg.Gateway.ProxyImage,
 		ContextName:          c.cfg.Context,
 		GatewayClassName:     c.cfg.Gateway.ClassName,
 		DNSHintIP:            ingress[0],
@@ -372,7 +375,7 @@ func (c *Cluster) installGateway(ctx context.Context) error {
 		return fmt.Errorf("install envoy gateway: %w", err)
 	}
 	c.logger.Info("envoy gateway ready",
-		zap.String("version", envoygateway.Version),
+		zap.String("version", envoygateway.Release(c.cfg.Gateway.Version)),
 		zap.String("gatewayClass", c.cfg.Gateway.ClassName),
 		zap.Strings("externalIPs", ingress),
 	)

@@ -222,6 +222,50 @@ also take a qemu config. `k3s.serverConfig` works for qemu too; keys
 the platform depends on (`flannel-backend`, `disable-network-policy`,
 `data-dir`, `write-kubeconfig`, `https-listen-port`) are refused.
 
+**Envoy Gateway: y-cluster's pin is a default, and a cluster's config
+can move past it.** A y-cluster release installs the Envoy Gateway
+release it pins. `gateway.version` names another, with
+`gateway.installSha256`, the sha256 of that release's `install.yaml`.
+Both belong in the cluster's reviewed config: a patch release then
+reaches the cluster through a reviewed change, with no new y-cluster.
+
+```yaml
+gateway:
+  version: v1.9.2
+  installSha256: 0412a72907e57ff9b73c56a7bf6df5190bf0f6e4f8bb4bba34e38630bbab5778
+  # proxyImage: docker.io/envoyproxy/envoy:distroless-v1.39.5@sha256:9d84a586119a27b50437dbb01eccd4722832741539b1ed53c8e9d6da6067a6e0
+```
+
+```
+curl -sL https://github.com/envoyproxy/gateway/releases/download/v1.9.2/install.yaml | sha256sum
+```
+
+The download is checked against the digest before it enters the cache,
+and the cached file again before every use. A cached file that does not
+match is an error that says to remove it, never a silent download.
+y-cluster's own pin is checked the same way.
+
+Before anything is applied, `platform install` (and provision) reads
+the release the cluster runs, from the tag of the `envoy-gateway`
+Deployment's image, and allows: an install where there is none, the
+same release again (which changes nothing), or a newer patch of the
+same minor. A newer minor of the same major is refused unless
+`platform install --gateway-allow-minor` is given, and is best-effort
+then: CRDs and defaults may change. A downgrade or another major is
+refused. A refusal names both releases and changes nothing, and
+`--check` reports it as a failure, not as a diff. Nothing is pruned: an
+object that an older release had and a newer one no longer ships stays
+on the cluster, which is one reason minors are best-effort. A config
+without `gateway.version` follows the pin: after a y-cluster upgrade
+that bumps it, the next converge moves the cluster, by the same rule.
+
+`gateway.proxyImage`, `repository:tag@sha256:<digest>`, replaces the
+envoy image that the release runs for the proxy, for an Envoy fix that
+no Envoy Gateway release ships yet. It overrides the default of every
+later Envoy Gateway release too, until it is removed. A patch release
+is the ordinary path; `proxyImage` and minor upgrades are for when a
+patch release is not enough.
+
 ## Specs
 
 Design notes, migration recipes, and the still-pending feature

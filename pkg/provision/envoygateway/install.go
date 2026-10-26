@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Yolean/y-cluster/pkg/provision/upgrade"
 )
 
 // Namespace is where the EG controller and its services live in
@@ -31,6 +34,14 @@ type Options struct {
 	ContextName string
 	// Version overrides the pinned constant. Empty -> Version.
 	Version string
+	// InstallSHA256 is the sha256 of Version's install.yaml. Empty is
+	// VersionSHA256 for the constant and an error for any other
+	// release (see EnsureOptions).
+	InstallSHA256 string
+	// AllowMinor lets a cluster that runs an older minor of the same
+	// major move to Version. Without it that move is refused, like a
+	// downgrade (pkg/provision/upgrade).
+	AllowMinor bool
 	// CacheOverride redirects the per-version cache root. Empty
 	// -> pkg/cache resolution order (XDG default).
 	CacheOverride string
@@ -76,6 +87,11 @@ type Options struct {
 	ProxyCPURequest string
 	ProxyMemRequest string
 
+	// ProxyImage replaces the envoy image that the release would run
+	// for the proxy fleet (see EnvoyProxyYAML). Setting it applies the
+	// EnvoyProxy CR like ExternalIPs does.
+	ProxyImage string
+
 	// ExternalIPs makes the envoy Service reachable on these node
 	// addresses, for a cluster with no load balancer implementation
 	// (see EnvoyProxyYAML). Empty on every provider that has one:
@@ -100,16 +116,69 @@ type Options struct {
 // Rendered is what Install applies, in order. EnvoyProxy and
 // GatewayClass are nil when Install applies none.
 type Rendered struct {
-	Version      string
+	Version string
+	// Installed is the release the cluster runs, empty when none, and
+	// Step the move from it to Version.
+	Installed    string
+	Step         upgrade.Step
 	Install      []byte
 	EnvoyProxy   []byte
 	GatewayClass []byte
 }
 
+// Move reads which release the cluster runs, from the image tag of
+// the controller Deployment, and applies pkg/provision/upgrade's rule
+// to the move from it to opts.Version. A refused move is an
+// *upgrade.RefusedError. Render calls it first, so that nothing is
+// rendered, and nothing applied, for a move the rule refuses; callers
+// that apply other things first (platform.Install) call it before
+// those.
+func Move(ctx context.Context, opts Options) (installed string, step upgrade.Step, err error) {
+	if opts.ContextName == "" {
+		return "", 0, fmt.Errorf("envoygateway: ContextName is required")
+	}
+	_, installed, step, err = move(ctx, opts)
+	return installed, step, err
+}
+
+// move is Move, plus the live controller image it read.
+func move(ctx context.Context, opts Options) (live, installed string, step upgrade.Step, err error) {
+	version := Release(opts.Version)
+	if live, err = liveControllerImage(ctx, opts.ContextName); err != nil {
+		return "", "", 0, err
+	}
+	if live != "" {
+		if installed, err = ReleaseOf(live); err != nil {
+			return "", "", 0, fmt.Errorf("envoy gateway: %w, so y-cluster cannot tell which release is installed and applies none; nothing was changed", err)
+		}
+	}
+	if step, err = upgrade.Check(installed, version, opts.AllowMinor); err != nil {
+		return "", "", 0, fmt.Errorf("envoy gateway: %w; nothing was changed", err)
+	}
+	return live, installed, step, nil
+}
+
+// ReleaseOf is the release tag of a controller image, v1.9.1 of
+// docker.io/envoyproxy/gateway:v1.9.1 or of a mirror's
+// <registry>/envoyproxy/gateway:v1.9.1@sha256:<digest>.
+func ReleaseOf(image string) (string, error) {
+	ref, _, _ := strings.Cut(image, "@")
+	i := strings.LastIndex(ref, ":")
+	if i < 0 || strings.Contains(ref[i:], "/") {
+		return "", fmt.Errorf("the controller image %q has no tag", image)
+	}
+	repo, tag := ref[:i], ref[i+1:]
+	if repo != "envoyproxy/gateway" && !strings.HasSuffix(repo, "/envoyproxy/gateway") {
+		return "", fmt.Errorf("the controller image %q is not envoyproxy/gateway", image)
+	}
+	return tag, nil
+}
+
 // Render resolves the per-version install.yaml from cache (downloading
 // on first need) and renders every manifest Install applies, without
 // changing the cluster. It reads the cluster once: which controller
-// image runs, which decides whether the chart's hook Jobs are applied
+// image runs, which decides whether the move to opts.Version is
+// allowed at all (Move) and whether the chart's hook Jobs are applied
 // (see RenderInstall).
 func Render(ctx context.Context, opts Options) (Rendered, error) {
 	if opts.ContextName == "" {
@@ -123,8 +192,20 @@ func Render(ctx context.Context, opts Options) (Rendered, error) {
 	if version == "" {
 		version = Version
 	}
+	live, installed, step, err := move(ctx, opts)
+	if err != nil {
+		return Rendered{}, err
+	}
+	switch step {
+	case upgrade.Patch:
+		logger.Info("envoy gateway patch upgrade", zap.String("from", installed), zap.String("to", version))
+	case upgrade.Minor:
+		logger.Warn("envoy gateway minor upgrade: best-effort, CRDs and defaults may change, and objects the older release had are not removed",
+			zap.String("from", installed), zap.String("to", version))
+	}
 	installPath, err := Ensure(ctx, EnsureOptions{
 		Version:       version,
+		InstallSHA256: opts.InstallSHA256,
 		CacheOverride: opts.CacheOverride,
 		Logger:        logger,
 	})
@@ -135,23 +216,19 @@ func Render(ctx context.Context, opts Options) (Rendered, error) {
 	if err != nil {
 		return Rendered{}, fmt.Errorf("read %s: %w", installPath, err)
 	}
-	live, err := liveControllerImage(ctx, opts.ContextName)
-	if err != nil {
-		return Rendered{}, err
-	}
 	install, err := RenderInstall(upstream, opts.ControllerCPURequest, opts.ControllerMemRequest, live)
 	if err != nil {
 		return Rendered{}, err
 	}
-	r := Rendered{Version: version, Install: install}
+	r := Rendered{Version: version, Installed: installed, Step: step, Install: install}
 	// EnvoyProxy is applied before the GatewayClass so its
 	// parametersRef resolves on first reconcile. Without proxy
 	// settings there is no CR and the GatewayClass has no
 	// parametersRef: EG uses its built-in defaults.
 	envoyProxyName := ""
-	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet || opts.MergeGateways {
+	if opts.ProxyCPURequest != "" || opts.ProxyMemRequest != "" || len(opts.ExternalIPs) > 0 || opts.DaemonSet || opts.MergeGateways || opts.ProxyImage != "" {
 		envoyProxyName = EnvoyProxyName
-		r.EnvoyProxy = EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet, opts.MergeGateways)
+		r.EnvoyProxy = EnvoyProxyYAML(opts.ProxyCPURequest, opts.ProxyMemRequest, opts.ExternalIPs, opts.DaemonSet, opts.MergeGateways, opts.ProxyImage)
 	}
 	if opts.GatewayClassName != "" {
 		r.GatewayClass = GatewayClassYAML(opts.GatewayClassName, opts.DNSHintIP, envoyProxyName)
@@ -181,6 +258,10 @@ func liveControllerImage(ctx context.Context, contextName string) (string, error
 // Idempotent: a re-run with the same options on a cluster that has
 // this release changes nothing (see RenderInstall). The cache lookup
 // is cheap when the version directory already holds install.yaml.
+//
+// An upgrade is the same apply at another release, once Move allows
+// it. Nothing is pruned: what the older release had and the newer one
+// does not ship stays on the cluster.
 //
 // Order:
 //
@@ -214,6 +295,8 @@ func Install(ctx context.Context, opts Options) error {
 
 	logger.Info("applying envoy-gateway install manifest",
 		zap.String("version", r.Version),
+		zap.String("installed", r.Installed),
+		zap.Stringer("step", r.Step),
 		zap.String("namespace", Namespace),
 		zap.String("controllerCPU", opts.ControllerCPURequest),
 		zap.String("controllerMemory", opts.ControllerMemRequest),
@@ -245,6 +328,7 @@ func Install(ctx context.Context, opts Options) error {
 			zap.Strings("externalIPs", opts.ExternalIPs),
 			zap.Bool("daemonSet", opts.DaemonSet),
 			zap.Bool("mergeGateways", opts.MergeGateways),
+			zap.String("proxyImage", opts.ProxyImage),
 		)
 		if err := kubectlApplyStdin(ctx, opts.ContextName, r.EnvoyProxy); err != nil {
 			return fmt.Errorf("apply EnvoyProxy: %w", err)

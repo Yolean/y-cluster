@@ -101,3 +101,57 @@ func TestCheck(t *testing.T) {
 		t.Error("no context")
 	}
 }
+
+// liveGateway puts a kubectl on PATH that reports liveImage as the
+// running Envoy Gateway controller and logs every call.
+func liveGateway(t *testing.T, liveImage string) string {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+echo "$@" >> ` + log + `
+case "$*" in
+*" get deployment envoy-gateway "*) printf '%s' '` + liveImage + `' ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "kubectl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// A move the version rule refuses changes nothing: Install stops
+// before Cilium, and Check reports a failure, not drift.
+func TestRefusedGatewayMoveChangesNothing(t *testing.T) {
+	opts := defaulted(t)
+	opts.CertManager.Skip = true
+	for _, c := range []struct {
+		live, rule string
+		allowMinor bool
+	}{
+		{live: "envoyproxy/gateway:v1.9.99", rule: "a downgrade is refused"},
+		{live: "envoyproxy/gateway:v1.8.5", rule: "a minor upgrade is refused"},
+		{live: "envoyproxy/gateway:v0.9.1", rule: "a change of major version is refused", allowMinor: true},
+	} {
+		opts.GatewayAllowMinor = c.allowMinor
+		log := liveGateway(t, c.live)
+		err := Install(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), c.rule) || !strings.Contains(err.Error(), envoygateway.Version) {
+			t.Errorf("live %s: Install: %v", c.live, err)
+		}
+		calls, _ := os.ReadFile(log)
+		if strings.TrimSpace(string(calls)) != "--context=ctx -n envoy-gateway-system get deployment envoy-gateway --ignore-not-found -o jsonpath={.spec.template.spec.containers[?(@.name==\"envoy-gateway\")].image}" {
+			t.Errorf("live %s: Install ran more than the version check:\n%s", c.live, calls)
+		}
+		var out bytes.Buffer
+		drift, err := Check(context.Background(), opts, &out)
+		if err == nil || !strings.Contains(err.Error(), c.rule) || len(drift) > 0 {
+			t.Errorf("live %s: Check: %v, drift %v", c.live, err, drift)
+		}
+		if calls, _ := os.ReadFile(log); strings.Contains(string(calls), " diff ") || strings.Contains(string(calls), " apply ") {
+			t.Errorf("live %s: a refused move was diffed or applied:\n%s", c.live, calls)
+		}
+	}
+}
