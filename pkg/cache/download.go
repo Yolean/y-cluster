@@ -32,6 +32,29 @@ func DownloadSHA256(ctx context.Context, url, dest, wantHex string) error {
 	return download(ctx, url, dest, strings.ToLower(wantHex))
 }
 
+// VerifySHA256 checks a file that DownloadSHA256 put in the cache
+// against wantHex before it is used again: a cache hit is only as good
+// as the bytes on disk, which anything with write access to the cache
+// can change.
+func VerifySHA256(path, wantHex string) error {
+	if len(wantHex) != sha256.Size*2 {
+		return fmt.Errorf("%s: expected a SHA-256 of %d hex characters, got %q", path, sha256.Size*2, wantHex)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if got, want := hex.EncodeToString(h.Sum(nil)), strings.ToLower(wantHex); got != want {
+		return fmt.Errorf("%s has SHA-256 %s, want %s", path, got, want)
+	}
+	return nil
+}
+
 func download(ctx context.Context, url, dest, wantSHA256 string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -157,3 +157,28 @@ func TestDownloadSHA256_RejectsMalformedDigest(t *testing.T) {
 		t.Fatal("a short digest must be refused before any request")
 	}
 }
+
+func TestVerifySHA256(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact")
+	if err := os.WriteFile(path, []byte("payload\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sha256 of "payload\n"
+	want := "d4e4877bac978b7952f0d544fc52ebff5411d351d129f1f056fa43f11da9af2b"
+	if err := VerifySHA256(path, strings.ToUpper(want)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replaced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := VerifySHA256(path, want)
+	if err == nil || !strings.Contains(err.Error(), "want "+want) || !strings.Contains(err.Error(), path) {
+		t.Fatalf("want a mismatch naming the file and both digests, got %v", err)
+	}
+	if err := VerifySHA256(path, "abc"); err == nil {
+		t.Fatal("a short digest must be refused")
+	}
+	if err := VerifySHA256(filepath.Join(t.TempDir(), "missing"), want); err == nil {
+		t.Fatal("a missing file must be an error")
+	}
+}
