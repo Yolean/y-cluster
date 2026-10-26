@@ -73,18 +73,9 @@ func TestHost_SplitPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	cacheDir := e2eQEMUCacheDir(t)
-	password := randomHex(t, 16)
-	key := filepath.Join(cacheDir, "deployer-ssh")
-	if err := sshexec.GenerateKey(key); err != nil {
-		t.Fatal(err)
-	}
-	sshPort := freePort(t)
-	bootPlainGuest(t, ctx, cacheDir, name, user, password, key, sshPort)
-	node := sshexec.Target{Host: "127.0.0.1", Port: sshPort, User: user, KeyPath: key}
-	sudo := func(command string) ([]byte, error) {
-		return sshexec.Exec(ctx, node, "sudo -S -p '' "+command, strings.NewReader(password+"\n"))
-	}
+	host := bootHost(t, ctx, name, user)
+	node := host.ssh
+	sudo := func(command string) ([]byte, error) { return host.sudo(ctx, command) }
 
 	// The account is what the test claims: sudo works with the
 	// password and refuses without it.
@@ -95,8 +86,7 @@ func TestHost_SplitPath(t *testing.T) {
 		t.Fatalf("sudo -S: %s: %v", out, err)
 	}
 
-	// 1. The bundle, from a provider host config with additive
-	// server settings.
+	// 1. A provider host config with additive server settings.
 	cfgDir := t.TempDir()
 	writeFile(t, filepath.Join(cfgDir, "y-cluster-provision.yaml"), `provider: host
 context: `+contextName+`
@@ -107,45 +97,9 @@ k3s:
 gateway:
   dnsHintIP: 127.0.0.1
 `)
-	bundleDir := filepath.Join(t.TempDir(), "bundle")
-	runCLI(t, bin, nil, "k3s", "bundle", "-c", cfgDir, "--out", bundleDir)
-
-	// 2. Apply it from the manifest, as a converge task would.
-	m, err := k3s.ReadBundle(bundleDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := sshexec.Exec(ctx, node, "mktemp -d", nil)
-	if err != nil {
-		t.Fatalf("mktemp: %s: %v", out, err)
-	}
-	staging := strings.TrimSpace(string(out))
-	for _, f := range append(bundleFilePaths(m), m.Install.Script) {
-		if err := sshexec.SCP(ctx, node, filepath.Join(bundleDir, f), staging+"/"+f); err != nil {
-			t.Fatalf("copy %s: %v", f, err)
-		}
-	}
-	for _, f := range m.Files {
-		if out, err := sudo("install -D -m " + f.Mode + " " + shquote.Quote(staging+"/"+f.Path) + " " + shquote.Quote(f.Dest)); err != nil {
-			t.Fatalf("install %s: %s: %v", f.Dest, out, err)
-		}
-		out, err := sudo("sha256sum " + shquote.Quote(f.Dest))
-		if err != nil || !strings.HasPrefix(string(out), f.SHA256+" ") {
-			t.Fatalf("%s on the node: %s %v, manifest says %s", f.Dest, out, err, f.SHA256)
-		}
-	}
-	if out, err := sudo("env " + strings.Join(m.Install.EnvAssignments(), " ") + " sh " + shquote.Quote(staging+"/"+m.Install.Script)); err != nil {
-		t.Fatalf("installer: %s: %v", out, err)
-	}
-	for _, c := range m.PostInstall {
-		if out, err := sudo("sh -c " + shquote.Quote(c)); err != nil {
-			t.Fatalf("post-install %q: %s: %v", c, out, err)
-		}
-	}
-	waitFor(t, ctx, 4*time.Minute, "k3s apiserver", func() (bool, string) {
-		out, err := sudo("k3s kubectl get --raw=/readyz")
-		return err == nil && strings.TrimSpace(string(out)) == "ok", string(out)
-	})
+	// 2. Its bundle, applied from the manifest as a converge task
+	// would.
+	host.applyBundle(t, ctx, bin, cfgDir)
 
 	// The node runs plain `k3s server` with everything in
 	// config.yaml, and the additions took effect.
@@ -169,22 +123,7 @@ gateway:
 	}
 
 	// 3. The kubeconfig, read as root and imported through a tunnel.
-	raw, err := sudo("cat " + k3s.KubeconfigPath)
-	if err != nil {
-		t.Fatalf("read k3s.yaml: %s: %v", raw, err)
-	}
-	tunnelPort := freePort(t)
-	openTunnel(t, key, sshPort, user, tunnelPort)
-	t.Cleanup(func() {
-		if m, err := kubeconfig.FromEnv(contextName, contextName, zap.NewNop()); err == nil {
-			m.CleanupStale()
-		}
-	})
-	runCLI(t, bin, raw, "kubeconfig", "import", "--context", contextName, "--server", "https://127.0.0.1:"+tunnelPort)
-	waitFor(t, ctx, time.Minute, "apiserver through the tunnel", func() (bool, string) {
-		out, err := exec.Command("kubectl", "--context="+contextName, "get", "--raw=/readyz").CombinedOutput()
-		return err == nil && strings.TrimSpace(string(out)) == "ok", string(out)
-	})
+	host.importKubeconfig(t, ctx, bin, contextName)
 
 	// 4. The platform.
 	runCLI(t, bin, nil, "platform", "install", "-c", cfgDir)
@@ -230,7 +169,7 @@ gateway:
 	if out, err := exec.Command("kubectl", "--context="+contextName, "annotate", "--overwrite", "gatewayclass", "y-cluster", "yolean.se/dns-hint-ip=198.51.100.7").CombinedOutput(); err != nil {
 		t.Fatalf("annotate: %s: %v", out, err)
 	}
-	out, err = cliOutput(bin, nil, "platform", "install", "-c", cfgDir, "--check")
+	out, err := cliOutput(bin, nil, "platform", "install", "-c", cfgDir, "--check")
 	if err == nil || !strings.Contains(string(out), "198.51.100.7") || !strings.Contains(string(out), "GatewayClass: would change") {
 		t.Errorf("--check after a change: %v\n%s", err, out)
 	}
@@ -238,6 +177,106 @@ gateway:
 	if out, err := cliOutput(bin, nil, "platform", "install", "-c", cfgDir, "--check"); err != nil {
 		t.Errorf("--check after install restored the change: %v\n%s", err, out)
 	}
+}
+
+// hostNode is a plain guest booted as an operator's host: an account
+// whose sudo asks for its password, ssh on a loopback port.
+type hostNode struct {
+	ssh      sshexec.Target
+	user     string
+	password string
+}
+
+// bootHost boots a plain guest (bootPlainGuest) with a new key and
+// password for user.
+func bootHost(t *testing.T, ctx context.Context, name, user string) hostNode {
+	t.Helper()
+	cacheDir := e2eQEMUCacheDir(t)
+	password := randomHex(t, 16)
+	key := filepath.Join(cacheDir, user+"-ssh")
+	if err := sshexec.GenerateKey(key); err != nil {
+		t.Fatal(err)
+	}
+	sshPort := freePort(t)
+	bootPlainGuest(t, ctx, cacheDir, name, user, password, key, sshPort)
+	return hostNode{
+		ssh:      sshexec.Target{Host: "127.0.0.1", Port: sshPort, User: user, KeyPath: key},
+		user:     user,
+		password: password,
+	}
+}
+
+// sudo runs command as root, with the password on stdin.
+func (n hostNode) sudo(ctx context.Context, command string) ([]byte, error) {
+	return sshexec.Exec(ctx, n.ssh, "sudo -S -p '' "+command, strings.NewReader(n.password+"\n"))
+}
+
+// applyBundle writes `y-cluster k3s bundle` for cfgDir and applies it
+// from its manifest alone, as an operator's converge task would: every
+// privileged step through sudo -S, each file's sha256 checked where it
+// landed. It returns once the apiserver answers.
+func (n hostNode) applyBundle(t *testing.T, ctx context.Context, bin, cfgDir string) {
+	t.Helper()
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	runCLI(t, bin, nil, "k3s", "bundle", "-c", cfgDir, "--out", bundleDir)
+	m, err := k3s.ReadBundle(bundleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sshexec.Exec(ctx, n.ssh, "mktemp -d", nil)
+	if err != nil {
+		t.Fatalf("mktemp: %s: %v", out, err)
+	}
+	staging := strings.TrimSpace(string(out))
+	for _, f := range append(bundleFilePaths(m), m.Install.Script) {
+		if err := sshexec.SCP(ctx, n.ssh, filepath.Join(bundleDir, f), staging+"/"+f); err != nil {
+			t.Fatalf("copy %s: %v", f, err)
+		}
+	}
+	for _, f := range m.Files {
+		if out, err := n.sudo(ctx, "install -D -m "+f.Mode+" "+shquote.Quote(staging+"/"+f.Path)+" "+shquote.Quote(f.Dest)); err != nil {
+			t.Fatalf("install %s: %s: %v", f.Dest, out, err)
+		}
+		out, err := n.sudo(ctx, "sha256sum "+shquote.Quote(f.Dest))
+		if err != nil || !strings.HasPrefix(string(out), f.SHA256+" ") {
+			t.Fatalf("%s on the node: %s %v, manifest says %s", f.Dest, out, err, f.SHA256)
+		}
+	}
+	if out, err := n.sudo(ctx, "env "+strings.Join(m.Install.EnvAssignments(), " ")+" sh "+shquote.Quote(staging+"/"+m.Install.Script)); err != nil {
+		t.Fatalf("installer: %s: %v", out, err)
+	}
+	for _, c := range m.PostInstall {
+		if out, err := n.sudo(ctx, "sh -c "+shquote.Quote(c)); err != nil {
+			t.Fatalf("post-install %q: %s: %v", c, out, err)
+		}
+	}
+	waitFor(t, ctx, 4*time.Minute, "k3s apiserver", func() (bool, string) {
+		out, err := n.sudo(ctx, "k3s kubectl get --raw=/readyz")
+		return err == nil && strings.TrimSpace(string(out)) == "ok", string(out)
+	})
+}
+
+// importKubeconfig reads k3s.yaml as root and pipes it to `y-cluster
+// kubeconfig import` under contextName, pointed at the local end of an
+// ssh tunnel to the node's apiserver.
+func (n hostNode) importKubeconfig(t *testing.T, ctx context.Context, bin, contextName string) {
+	t.Helper()
+	raw, err := n.sudo(ctx, "cat "+k3s.KubeconfigPath)
+	if err != nil {
+		t.Fatalf("read k3s.yaml: %s: %v", raw, err)
+	}
+	tunnelPort := freePort(t)
+	openTunnel(t, n.ssh.KeyPath, n.ssh.Port, n.user, tunnelPort)
+	t.Cleanup(func() {
+		if m, err := kubeconfig.FromEnv(contextName, contextName, zap.NewNop()); err == nil {
+			m.CleanupStale()
+		}
+	})
+	runCLI(t, bin, raw, "kubeconfig", "import", "--context", contextName, "--server", "https://127.0.0.1:"+tunnelPort)
+	waitFor(t, ctx, time.Minute, "apiserver through the tunnel", func() (bool, string) {
+		out, err := exec.Command("kubectl", "--context="+contextName, "get", "--raw=/readyz").CombinedOutput()
+		return err == nil && strings.TrimSpace(string(out)) == "ok", string(out)
+	})
 }
 
 func bundleFilePaths(m *k3s.BundleManifest) []string {

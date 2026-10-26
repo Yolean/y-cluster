@@ -309,6 +309,9 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 		logger.Info("envoy gateway install skipped (gateway.skip)")
 	} else {
 		if err := envoygateway.Install(ctx, envoygateway.Options{
+			Version:          cfg.Gateway.Version,
+			InstallSHA256:    cfg.Gateway.InstallSHA256,
+			ProxyImage:       cfg.Gateway.ProxyImage,
 			ContextName:      cfg.Context,
 			GatewayClassName: cfg.Gateway.ClassName,
 			DNSHintIP:        lbIPv4,
@@ -317,7 +320,7 @@ func Provision(ctx context.Context, cfg config.HetznerConfig, logger *zap.Logger
 			return nil, fmt.Errorf("install envoy gateway: %w", err)
 		}
 		logger.Info("envoy gateway ready",
-			zap.String("version", envoygateway.Version),
+			zap.String("version", envoygateway.Release(cfg.Gateway.Version)),
 			zap.String("gatewayClass", cfg.Gateway.ClassName),
 			zap.String("dnsHintIP", lbIPv4),
 		)

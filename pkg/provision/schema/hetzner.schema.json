@@ -21,6 +21,16 @@
           "description": "Provider host only. The IP address at which clients reach ports 80 and 443 of the host (the node's own address or that of a NAT in front of it which keeps the client address). Published on the GatewayClass as the yolean.se/dns-hint-ip annotation; empty publishes none. The other providers derive it from their port forwards.",
           "type": "string"
         },
+        "installSha256": {
+          "description": "The sha256 of the configured release's install.yaml: curl -sL https://github.com/envoyproxy/gateway/releases/download/\u003cversion\u003e/install.yaml | sha256sum. Required with version. The download and every later use of the cached file are checked against it.",
+          "pattern": "^[0-9a-fA-F]{64}$",
+          "type": "string"
+        },
+        "proxyImage": {
+          "description": "Image of the envoy proxy fleet in place of the release's default; repository:tag@sha256:\u003cdigest\u003e. For an Envoy fix that no Envoy Gateway release ships yet. It also overrides the default of every later Envoy Gateway release until it is removed.",
+          "pattern": "^[a-zA-Z0-9._-]+(:[0-9]+)?(/[a-zA-Z0-9._/-]+)?(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
         "resources": {
           "$ref": "#/$defs/GatewayResources",
           "description": "Resource requests for the bundled EG install. Defaults: controller 10m/64Mi and proxy 10m/128Mi. Limits are left as upstream sets them."
@@ -28,6 +38,11 @@
         "skip": {
           "description": "If true the Envoy Gateway install is skipped entirely. k3s still runs with --disable=traefik.",
           "type": "boolean"
+        },
+        "version": {
+          "description": "Envoy Gateway release tag (vMAJOR.MINOR.PATCH) to install instead of the release this y-cluster pins; requires installSha256. A cluster that runs a release may move to a newer patch of the same minor. A newer minor needs platform install --gateway-allow-minor and is best-effort; a downgrade or a change of major is refused. Nothing that the older release had is removed.",
+          "pattern": "^v[0-9A-Za-z][0-9A-Za-z.+-]*$",
+          "type": "string"
         }
       },
       "type": "object"

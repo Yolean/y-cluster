@@ -17,6 +17,7 @@ import (
 	"github.com/Yolean/y-cluster/pkg/provision/k3s"
 	"github.com/Yolean/y-cluster/pkg/provision/platform"
 	"github.com/Yolean/y-cluster/pkg/provision/qemu"
+	"github.com/Yolean/y-cluster/pkg/provision/upgrade"
 )
 
 // The three steps qemu provision is composed of after the VM is up,
@@ -127,6 +128,7 @@ func platformInstallCmd() *cobra.Command {
 		configDir   string
 		contextName string
 		check       bool
+		allowMinor  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -146,6 +148,16 @@ Every step is a server-side apply, so a second run on an installed
 cluster changes nothing. --check applies nothing: it prints what an
 install would change (kubectl diff --server-side per manifest) and
 exits non-zero when anything would.
+
+Envoy Gateway is y-cluster's pinned release, or gateway.version with
+its gateway.installSha256. Before anything is applied, the release the
+cluster runs is read from the envoy-gateway Deployment's image, and the
+move to the configured one must be: none installed, the same release,
+or a newer patch of the same minor. A newer minor of the same major is
+refused unless --gateway-allow-minor is given, and is best-effort then:
+CRDs and defaults may change, and nothing that the older release had is
+removed. A downgrade or another major is refused. A refused move changes
+nothing, and --check reports it as a failure, not as a diff.
 
 -c takes a provider host config, or a qemu config (what its provision
 installs). --context overrides the config's context.`,
@@ -168,10 +180,11 @@ installs). --context overrides the config's context.`,
 			if contextName != "" {
 				opts.Context = contextName
 			}
+			opts.GatewayAllowMinor = allowMinor
 			if check {
 				drift, err := platform.Check(cmd.Context(), opts, cmd.OutOrStdout())
 				if err != nil {
-					return err
+					return refusedMove(cmd, err)
 				}
 				if len(drift) > 0 {
 					cmd.SilenceUsage = true
@@ -181,7 +194,7 @@ installs). --context overrides the config's context.`,
 				return nil
 			}
 			if err := platform.Install(cmd.Context(), opts); err != nil {
-				return err
+				return refusedMove(cmd, err)
 			}
 			logger.Info("platform ready", zap.String("context", opts.Context))
 			return nil
@@ -190,10 +203,25 @@ installs). --context overrides the config's context.`,
 	cmd.Flags().StringVarP(&configDir, "config", "c", "", "directory containing y-cluster-provision.yaml")
 	cmd.Flags().StringVar(&contextName, "context", "", "kubeconfig context to install on (default: the config's context)")
 	cmd.Flags().BoolVar(&check, "check", false, "report what an install would change, apply nothing, exit non-zero on drift")
+	cmd.Flags().BoolVar(&allowMinor, "gateway-allow-minor", false, "let Envoy Gateway move to a newer minor release than the cluster runs (best-effort)")
 	if err := cmd.MarkFlagRequired("config"); err != nil {
 		panic(err)
 	}
 	return cmd
+}
+
+// refusedMove names --gateway-allow-minor on a refused minor upgrade.
+// A refusal is the config's or the cluster's state, not a usage error.
+func refusedMove(cmd *cobra.Command, err error) error {
+	var refused *upgrade.RefusedError
+	if !errors.As(err, &refused) {
+		return err
+	}
+	cmd.SilenceUsage = true
+	if refused.MinorNotAllowed {
+		return fmt.Errorf("%w; --gateway-allow-minor allows it", err)
+	}
+	return err
 }
 
 func kubeconfigCmd() *cobra.Command {

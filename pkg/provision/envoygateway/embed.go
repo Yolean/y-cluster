@@ -109,8 +109,14 @@ const EnvoyProxyName = "y-cluster"
 // plane) are skipped, which is right: their addresses are not
 // listed.
 //
+// image, when given, is the envoy container's image, in place of the
+// one the Envoy Gateway release runs by default. It is for an Envoy
+// fix that no Envoy Gateway release ships yet, and it stays in effect
+// across later Envoy Gateway upgrades, whose own default it then
+// overrides too, until it is removed. Empty leaves the field out.
+//
 // Pure function for unit-test pinning.
-func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonSet, mergeGateways bool) []byte {
+func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonSet, mergeGateways bool, image string) []byte {
 	var service string
 	if len(externalIPs) > 0 {
 		service = "        type: NodePort\n        patch:\n          type: StrategicMerge\n          value:\n            spec:\n              externalIPs:\n"
@@ -125,6 +131,10 @@ func EnvoyProxyYAML(cpuRequest, memRequest string, externalIPs []string, daemonS
 	var merge string
 	if mergeGateways {
 		merge = "  mergeGateways: true\n"
+	}
+	var containerImage string
+	if image != "" {
+		containerImage = "          image: " + image + "\n"
 	}
 	return []byte(fmt.Sprintf(`---
 # y-cluster's tuning for the per-Gateway envoy proxy pod.
@@ -142,9 +152,9 @@ spec:
         externalTrafficPolicy: Local
 %s      %s:
         container:
-          resources:
+%s          resources:
             requests:
               cpu: %s
               memory: %s
-`, EnvoyProxyName, Namespace, merge, service, fleet, cpuRequest, memRequest))
+`, EnvoyProxyName, Namespace, merge, service, fleet, containerImage, cpuRequest, memRequest))
 }

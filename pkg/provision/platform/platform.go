@@ -44,7 +44,10 @@ type Options struct {
 	// DNSHintIP is published on the GatewayClass (see
 	// envoygateway.DNSHintIPAnnotation); empty publishes none.
 	DNSHintIP string
-	Logger    *zap.Logger
+	// GatewayAllowMinor lets Envoy Gateway move to a newer minor of
+	// the release the cluster runs (envoygateway.Options.AllowMinor).
+	GatewayAllowMinor bool
+	Logger            *zap.Logger
 }
 
 func (o Options) logger() *zap.Logger {
@@ -67,6 +70,10 @@ func (o Options) localStorage() localstorage.Options {
 func (o Options) envoyGateway() envoygateway.Options {
 	return envoygateway.Options{
 		ContextName:          o.Context,
+		Version:              o.Gateway.Version,
+		InstallSHA256:        o.Gateway.InstallSHA256,
+		AllowMinor:           o.GatewayAllowMinor,
+		ProxyImage:           o.Gateway.ProxyImage,
 		GatewayClassName:     o.Gateway.ClassName,
 		DNSHintIP:            o.DNSHintIP,
 		Logger:               o.logger(),
@@ -91,11 +98,20 @@ func (o Options) certManager() certmanager.Options {
 // unless the config skips them. Every step is a server-side apply of
 // rendered manifests, so a second run on an installed cluster changes
 // nothing.
+//
+// Envoy Gateway's version rule (envoygateway.Move) is checked first,
+// so that a move it refuses changes nothing, Cilium and storage
+// included.
 func Install(ctx context.Context, opts Options) error {
 	if opts.Context == "" {
 		return errors.New("platform: a kubeconfig context is required")
 	}
 	logger := opts.logger()
+	if !opts.Gateway.Skip {
+		if _, _, err := envoygateway.Move(ctx, opts.envoyGateway()); err != nil {
+			return err
+		}
+	}
 	nodes := opts.Nodes
 	if nodes == 0 {
 		nodes = 1
@@ -113,7 +129,8 @@ func Install(ctx context.Context, opts Options) error {
 			return fmt.Errorf("install envoy gateway: %w", err)
 		}
 		logger.Info("envoy gateway ready",
-			zap.String("version", envoygateway.Version),
+			zap.String("version", envoygateway.Release(opts.Gateway.Version)),
+			zap.String("proxyImage", opts.Gateway.ProxyImage),
 			zap.String("gatewayClass", opts.Gateway.ClassName),
 		)
 	}
@@ -138,7 +155,8 @@ type Manifest struct {
 // Manifests renders, in order, every manifest Install applies to the
 // cluster behind opts.Context. Rendering reads the cluster but never
 // changes it: Envoy Gateway's install depends on the release already
-// running (envoygateway.RenderInstall).
+// running (envoygateway.RenderInstall), and a move to the configured
+// release that the version rule refuses is an error, not a manifest.
 func Manifests(ctx context.Context, opts Options) ([]Manifest, error) {
 	if opts.Context == "" {
 		return nil, errors.New("platform: a kubeconfig context is required")

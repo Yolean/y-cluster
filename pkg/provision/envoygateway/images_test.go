@@ -29,7 +29,7 @@ spec:
 `
 
 func TestImages_HasController(t *testing.T) {
-	got, err := Images(strings.NewReader(fakeInstallYAML))
+	got, err := Images(strings.NewReader(fakeInstallYAML), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestImages_HasController(t *testing.T) {
 // the same. ListYAML guarantees deduplication; this pins that
 // contract so a future refactor can't regress it.
 func TestImages_Deduplicated(t *testing.T) {
-	got, err := Images(strings.NewReader(fakeInstallYAML))
+	got, err := Images(strings.NewReader(fakeInstallYAML), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,5 +64,29 @@ func TestImages_Deduplicated(t *testing.T) {
 			t.Fatalf("duplicate ref in Images(): %q", ref)
 		}
 		seen[ref] = true
+	}
+}
+
+// gateway.proxyImage is in the list, so that pre-caching and airgapped
+// installs cover the image the proxy fleet runs; once, at the end.
+func TestImages_ProxyImage(t *testing.T) {
+	const proxy = "docker.io/envoyproxy/envoy:distroless-v1.39.5@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	without, err := Images(strings.NewReader(fakeInstallYAML), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := Images(strings.NewReader(fakeInstallYAML), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(with) != len(without)+1 || with[len(with)-1] != proxy {
+		t.Fatalf("with proxyImage %v, without %v", with, without)
+	}
+	again, err := Images(strings.NewReader(fakeInstallYAML+"      - name: envoy\n        image: "+proxy+"\n"), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(strings.Join(again, "\n"), proxy); n != 1 {
+		t.Fatalf("proxyImage listed %d times: %v", n, again)
 	}
 }

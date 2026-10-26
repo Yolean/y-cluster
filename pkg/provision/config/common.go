@@ -31,6 +31,7 @@
 package config
 
 import (
+	"regexp"
 	"sort"
 	"time"
 
@@ -252,6 +253,8 @@ type StorageConfig struct {
 //   - skip: false (default)                      install CRDs, controller, default GatewayClass
 //   - skip: true                                 no CRDs, controller, or GatewayClass
 //   - className: <string> (default "y-cluster")  rename the default GatewayClass
+//   - version + installSha256                    another Envoy Gateway release than y-cluster's pin
+//   - proxyImage                                 another envoy image for the proxy fleet
 //
 // All-or-nothing: there is no "install controller without a default
 // GatewayClass" option. A consumer that wants to ship their own
@@ -298,6 +301,57 @@ type GatewayConfig struct {
 	// DNSHintIP is published as the GatewayClass's
 	// yolean.se/dns-hint-ip annotation. Provider host only.
 	DNSHintIP string `yaml:"dnsHintIP,omitempty" json:"dnsHintIP,omitempty" jsonschema:"description=Provider host only. The IP address at which clients reach ports 80 and 443 of the host (the node's own address or that of a NAT in front of it which keeps the client address). Published on the GatewayClass as the yolean.se/dns-hint-ip annotation; empty publishes none. The other providers derive it from their port forwards."`
+
+	// Version is the Envoy Gateway release to install in place of the
+	// one this y-cluster pins (envoygateway.Version), so that a
+	// cluster's reviewed config, not a y-cluster release, decides when
+	// it takes a patch release. Empty is the pin. How far a cluster
+	// that runs a release may move is pkg/provision/upgrade's rule,
+	// checked on the cluster before anything is applied.
+	//
+	// A version always comes with InstallSHA256, the pinned one too:
+	// this package cannot read the pin (envoygateway depends on it),
+	// and a reviewed config then holds both halves of what it pins.
+	Version string `yaml:"version,omitempty" json:"version,omitempty" jsonschema:"pattern=^v[0-9A-Za-z][0-9A-Za-z.+-]*$,description=Envoy Gateway release tag (vMAJOR.MINOR.PATCH) to install instead of the release this y-cluster pins; requires installSha256. A cluster that runs a release may move to a newer patch of the same minor. A newer minor needs platform install --gateway-allow-minor and is best-effort; a downgrade or a change of major is refused. Nothing that the older release had is removed."`
+
+	// InstallSHA256 is the sha256 of Version's install.yaml, checked
+	// on download and before every use of the cached file.
+	InstallSHA256 string `yaml:"installSha256,omitempty" json:"installSha256,omitempty" jsonschema:"pattern=^[0-9a-fA-F]{64}$,description=The sha256 of the configured release's install.yaml: curl -sL https://github.com/envoyproxy/gateway/releases/download/<version>/install.yaml | sha256sum. Required with version. The download and every later use of the cached file are checked against it."`
+
+	// ProxyImage replaces the envoy image that the release runs for
+	// the proxy fleet, for an Envoy fix that no Envoy Gateway release
+	// ships yet. It stays in effect across Envoy Gateway upgrades until
+	// it is removed. The digest is required: the EnvoyProxy CR pins
+	// what the config reviewed.
+	ProxyImage string `yaml:"proxyImage,omitempty" json:"proxyImage,omitempty" jsonschema:"pattern=^[a-zA-Z0-9._-]+(:[0-9]+)?(/[a-zA-Z0-9._/-]+)?(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$,description=Image of the envoy proxy fleet in place of the release's default; repository:tag@sha256:<digest>. For an Envoy fix that no Envoy Gateway release ships yet. It also overrides the default of every later Envoy Gateway release until it is removed."`
+}
+
+var (
+	gatewayVersionPattern = regexp.MustCompile(`^v[0-9A-Za-z][0-9A-Za-z.+-]*$`)
+	sha256Pattern         = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	// gatewayProxyImagePattern is Envoy Gateway's own validation of an
+	// EnvoyProxy container image, with the digest made required.
+	gatewayProxyImagePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+(:[0-9]+)?(/[a-zA-Z0-9._/-]+)?(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$`)
+)
+
+// validateRelease checks version, installSha256 and proxyImage. That a
+// version is a strict vMAJOR.MINOR.PATCH is checked against the
+// cluster instead: a pre-release is allowed when it is what the
+// cluster already runs.
+func (g GatewayConfig) validateRelease() error {
+	switch {
+	case g.Version != "" && !gatewayVersionPattern.MatchString(g.Version):
+		return errInvalid("gateway.version %q must be a release tag such as v1.9.2", g.Version)
+	case g.Version != "" && g.InstallSHA256 == "":
+		return errInvalid("gateway.version %s requires gateway.installSha256: the sha256 of https://github.com/envoyproxy/gateway/releases/download/%s/install.yaml", g.Version, g.Version)
+	case g.Version == "" && g.InstallSHA256 != "":
+		return errInvalid("gateway.installSha256 is set without gateway.version; set both or neither")
+	case g.InstallSHA256 != "" && !sha256Pattern.MatchString(g.InstallSHA256):
+		return errInvalid("gateway.installSha256 %q must be a sha256: 64 hex characters", g.InstallSHA256)
+	case g.ProxyImage != "" && !gatewayProxyImagePattern.MatchString(g.ProxyImage):
+		return errInvalid("gateway.proxyImage %q must be an image reference with its digest: repository:tag@sha256:<64 lowercase hex characters>", g.ProxyImage)
+	}
+	return nil
 }
 
 // CertManagerConfig controls the bundled cert-manager install
@@ -520,6 +574,9 @@ func (c *CommonConfig) validateCommon(expected string) error {
 		if err := k3s.ValidateAdditions(c.K3s.ServerConfig); err != nil {
 			return errInvalid("%v", err)
 		}
+	}
+	if err := c.Gateway.validateRelease(); err != nil {
+		return err
 	}
 	if c.Gateway.DNSHintIP != "" {
 		if expected != ProviderHost {
