@@ -128,6 +128,7 @@ gateway:
 		if out, err := cliOutput(bin, nil, "platform", "install", "-c", cfgDir, "--check"); err != nil {
 			t.Errorf("%s: --check on a converged cluster: %v\n%s", release, err, out)
 		}
+		t.Logf("converged at %s: controller %s, proxy %s; a second install changed nothing and --check found nothing", release, controllerImage(), proxyImage())
 	}
 	// refused runs install and --check, expects both to fail with the
 	// rule and both releases named, and the cluster unchanged.
@@ -150,10 +151,12 @@ gateway:
 			if strings.Contains(string(out), "would change") {
 				t.Errorf("%v: a refused move reported as a diff:\n%s", args, out)
 			}
+			t.Logf("%s refused:\n%s", strings.Join(args, " "), lastLine(out))
 		}
 		if after, _ := objectVersions(t, contextName); after != before {
 			t.Errorf("a refused move changed objects:\nbefore:\n%s\nafter:\n%s", before, after)
 		}
+		t.Logf("%s to %s: nothing changed", installed, configured)
 	}
 
 	// 1. A release older than the pin, on a new cluster.
@@ -183,6 +186,11 @@ spec:
 	if !strings.Contains(string(out), "minor upgrade: best-effort") {
 		t.Errorf("a minor upgrade without its warning:\n%s", out)
 	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "minor upgrade: best-effort") {
+			t.Logf("platform install --gateway-allow-minor warned:\n%s", line)
+		}
+	}
 	pinnedProxy := "docker.io/envoyproxy/envoy:distroless-v1.39.1@sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4"
 	converged(envoygateway.Version, pinnedProxy)
 
@@ -202,6 +210,13 @@ spec:
 	configure("  version: " + gatewayNewerPatch + "\n  installSha256: " + gatewayNewerPatchSHA256 + "\n")
 	runCLI(t, bin, nil, "platform", "install", "-c", cfgDir)
 	converged(gatewayNewerPatch, pinnedProxy)
+}
+
+// lastLine is the last non-empty line of a command's output: the error
+// for a CLI that failed.
+func lastLine(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	return lines[len(lines)-1]
 }
 
 func applyStdin(t *testing.T, contextName, manifest string) {
